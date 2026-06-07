@@ -37,6 +37,19 @@ export interface FailingStep {
   description: string;
 }
 
+/** Real token accounting for a run. The pitch in one object:
+ *  - cheapModelTotal / cheapModelCached: what the FREE/cheap rungs (1+) actually
+ *    spent doing the looking — measured from envelope/usageMetadata counts.
+ *  - callsByRung: how many model calls landed on each rung (rung 0 = $0 Nano).
+ *  - verdictPayloadTokens: what the EXPENSIVE calling agent pays — the slim
+ *    5-field report it reads back (~chars/4). This is `tokenEstimate`'s meaning. */
+export interface ReportTokens {
+  cheapModelTotal: number;
+  cheapModelCached: number;
+  callsByRung: Record<number, number>;
+  verdictPayloadTokens: number;
+}
+
 export interface Report {
   // ---- slim contract: what the calling agent reads ----
   verdict: RunVerdict;
@@ -51,7 +64,11 @@ export interface Report {
   steps: StepRecord[];
   model_trace: ModelTraceEntry[];
   durationMs: number;
+  /** What the expensive calling agent pays = tokens.verdictPayloadTokens. */
   tokenEstimate: number;
+  /** Real token accounting (always set by the AI driver loop; absent on bare
+   * replay reports, which have no planner trace). */
+  tokens?: ReportTokens;
 }
 
 /** The 5-field verdict an MCP/CLI caller pays for. */

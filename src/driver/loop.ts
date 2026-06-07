@@ -428,13 +428,17 @@ export async function runDriverLoop(
     model_trace: router.trace,
     durationMs: Date.now() - t0,
     tokenEstimate: 0,
+    tokens: { cheapModelTotal: 0, cheapModelCached: 0, callsByRung: {}, verdictPayloadTokens: 0 },
   };
   report.evidence_paths = [
     ...steps.filter((s) => s.screenshot).map((s) => s.screenshot!),
   ];
   const reportPath = artifacts.saveReport(report);
   report.evidence_paths.unshift(reportPath);
-  report.tokenEstimate = Math.round(JSON.stringify(report.steps.length ? slimForEstimate(report) : {}).length / 4);
+  const tokens = computeTokens(report);
+  report.tokens = tokens;
+  // tokenEstimate keeps its product-doc meaning: what the calling agent pays.
+  report.tokenEstimate = tokens.verdictPayloadTokens;
   artifacts.saveReport(report); // rewrite with final paths + estimate
   return report;
 }
@@ -447,6 +451,26 @@ function slimForEstimate(r: Report) {
     evidence_paths: r.evidence_paths,
     reason: r.reason,
   };
+}
+
+/** Real token accounting. cheapModel* sum the measured per-call usage in the
+ * trace (the FREE/cheap-rung spend doing the looking); callsByRung counts every
+ * model call (rung 0 = $0 on-device Nano, whose tokens are irrelevant);
+ * verdictPayloadTokens = the slim 5-field report the EXPENSIVE caller reads back
+ * (~chars/4) — what the calling agent actually pays. */
+function computeTokens(r: Report): NonNullable<Report['tokens']> {
+  let cheapModelTotal = 0;
+  let cheapModelCached = 0;
+  const callsByRung: Record<number, number> = {};
+  for (const t of r.model_trace) {
+    callsByRung[t.rung] = (callsByRung[t.rung] ?? 0) + 1;
+    if (t.usage?.totalTokens) cheapModelTotal += t.usage.totalTokens;
+    if (t.usage?.cachedTokens) cheapModelCached += t.usage.cachedTokens;
+  }
+  const verdictPayloadTokens = Math.ceil(
+    JSON.stringify(r.steps.length ? slimForEstimate(r) : {}).length / 4,
+  );
+  return { cheapModelTotal, cheapModelCached, callsByRung, verdictPayloadTokens };
 }
 
 /* ---------- planning ---------- */

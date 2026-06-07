@@ -225,6 +225,64 @@ export class ExtensionBrowser implements BrowserPort {
     });
     await this.c.Input.insertText({ text });
     await sleep(150);
+
+    // ALWAYS verify the value landed — mirrors CdpBrowser.verifyTyped exactly so
+    // both transports behave identically (the v3 contract run is the parent's
+    // integration check; this code is byte-for-byte the CDP path over the shim).
+    // insertText satisfies React 18 controlled inputs (proven in v18 on the CDP
+    // transport, which shares the identical capture/executor helpers); the
+    // per-char fallback only engages on a real mismatch and closes the
+    // silent-typing-failure bug class.
+    await this.verifyTyped(backendNodeId, text);
+  }
+
+  /** Read the field's live `.value` via DOM.resolveNode → Runtime.callFunctionOn
+   * (Runtime.evaluate is not node-scoped). Mirrors CdpBrowser.liveValue. */
+  private async liveValue(backendNodeId: number): Promise<string | undefined> {
+    const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+    if (!object.objectId) return undefined;
+    try {
+      const { result } = await this.c.Runtime.callFunctionOn({
+        objectId: object.objectId,
+        functionDeclaration: 'function () { return this.value; }',
+        returnByValue: true,
+      });
+      return result.value as string | undefined;
+    } finally {
+      await this.c.Runtime.releaseObject({ objectId: object.objectId }).catch(() => {});
+    }
+  }
+
+  /** Confirm insertText took; else fall back to per-character key events and
+   * re-verify, throwing on hard failure. Mirrors CdpBrowser.verifyTyped. */
+  private async verifyTyped(backendNodeId: number, expected: string): Promise<void> {
+    if ((await this.liveValue(backendNodeId)) === expected) return;
+    await this.typeByKeyEvents(backendNodeId, expected);
+    const after = await this.liveValue(backendNodeId);
+    if (after !== expected) {
+      throw new Error(
+        `type() failed: field value is ${JSON.stringify(after)} after both insertText and ` +
+          `per-character key events (expected ${JSON.stringify(expected)})`,
+      );
+    }
+  }
+
+  /** Per-character fallback: Ctrl+A clear then keyDown/char/keyUp per char.
+   * Slow but bulletproof. Mirrors CdpBrowser.typeByKeyEvents. */
+  private async typeByKeyEvents(backendNodeId: number, text: string): Promise<void> {
+    await this.c.DOM.focus({ backendNodeId });
+    await this.c.Input.dispatchKeyEvent({
+      type: 'rawKeyDown', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65,
+    });
+    await this.c.Input.dispatchKeyEvent({
+      type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65,
+    });
+    for (const ch of text) {
+      await this.c.Input.dispatchKeyEvent({ type: 'keyDown', text: ch, unmodifiedText: ch, key: ch });
+      await this.c.Input.dispatchKeyEvent({ type: 'char', text: ch, unmodifiedText: ch, key: ch });
+      await this.c.Input.dispatchKeyEvent({ type: 'keyUp', key: ch });
+    }
+    await sleep(100);
   }
 
   async screenshot(): Promise<Buffer> {

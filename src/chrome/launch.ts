@@ -47,6 +47,12 @@ export async function ensureChrome(opts: LaunchOptions): Promise<void> {
     `--user-data-dir=${opts.profileDir}`,
     '--no-first-run',
     '--no-default-browser-check',
+    // Without these, Windows occlusion tracking can throttle an unfocused/
+    // covered window enough that CDP-dispatched clicks are swallowed during
+    // long planner pauses (observed twice in live AI runs as no-op clicks).
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-background-timer-throttling',
     `--window-size=${opts.windowSize ?? '1366,960'}`,
   ];
   if (opts.headless) args.push('--headless=new', '--disable-gpu');

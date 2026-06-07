@@ -58,11 +58,13 @@
 - [x] README (about, how it works, stack, workflow, timeline) · architecture explainer (non-expert) · CLAUDE.md · Apache-2.0
 
 ### MVP follow-ups (known gaps, not blockers)
-- [ ] Dogfood against a real app (MontrAI social module) — first non-fixture target
-- [ ] Planner latency: ~15–20s/step on free CLI quota (CLI boot dominates) — consider persistent BYOK planning as default-when-key-present
-- [ ] `Input.insertText` vs React controlled inputs — add key-event fallback when a real app needs it
+- [ ] Dogfood against a real app (MontrAI social module) — user is preparing; will test on a different app
+- [ ] Planner latency: ~12–20s/call on free CLI quota (CLI boot dominates) — consider persistent BYOK planning as default-when-key-present
+- [x] React controlled inputs: SETTLED — `Input.insertText` satisfies React 18 (fires beforeinput/input like IME; `test/v18.react-typing.ts` 4/4 against real React + `/react` fixture route). Defense-in-depth added anyway: type() always verifies the live `.value`, falls back to per-char key events, throws precisely — silent typing failures are dead
 - [ ] a11y-tree size on real SPAs — measure, tune the truncation window
-- [ ] `tokenEstimate` in report is rough — measure real prompt+verdict token spend per run
+- [x] Token accounting is REAL now: adapters report exact usage (gemini CLI `-o json` stats / BYOK usageMetadata) → `model_trace[].usage` + `report.tokens {cheapModelTotal, cheapModelCached, callsByRung, verdictPayloadTokens}`. Measured run: caller pays **84 tokens** vs Playwright MCP ~114K → `docs/benchmark.md` (the HN table)
+- [x] Phantom click no-ops in headed cdp runs ROOT-CAUSE MITIGATED: Windows occlusion throttling — Chrome now launches with `--disable-backgrounding-occluded-windows` etc. + CdpBrowser brings the tab to front before input (matching ExtensionBrowser); the earlier clip-recorder suspicion was a red herring
+- [x] Fixture served HTML without charset → mojibake the visual check correctly FAILED on (the QA agent caught a real bug in its own fixture) — `charset=utf-8` added to both fixtures
 
 ---
 
@@ -107,7 +109,8 @@
 - [~] **Replay clip export (GIF)**: `src/clip/screencast.ts` works over raw CDP (v14: 27KB gif) and is wired into the engine, but **OPT-IN (`QA_RECORD_CLIP=1`) and cdp-transport only** for now: (a) chrome.debugger does NOT expose Page.startScreencast → extension/vibe mode needs a `chrome.tabCapture`-based recorder (the real product target); (b) one cdp run on the warm daemon Chrome had post-nav clicks no-op with screencast active, unreproducible on fresh profiles (`test/v16.clip-input-interaction.ts` all clean). Engine guards clip start with a 5s timeout. MP4/watermark also open.
 - [x] Onboarding full flow: panel "Download on-device AI (~2 GB)" button w/ progress bar (SW + offscreen paths), 22GB-gate explanation on 'unavailable'
 - [x] Panel polish: cancel/Stop button (vibe.cancel → AbortSignal through the driver), run history (storage.local, 10 entries), step ticks landed last round
-- [ ] Panel polish round 2: MP4 export, watermark, share button
+- [~] Vibe clip v2 (tabCapture→MediaRecorder→webm): plumbing SHIPPED (`rec.*` bridge ops, offscreen MediaRecorder, daemon saves `artifacts/<runId>/replay.webm`, `clipPath` in vibe.done, ⚡ watermark badge in-frame) — but tabCapture's invocation gating fails in headless dev-loads (graceful {ok:false}); needs a MANUAL headed verification: real panel run → check replay.webm appears. MP4 + share button later
+- [ ] Web Store submission checklist (from pack script): ≥1 screenshot 1280×800, privacy policy URL (debugger + <all_urls> permissions), permission justifications, listing copy. Icons ✓ (extension/icons, gen via scripts/gen-icons.ts), zip ✓ (`npm run pack:extension` → dist/extension.zip, 41.6KB), npm pack dry-run ✓ (private:false, files allowlist)
 
 ### Quality gate
 - [x] Headless e2e (`test/v9.vibe-flow.ts`): real daemon service + real extension SW; vibe.run accepted (concurrent refused), progress + ghost-cursor events flow, vibe.done carries fail verdict + plain report + paste-ready fix prompt on the bug-on fixture
@@ -123,7 +126,7 @@
 - [x] `src/vibe/auto-fix.ts`: agent auto-detect (claude→codex→gemini on PATH), stdin/file prompt delivery (Windows .cmd argv quoting solved), 15-min timeout, streamed output
 - [x] `qa run --fix [--max-fix-attempts N]` (runWithAutoFix loop) + `qa fix <runId> --apply`
 - [x] Panel: "🤖 Auto-fix with my coding agent" button on FAIL (vibe.fix → fix-progress/fix-done events)
-- [ ] e2e with a REAL coding agent against an on-disk buggy app (v12 uses a stub agent)
+- [x] e2e with a REAL coding agent: `test/e2e.autofix-real.ts` (gated on QA_REAL_AGENT_E2E=1 — spends real tokens) + on-disk `test/fixtures/buggy-shop/`. PROVEN: red → real `claude -p` edits checkout.js (adds the missing `total`) → green, ~5.7min wall. Gotchas solved: serve the agent's temp copy, cache-bust scripts, deterministic sync throw
 
 ## Phase 4 — Later (tracked, not scoped)
 

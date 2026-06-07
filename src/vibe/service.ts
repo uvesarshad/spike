@@ -29,11 +29,18 @@
  * AbortController whose signal is threaded into qaRun (engine owns QaRunOptions.
  * signal). */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import type { BridgeServer } from '../bridge/bridge-server.js';
 import { qaRun, type QaRunOptions } from '../engine.js';
+import { loadConfig } from '../config.js';
 import { slimReport, type Report } from '../report/report.js';
 import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
 import { dispatchFix } from './auto-fix.js';
+
+/** Shape of the extension's rec.start / rec.stop bridge responses. */
+interface RecStartResult { ok: boolean; reason?: string; mime?: string }
+interface RecStopResult { ok: boolean; reason?: string; webmBase64?: string; bytes?: number; mime?: string }
 
 export class VibeService {
   private busy = false;
@@ -84,6 +91,27 @@ export class VibeService {
   private async execute(task: string, url: string, tabId?: number): Promise<void> {
     const controller = new AbortController();
     this.activeRun = controller;
+    const progress = (line: string) => this.bridge.sendEvent('vibe.progress', { line });
+
+    // Replay recording brackets the run. Only attempt it on REAL panel runs
+    // (tabId present): tabCapture needs the extension to have been invoked on a
+    // real tab — there's no clip for the create-a-tab/test path. Every recorder
+    // call is failure-tolerant; the clip is a nice-to-have, never a run blocker.
+    let recording = false;
+    if (typeof tabId === 'number') {
+      try {
+        const start = await this.bridge.call<RecStartResult>('rec.start', { tabId }, 20_000);
+        if (start && start.ok) {
+          recording = true;
+          progress('recording replay clip…');
+        } else {
+          progress(`clip unavailable: ${start?.reason ?? 'recorder declined to start'}`);
+        }
+      } catch (e) {
+        progress(`clip unavailable: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     try {
       // The engine agent is adding QaRunOptions.signal; until that lands the
       // structural cast keeps this typechecking. TODO: drop the cast once
@@ -93,11 +121,17 @@ export class VibeService {
         tabId,
         config: { via: 'extension' as const },
         record: false,
-        onProgress: (line: string) => this.bridge.sendEvent('vibe.progress', { line }),
+        onProgress: progress,
         onStep: (info) => this.bridge.sendEvent('vibe.step', info),
         signal: controller.signal,
       } as QaRunOptions & { signal?: AbortSignal };
       const report = await qaRun(task, url, runOpts);
+
+      // Stop recording and persist the webm (failure-tolerant — a missing clip
+      // never changes the verdict). Keyed by the report's runId so it lands
+      // alongside report.json + screenshots.
+      const clipPath = recording ? await this.stopAndSaveClip(report.runId, progress) : undefined;
+
       // Stash a failure so the panel can offer "fix it"; clear on success.
       this.lastFailedReport = report.verdict === 'pass' ? null : report;
       this.bridge.sendEvent('vibe.done', {
@@ -105,14 +139,44 @@ export class VibeService {
         plainReport: renderPlainReport(report),
         fixPrompt: buildFixPrompt(report),
         durationMs: report.durationMs,
+        ...(clipPath ? { clipPath } : {}),
       });
     } catch (e) {
+      // A run failure must not leave a recorder running in the offscreen doc.
+      if (recording) { try { await this.bridge.call('rec.stop', {}, 25_000); } catch { /* best effort */ } }
       this.bridge.sendEvent('vibe.error', {
         message: e instanceof Error ? e.message : String(e),
       });
     } finally {
       this.busy = false;
       this.activeRun = null;
+    }
+  }
+
+  /** Stop the extension recorder, decode the webm, write artifacts/<runId>/replay.webm.
+   * Returns the path on success, undefined otherwise. Never throws. */
+  private async stopAndSaveClip(runId: string, progress: (line: string) => void): Promise<string | undefined> {
+    try {
+      const stop = await this.bridge.call<RecStopResult>('rec.stop', {}, 30_000);
+      if (!stop || !stop.ok || !stop.webmBase64) {
+        progress(`clip unavailable: ${stop?.reason ?? 'recorder returned no data'}`);
+        return undefined;
+      }
+      const buf = Buffer.from(stop.webmBase64, 'base64');
+      // sanity: webm/Matroska EBML magic 0x1A45DFA3
+      if (buf.length < 4 || !(buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3)) {
+        progress('clip unavailable: recorded bytes are not a valid webm');
+        return undefined;
+      }
+      const dir = path.join(loadConfig({}).artifactsDir, runId);
+      fs.mkdirSync(dir, { recursive: true });
+      const clipPath = path.join(dir, 'replay.webm');
+      fs.writeFileSync(clipPath, buf);
+      progress(`replay clip: ${clipPath} (${Math.round(buf.length / 1024)} KB)`);
+      return clipPath;
+    } catch (e) {
+      progress(`clip unavailable: ${e instanceof Error ? e.message : String(e)}`);
+      return undefined;
     }
   }
 

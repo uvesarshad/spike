@@ -1,14 +1,14 @@
-/* Dogfood fixture — a small interactive shop with an intentional, toggleable bug.
+﻿/* Dogfood fixture â€” a small interactive shop with an intentional, toggleable bug.
  *
- * Flow: /login (test@test.com / pw) → /products (add to cart, sessionStorage)
- *       → /cart (spike B's discount logic) → /checkout → /success
+ * Flow: /login (test@test.com / pw) â†’ /products (add to cart, sessionStorage)
+ *       â†’ /cart (spike B's discount logic) â†’ /checkout â†’ /success
  *
  * Bug mode (FIXTURE_BUG=on or startFixture(port, true)):
- *   - buildOrder() omits `total` → "Place order" throws reading order.total
+ *   - buildOrder() omits `total` â†’ "Place order" throws reading order.total
  *     (the page's error listener renders the classic red "Application error"
  *     banner, echoing spike A's bad.html)
  *   - POST /api/order returns 500
- *   → one click yields [PAGE-ERROR] + failed network + a visibly broken page:
+ *   â†’ one click yields [PAGE-ERROR] + failed network + a visibly broken page:
  *     exercises console, network and Nano-vision evidence paths at once.
  * Healthy mode reaches /success with a confirmation message. */
 
@@ -43,11 +43,11 @@ ${NAV}<div class="wrap">${body}</div>${ERROR_LISTENER}</body></html>`;
 
 function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, string> {
   // v2 simulates UI drift for self-heal testing: same flow, the checkout
-  // button is renamed — recorded scripts that click "Place order" must break
+  // button is renamed â€” recorded scripts that click "Place order" must break
   const placeOrderLabel = variant === 'v2' ? 'Confirm purchase' : 'Place order';
   return {
     '/login': page(
-      'Sign in — Acme Shop',
+      'Sign in â€” Acme Shop',
       `<div class="card"><h2>Sign in</h2>
       <label>Email <input id="email" type="email" autocomplete="off"></label>
       <label>Password <input id="password" type="password"></label>
@@ -64,10 +64,10 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     ),
 
     '/products': page(
-      'Products — Acme Shop',
+      'Products â€” Acme Shop',
       `<h2>Products</h2>
-      <div class="card"><b>Widget</b> — $49.99 <button class="add" data-name="Widget" data-price="49.99">Add Widget to cart</button></div>
-      <div class="card"><b>Gadget</b> — $25.00 <button class="add" data-name="Gadget" data-price="25.00">Add Gadget to cart</button></div>
+      <div class="card"><b>Widget</b> â€” $49.99 <button class="add" data-name="Widget" data-price="49.99">Add Widget to cart</button></div>
+      <div class="card"><b>Gadget</b> â€” $25.00 <button class="add" data-name="Gadget" data-price="25.00">Add Gadget to cart</button></div>
       <p id="cart-status">Cart: 0 items</p>
       <button id="goto-cart">Go to cart</button>
       <script>
@@ -84,7 +84,7 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     ),
 
     '/cart': page(
-      'Cart — Acme Shop',
+      'Cart â€” Acme Shop',
       `<h2>Your cart</h2>
       <div class="card"><ul id="items"></ul><p id="cart-total">Total: $0.00</p></div>
       <button id="checkout">Checkout</button>
@@ -95,7 +95,7 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
       for (const item of cart) {
         total += item.price;
         const li = document.createElement('li');
-        li.textContent = item.name + ' — $' + item.price.toFixed(2);
+        li.textContent = item.name + ' â€” $' + item.price.toFixed(2);
         ul.appendChild(li);
       }
       // spike B's silent-discount logic: 10% off at $100+
@@ -107,18 +107,18 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     ),
 
     '/checkout': page(
-      'Checkout — Acme Shop',
+      'Checkout â€” Acme Shop',
       `<h2>Checkout</h2>
-      <div class="card"><p id="summary">Loading order…</p><p id="charged"></p></div>
+      <div class="card"><p id="summary">Loading orderâ€¦</p><p id="charged"></p></div>
       <p id="api-error" class="inline-error"></p>
       <button id="place-order">${placeOrderLabel}</button>
       <script>
       const cart = JSON.parse(sessionStorage.getItem('cart') || '[]');
       const total = Number(sessionStorage.getItem('total') || '0');
-      document.getElementById('summary').textContent = cart.length + ' item(s) — total $' + total.toFixed(2);
+      document.getElementById('summary').textContent = cart.length + ' item(s) â€” total $' + total.toFixed(2);
       function buildOrder() {
         ${bug
-          ? `return { items: cart }; // BUG: total missing → order.total is undefined`
+          ? `return { items: cart }; // BUG: total missing â†’ order.total is undefined`
           : `return { items: cart, total: total };`}
       }
       document.getElementById('place-order').addEventListener('click', () => {
@@ -138,10 +138,64 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     ),
 
     '/success': page(
-      'Order confirmed — Acme Shop',
-      `<h2>Order confirmed 🎉</h2>
+      'Order confirmed â€” Acme Shop',
+      `<h2>Order confirmed ðŸŽ‰</h2>
       <div class="card"><p id="confirmation">Thank you! Your order has been placed successfully.</p></div>`,
     ),
+
+    // React 18 CONTROLLED-input trap (always served, independent of bug mode).
+    // The login form is fully controlled (value={state} + onChange). The submit
+    // button stays DISABLED until email==='test@test.com' && password==='pw'.
+    // If the driver's type() doesn't reach React's state (React tracks input
+    // value via its own descriptor-level bookkeeping, not the raw DOM .value),
+    // onChange never fires, state never updates, and the button never enables â€”
+    // so this route empirically settles whether Input.insertText satisfies React.
+    '/react': `<!DOCTYPE html><html><head><title>React login â€” Acme Shop</title>${STYLE}</head><body>
+${NAV}<div class="wrap"><div id="root"><p id="react-fallback">Loading Reactâ€¦</p></div></div>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script>
+// Inline fallback note: if the unpkg CDN is unreachable, React/ReactDOM are
+// undefined and the page stays on "Loading Reactâ€¦" â€” the test will then fail
+// fast at the axTree step (no email textbox), signalling a network problem
+// rather than a typing bug. (This machine has internet per CLAUDE.md.)
+window.addEventListener('load', () => {
+  if (!window.React || !window.ReactDOM) {
+    document.getElementById('react-fallback').textContent =
+      'React CDN unavailable (unpkg unreachable) â€” controlled-input test cannot run.';
+    return;
+  }
+  const { useState, createElement: h } = React;
+  function LoginForm() {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
+    const [submitted, setSubmitted] = useState(false);
+    const canSubmit = email === 'test@test.com' && password === 'pw';
+    if (submitted) {
+      return h('div', { className: 'card' }, h('h2', { id: 'welcome' }, 'Welcome!'));
+    }
+    return h('div', { className: 'card' },
+      h('h2', null, 'Sign in (React controlled)'),
+      h('label', null, 'Email ',
+        h('input', {
+          id: 'email', type: 'email', 'aria-label': 'Email', autoComplete: 'off',
+          value: email, onChange: (e) => setEmail(e.target.value),
+        })),
+      h('label', null, 'Password ',
+        h('input', {
+          id: 'password', type: 'password', 'aria-label': 'Password',
+          value: password, onChange: (e) => setPassword(e.target.value),
+        })),
+      h('button', {
+        id: 'react-signin', disabled: !canSubmit,
+        onClick: () => setSubmitted(true),
+      }, 'Sign in'),
+    );
+  }
+  ReactDOM.createRoot(document.getElementById('root')).render(h(LoginForm));
+});
+</script>
+</body></html>`,
   };
 }
 
@@ -165,7 +219,7 @@ export function startFixture(port: number, bug: boolean, variant: FixtureVariant
       return;
     }
     const body = routes[url] ?? routes['/login'];
-    res.setHeader('content-type', 'text/html');
+    res.setHeader('content-type', 'text/html; charset=utf-8');
     res.end(body);
   });
   server.listen(port);

@@ -561,6 +561,85 @@ chrome.runtime.onMessage.addListener((msg) => {
   return false; // no response needed
 });
 
+// ---- replay recording (chrome.tabCapture → offscreen MediaRecorder → webm) --
+//
+// The offscreen document (the SAME one Nano uses — chrome.offscreen permits only
+// one per extension) hosts the MediaRecorder. The SW's job here is:
+//   rec.start {tabId} : mint a stream id with chrome.tabCapture.getMediaStreamId
+//                       ({targetTabId:tabId}), ensure the offscreen doc, relay
+//                       the streamId so the offscreen opens getUserMedia + starts
+//                       MediaRecorder.
+//   rec.stop {}       : tell the offscreen to stop, assemble the webm, base64 it,
+//                       and return { webmBase64, bytes }.
+//
+// INVOCATION GATING: chrome.tabCapture.getMediaStreamId requires the extension to
+// have been INVOKED on the tab (action click / activeTab-style gesture). The side
+// panel does not cleanly count as an invocation, but with the "<all_urls>" host
+// permission (which this extension holds) the product path generally succeeds.
+// In a headless dev-loaded Chrome there is no gesture at all, so getMediaStreamId
+// throws — we surface that as { ok:false, reason } and the run continues WITHOUT
+// a clip. Recording must NEVER fail a run.
+
+/** Promise wrapper for chrome.tabCapture.getMediaStreamId. */
+function getMediaStreamId(targetTabId) {
+  return new Promise((resolve, reject) => {
+    try {
+      if (!chrome.tabCapture || !chrome.tabCapture.getMediaStreamId) {
+        reject(new Error('chrome.tabCapture.getMediaStreamId unavailable (missing "tabCapture" permission?)'));
+        return;
+      }
+      chrome.tabCapture.getMediaStreamId({ targetTabId }, (streamId) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else if (!streamId) {
+          reject(new Error('getMediaStreamId returned no streamId'));
+        } else {
+          resolve(streamId);
+        }
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+/** Begin recording the given tab. Resolves { ok, reason? }; never throws. */
+async function recStart(tabId) {
+  if (typeof tabId !== 'number') return { ok: false, reason: 'rec.start requires a numeric tabId' };
+  if (!chrome.offscreen) return { ok: false, reason: 'chrome.offscreen unavailable — cannot host the recorder' };
+  let streamId;
+  try {
+    streamId = await getMediaStreamId(tabId);
+  } catch (e) {
+    // The canonical invocation-gating failure lands here. Degrade gracefully.
+    return {
+      ok: false,
+      reason: 'tabCapture not permitted (extension not invoked on this tab / no user gesture): ' +
+        String(e && e.message ? e.message : e),
+    };
+  }
+  try {
+    await ensureOffscreen();
+    const resp = await chrome.runtime.sendMessage({ target: 'nano-offscreen', op: 'rec.start', args: { streamId } });
+    if (!resp) return { ok: false, reason: 'no response from recorder offscreen document' };
+    return resp; // { ok:true, mime } | { ok:false, reason }
+  } catch (e) {
+    return { ok: false, reason: 'rec.start relay failed: ' + String(e && e.message ? e.message : e) };
+  }
+}
+
+/** Stop recording and return the webm as base64. Resolves { ok, webmBase64?, bytes?, reason? }. */
+async function recStop() {
+  if (!chrome.offscreen) return { ok: false, reason: 'chrome.offscreen unavailable' };
+  try {
+    const resp = await chrome.runtime.sendMessage({ target: 'nano-offscreen', op: 'rec.stop', args: {} });
+    if (!resp) return { ok: false, reason: 'no response from recorder offscreen document' };
+    return resp; // { ok:true, webmBase64, bytes, mime } | { ok:false, reason }
+  } catch (e) {
+    return { ok: false, reason: 'rec.stop relay failed: ' + String(e && e.message ? e.message : e) };
+  }
+}
+
 async function handleRequest(msg) {
   const { id, method, params = {} } = msg;
   try {
@@ -617,6 +696,23 @@ async function handleRequest(msg) {
       }
       case 'nano.verdict': {
         result = await withSwTimeout(nanoVerdict(params.dataUrl, params.task), 5 * 60_000, 'nano.verdict');
+        break;
+      }
+      case 'rec.start': {
+        // recStart already swallows its own errors into { ok:false, reason };
+        // wrap in a timeout so a hung getUserMedia can't pin the bridge call.
+        result = await Promise.race([
+          recStart(params.tabId),
+          new Promise((resolve) => setTimeout(() => resolve({ ok: false, reason: 'rec.start timed out in the extension' }), 15_000)),
+        ]);
+        break;
+      }
+      case 'rec.stop': {
+        // Generous: assembling + base64-ing a multi-MB webm takes a moment.
+        result = await Promise.race([
+          recStop(),
+          new Promise((resolve) => setTimeout(() => resolve({ ok: false, reason: 'rec.stop timed out in the extension' }), 25_000)),
+        ]);
         break;
       }
       default:

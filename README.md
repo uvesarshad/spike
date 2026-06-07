@@ -108,6 +108,28 @@ claude mcp add qa -- node E:\path\to\repo\dist\mcp-server.js
 
 …then any agent in that session can call `qa_run(task, url)`.
 
+## Installing
+
+**CLI / daemon (npm).** Once published you can run it without a clone:
+
+```powershell
+npx browser-qa-subagent run "<task>" --url http://localhost:3000
+# or install the `qa` binary globally:
+npm i -g browser-qa-subagent
+qa run "<task>" --url http://localhost:3000
+```
+
+Until then, use the local checkout (`npm install && npm run build`, then `node dist/cli.js …` as shown above).
+
+**Chrome extension (vibe mode).** The MV3 extension — side-panel chat, ghost-cursor overlay, native Nano access in your real logged-in Chrome — is **coming soon to the Chrome Web Store**. To run it today as an unpacked dev extension:
+
+1. `npm run pack:extension` (or just point Chrome at the `extension/` folder directly).
+2. Open `chrome://extensions`, enable **Developer mode** (top-right).
+3. Click **Load unpacked** and select the `extension/` directory (or unzip `dist/extension.zip` and select that).
+4. Pin the extension and click it to open the QA side panel.
+
+The extension uses the `debugger` permission to drive the page over CDP; Chrome shows a banner while a debug session is attached.
+
 Prerequisites: Node 20+, desktop Chrome 138+ (148+ for multimodal Nano), and for rung 1 a logged-in [`gemini` CLI](https://geminicli.com). Without Nano the ladder starts at rung 1; without the CLI, set `GEMINI_API_KEY` (rung 2). Configuration via `qa.config.json` / env (`QA_CDP_PORT`, `QA_CHROME_PROFILE`, `QA_GOOGLE_CLI_BIN`…) — see `src/config.ts`.
 
 ## Project structure

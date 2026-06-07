@@ -38,6 +38,7 @@
   const CAPTION_ID = '__qa_ghost_caption__';
   const BADGE_ID = '__qa_agent_badge__';
   const GLOW_ID = '__qa_agent_glow__';
+  const WATERMARK_ID = '__qa_watermark__';
   const STYLE_ID = '__qa_ghost_style__';
 
   // The arrow SVG is drawn so the tip of the arrow sits at the SVG's (0,0)
@@ -51,6 +52,7 @@
   let captionEl = null;
   let badgeEl = null;
   let glowEl = null;
+  let watermarkEl = null;
   let built = false;
 
   // agent-working state + safety auto-clear
@@ -204,10 +206,35 @@
       });
       document.documentElement.appendChild(glowEl);
     }
+
+    // Bottom-right watermark — small + subtle, present in the replay recording
+    // so a shared clip is self-identifying. Lower z-index than caption/badge.
+    watermarkEl = document.getElementById(WATERMARK_ID);
+    if (!watermarkEl) {
+      watermarkEl = document.createElement('div');
+      watermarkEl.id = WATERMARK_ID;
+      watermarkEl.textContent = '⚡ QA Subagent';
+      Object.assign(watermarkEl.style, {
+        position: 'fixed',
+        bottom: '10px',
+        right: '12px',
+        background: 'rgba(22,22,28,0.62)',
+        color: 'rgba(255,255,255,0.92)',
+        font: '600 11px system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+        letterSpacing: '0.2px',
+        padding: '4px 9px',
+        borderRadius: '999px',
+        boxShadow: '0 1px 6px rgba(0,0,0,0.28)',
+        zIndex: '2147483645',
+        pointerEvents: 'none',
+        userSelect: 'none',
+      });
+      document.documentElement.appendChild(watermarkEl);
+    }
   }
 
   function hideAgentChrome() {
-    for (const id of [BADGE_ID, GLOW_ID]) {
+    for (const id of [BADGE_ID, GLOW_ID, WATERMARK_ID]) {
       const el = document.getElementById(id);
       if (el) {
         try { el.remove(); } catch (e) { /* already gone */ }
@@ -215,6 +242,7 @@
     }
     badgeEl = null;
     glowEl = null;
+    watermarkEl = null;
     if (captionEl) captionEl.style.opacity = '0';
   }
 

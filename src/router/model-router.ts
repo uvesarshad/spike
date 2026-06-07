@@ -3,7 +3,7 @@
  * report.model_trace and the "$0 common case" benchmark story. */
 
 import type { NanoVerdict } from '../ports/nano-port.js';
-import type { Capability, ModelAdapter } from './adapter.js';
+import type { AdapterUsage, Capability, ModelAdapter } from './adapter.js';
 import { VERDICT_JSON_SCHEMA, verdictPrompt } from './verdict.js';
 
 export interface ModelTraceEntry {
@@ -14,6 +14,9 @@ export interface ModelTraceEntry {
   ms: number;
   escalatedFrom?: string;
   note?: string;
+  /** Token counts for this call, when the adapter reported any (rung 0/local
+   * adapters leave it undefined). Copied from adapter.lastUsage post-call. */
+  usage?: AdapterUsage;
 }
 
 export class ModelRouter {
@@ -64,6 +67,7 @@ export class ModelRouter {
           ms: Date.now() - t0,
           escalatedFrom,
           note: verdict.verdict === 'uncertain' ? 'uncertain → escalate' : undefined,
+          usage: adapter.lastUsage,
         });
         if (verdict.verdict !== 'uncertain') return verdict;
         lastUncertain = verdict;
@@ -107,6 +111,7 @@ export class ModelRouter {
           adapter: adapter.name,
           ms: Date.now() - t0,
           escalatedFrom,
+          usage: adapter.lastUsage,
         });
         return result;
       } catch (e) {

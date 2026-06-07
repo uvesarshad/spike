@@ -79,6 +79,11 @@ export class CdpBrowser implements BrowserPort {
 
   async click(nodeId: string): Promise<void> {
     const backendNodeId = this.backendNodeId(nodeId);
+    // Mirror ExtensionBrowser: foreground the tab before input. Raw CDP input
+    // usually works on background tabs, but occluded-window throttling has
+    // twice swallowed clicks in live headed runs — bringToFront removes the
+    // variable (and the headed window is the "watch the robot" show anyway).
+    await this.c.Page.bringToFront().catch(() => {});
     await this.c.DOM.scrollIntoViewIfNeeded({ backendNodeId }).catch(() => {});
     const { model } = await this.c.DOM.getBoxModel({ backendNodeId });
     const quad = model.content;
@@ -117,6 +122,66 @@ export class CdpBrowser implements BrowserPort {
     // semantics the planner prompt promises.
     await this.c.Input.insertText({ text });
     await sleep(150);
+
+    // ALWAYS verify the value actually landed. insertText satisfies React 18
+    // controlled inputs (it dispatches beforeinput/input like IME insertion —
+    // proven by test/v18.react-typing.ts), but rarer inputs (some masked /
+    // heavily-controlled widgets) can swallow it. One cheap read closes the
+    // silent-typing-failure bug class for good; the slow per-char path only
+    // engages on a real mismatch.
+    await this.verifyTyped(backendNodeId, text);
+  }
+
+  /** Read the field's live `.value` (Runtime.evaluate is NOT node-scoped — go
+   * via DOM.resolveNode → Runtime.callFunctionOn on the resolved objectId). */
+  private async liveValue(backendNodeId: number): Promise<string | undefined> {
+    const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+    if (!object.objectId) return undefined;
+    try {
+      const { result } = await this.c.Runtime.callFunctionOn({
+        objectId: object.objectId,
+        functionDeclaration: 'function () { return this.value; }',
+        returnByValue: true,
+      });
+      return result.value as string | undefined;
+    } finally {
+      await this.c.Runtime.releaseObject({ objectId: object.objectId }).catch(() => {});
+    }
+  }
+
+  /** Confirm insertText took; if not, fall back to per-character key events
+   * (the slow-but-bulletproof path) and re-verify, throwing on a hard failure. */
+  private async verifyTyped(backendNodeId: number, expected: string): Promise<void> {
+    if ((await this.liveValue(backendNodeId)) === expected) return;
+    // Fallback: re-select-all, then type each char as a full keyDown/char/keyUp.
+    await this.typeByKeyEvents(backendNodeId, expected);
+    const after = await this.liveValue(backendNodeId);
+    if (after !== expected) {
+      throw new Error(
+        `type() failed: field value is ${JSON.stringify(after)} after both insertText and ` +
+          `per-character key events (expected ${JSON.stringify(expected)})`,
+      );
+    }
+  }
+
+  /** Per-character fallback: clear via Ctrl+A then dispatch keyDown/char/keyUp
+   * for every character so even inputs that ignore insertText receive real key
+   * events. Slow but bulletproof. */
+  private async typeByKeyEvents(backendNodeId: number, text: string): Promise<void> {
+    await this.c.DOM.focus({ backendNodeId });
+    await this.c.Input.dispatchKeyEvent({
+      type: 'rawKeyDown', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65,
+    });
+    await this.c.Input.dispatchKeyEvent({
+      type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65,
+    });
+    // Replace the now-selected content with the first keystroke onward.
+    for (const ch of text) {
+      await this.c.Input.dispatchKeyEvent({ type: 'keyDown', text: ch, unmodifiedText: ch, key: ch });
+      await this.c.Input.dispatchKeyEvent({ type: 'char', text: ch, unmodifiedText: ch, key: ch });
+      await this.c.Input.dispatchKeyEvent({ type: 'keyUp', key: ch });
+    }
+    await sleep(100);
   }
 
   async screenshot(): Promise<Buffer> {

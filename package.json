@@ -4,18 +4,48 @@
   "description": "Browser QA/debug subagent: a cheap-model ladder drives a real Chrome and returns a ~2K-token verdict to your coding agent.",
   "type": "module",
   "license": "Apache-2.0",
-  "private": true,
+  "private": false,
+  "keywords": [
+    "browser",
+    "qa",
+    "testing",
+    "chrome",
+    "cdp",
+    "chrome-devtools-protocol",
+    "mcp",
+    "ai-agent",
+    "gemini-nano",
+    "coding-agent",
+    "claude-code"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/uvesarshad/browser-qa-subagent.git"
+  },
+  "homepage": "https://github.com/uvesarshad/browser-qa-subagent#readme",
+  "bugs": {
+    "url": "https://github.com/uvesarshad/browser-qa-subagent/issues"
+  },
   "engines": {
     "node": ">=20"
   },
   "bin": {
     "qa": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "extension",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "tsx test/e2e.run-fixture.ts"
+    "test:e2e": "tsx test/e2e.run-fixture.ts",
+    "gen:icons": "tsx scripts/gen-icons.ts",
+    "pack:extension": "tsx scripts/pack-extension.ts",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

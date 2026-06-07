@@ -13,12 +13,26 @@ export interface JsonRequest {
   imagePng?: Buffer;
 }
 
+/** Per-call token accounting. An adapter sets this AFTER each generateJson()
+ * that has real counts to report (the router copies it into the trace right
+ * after the call resolves). Optional throughout: rung-0 Nano is on-device ($0,
+ * no meaningful tokens) and Ollama is local — both leave it undefined. */
+export interface AdapterUsage {
+  promptTokens?: number;
+  outputTokens?: number;
+  totalTokens?: number;
+  cachedTokens?: number;
+}
+
 export interface ModelAdapter {
   readonly name: string;
   readonly rung: 0 | 1 | 2 | 3;
   available(): Promise<boolean>;
   supports(cap: Capability): boolean;
   generateJson(req: JsonRequest): Promise<unknown>;
+  /** Token usage from the MOST RECENT generateJson() call, when the adapter can
+   * surface it. The router reads this immediately after each successful call. */
+  lastUsage?: AdapterUsage;
 }
 
 /** Pull the first JSON object out of model output that may have prose around it. */

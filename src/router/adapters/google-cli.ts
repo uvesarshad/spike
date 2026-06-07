@@ -19,8 +19,44 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import type { Capability, JsonRequest, ModelAdapter } from '../adapter.js';
+import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson } from '../adapter.js';
+
+/** The per-model token block in the -o json envelope:
+ * stats.models[<model>].tokens = { input, prompt, candidates, total, cached, thoughts }. */
+interface GeminiTokens {
+  input?: number;
+  prompt?: number;
+  candidates?: number;
+  total?: number;
+  cached?: number;
+  thoughts?: number;
+}
+
+/** Pull usage from the envelope's stats.models. The model key varies (it's the
+ * resolved model id, which may differ from what we requested), so take the
+ * FIRST key. Returns undefined when there are no parseable counts. */
+function parseEnvelopeUsage(
+  stats: { models?: Record<string, { tokens?: GeminiTokens }> } | undefined,
+): AdapterUsage | undefined {
+  const models = stats?.models;
+  if (!models) return undefined;
+  const firstKey = Object.keys(models)[0];
+  if (!firstKey) return undefined;
+  const t = models[firstKey]?.tokens;
+  if (!t) return undefined;
+  const usage: AdapterUsage = {};
+  // prefer `prompt` (excludes cached) but fall back to `input` for the input side
+  if (typeof t.prompt === 'number') usage.promptTokens = t.prompt;
+  else if (typeof t.input === 'number') usage.promptTokens = t.input;
+  // output = candidates (+ thoughts, which Gemini bills separately)
+  if (typeof t.candidates === 'number') {
+    usage.outputTokens = t.candidates + (typeof t.thoughts === 'number' ? t.thoughts : 0);
+  }
+  if (typeof t.total === 'number') usage.totalTokens = t.total;
+  if (typeof t.cached === 'number') usage.cachedTokens = t.cached;
+  return Object.keys(usage).length ? usage : undefined;
+}
 
 export interface GoogleCliOptions {
   bin: string;
@@ -32,6 +68,7 @@ export interface GoogleCliOptions {
 export class GoogleCliAdapter implements ModelAdapter {
   readonly name: string;
   readonly rung = 1 as const;
+  lastUsage?: AdapterUsage;
   private availableCache: boolean | null = null;
   private workDirCache: string | null = null;
   private callSeq = 0;
@@ -78,10 +115,15 @@ export class GoogleCliAdapter implements ModelAdapter {
       const stdinText =
         `${req.prompt}\n\nRespond with ONLY a JSON object matching this JSON schema:\n` +
         JSON.stringify(req.schema);
+      this.lastUsage = undefined; // reset; only set if this call yields counts
       const stdout = await this.run(headline, stdinText, workDir);
       // -o json wraps the model text in an envelope: { response: "...", stats: {...} }
       try {
-        const envelope = JSON.parse(stdout.trim()) as { response?: string };
+        const envelope = JSON.parse(stdout.trim()) as {
+          response?: string;
+          stats?: { models?: Record<string, { tokens?: GeminiTokens }> };
+        };
+        this.lastUsage = parseEnvelopeUsage(envelope.stats);
         if (typeof envelope.response === 'string') return extractJson(envelope.response);
       } catch {
         /* not an envelope — older CLI or plain text mode */
