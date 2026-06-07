@@ -1,0 +1,119 @@
+/* Rung 1 — generic "Google CLI" adapter over the free-quota headless mode.
+ * Today the binary is `gemini`; on 2026-06-18 the free tier moves to the
+ * Antigravity CLI (keeps -p, adds --output-format) — so the binary, model and
+ * extra env all come from config and are NEVER hardcoded.
+ *
+ * Spawn recipe (each piece verified against gemini-cli on this machine):
+ * - the bulky multi-line prompt goes via STDIN (piped stdin is appended to -p;
+ *   Windows shells cannot pass newline-laden argv reliably);
+ * - -p stays a short single line we control: the @image attach + a pointer to
+ *   stdin;
+ * - screenshots are written to a temp dir and the CLI runs with cwd THERE:
+ *   the CLI only reads @files inside its workspace and refuses gitignored
+ *   paths (artifacts/ is gitignored), so the repo cwd would reject them;
+ * - GEMINI_CLI_TRUST_WORKSPACE=true — headless runs in an untrusted dir exit 55;
+ * - machine gotcha (product doc §6.5): behind AVG TLS interception OAuth dies
+ *   with exit 41 unless NODE_OPTIONS=--use-system-ca. */
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import type { Capability, JsonRequest, ModelAdapter } from '../adapter.js';
+import { extractJson } from '../adapter.js';
+
+export interface GoogleCliOptions {
+  bin: string;
+  model: string;
+  env: Record<string, string>;
+  timeoutMs?: number;
+}
+
+export class GoogleCliAdapter implements ModelAdapter {
+  readonly name: string;
+  readonly rung = 1 as const;
+  private availableCache: boolean | null = null;
+
+  constructor(private readonly opts: GoogleCliOptions) {
+    this.name = `google-cli(${opts.bin})`;
+  }
+
+  async available(): Promise<boolean> {
+    if (this.availableCache !== null) return this.availableCache;
+    this.availableCache = await new Promise<boolean>((resolve) => {
+      const child = spawn(`${this.opts.bin} --version`, { shell: true, stdio: 'ignore' });
+      child.once('error', () => resolve(false));
+      child.once('exit', (code) => resolve(code === 0));
+    });
+    return this.availableCache;
+  }
+
+  supports(_cap: Capability): boolean {
+    return true; // Flash-class: plans and judges screenshots
+  }
+
+  async generateJson(req: JsonRequest): Promise<unknown> {
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-cli-'));
+    try {
+      let headline = 'Follow the instructions provided on stdin.';
+      if (req.imagePng) {
+        fs.writeFileSync(path.join(workDir, 'shot.png'), req.imagePng);
+        headline = `@shot.png ${headline}`;
+      }
+      const stdinText =
+        `${req.prompt}\n\nRespond with ONLY a JSON object matching this JSON schema:\n` +
+        JSON.stringify(req.schema);
+      const stdout = await this.run(headline, stdinText, workDir);
+      return extractJson(stdout);
+    } finally {
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  }
+
+  private run(headline: string, stdinText: string, cwd: string): Promise<string> {
+    // single command string (bin is typically a .cmd shim on Windows → shell);
+    // headline is OUR text, single-line, no quotes — safe to wrap in "
+    const command = `${this.opts.bin} -p "${headline}" -m ${this.opts.model}`;
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, {
+        shell: true,
+        cwd,
+        env: {
+          ...process.env,
+          GEMINI_CLI_TRUST_WORKSPACE: 'true',
+          ...this.opts.env,
+        },
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (d) => (stdout += d));
+      child.stderr.on('data', (d) => (stderr += d));
+      child.stdin.end(stdinText);
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error(`${this.opts.bin} timed out after ${this.opts.timeoutMs ?? 120_000}ms`));
+      }, this.opts.timeoutMs ?? 120_000);
+      child.once('error', (e) => {
+        clearTimeout(timer);
+        reject(e);
+      });
+      child.once('exit', (code) => {
+        clearTimeout(timer);
+        if (code === 0) return resolve(stdout);
+        if (code === 41) {
+          return reject(
+            new Error(
+              `${this.opts.bin} exit 41 — OAuth/TLS failure. Behind TLS-intercepting antivirus (AVG…) set NODE_OPTIONS=--use-system-ca for the CLI (config.googleCliEnv).`,
+            ),
+          );
+        }
+        if (code === 55) {
+          return reject(
+            new Error(`${this.opts.bin} exit 55 — untrusted workspace; GEMINI_CLI_TRUST_WORKSPACE=true should be set (adapter bug?)`),
+          );
+        }
+        reject(new Error(`${this.opts.bin} exit ${code}: ${stderr.slice(0, 400)}`));
+      });
+    });
+  }
+}
