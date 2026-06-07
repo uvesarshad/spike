@@ -128,10 +128,17 @@ export async function runPortContract(
       networkEntries.some((e) => e.url.includes('/api/ping') && e.status === 200),
     );
 
-    await browser.type(coupon!.id, 'SAVE10');
+    await browser.type(coupon!.id, 'WRONG');
+    await browser.type(coupon!.id, 'SAVE10'); // retype must REPLACE, not append
     const ax2 = await browser.axTree();
     const coupon2 = findByName(ax2.root, 'textbox', 'Coupon');
     check('type() set textbox value (visible in fresh axTree)', coupon2?.value === 'SAVE10');
+    // The replace check: after typing WRONG then SAVE10, the value must be
+    // exactly SAVE10 — an appending type() would leave WRONGSAVE10.
+    check(
+      'type() REPLACES existing content (retype is not appended)',
+      coupon2?.value === 'SAVE10',
+    );
 
     const png = await browser.screenshot();
     check('screenshot returns PNG', png.length > 1000 && png.subarray(1, 4).toString() === 'PNG');

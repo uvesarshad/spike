@@ -1,6 +1,6 @@
 /* M1 verification — runs the BrowserPort port-contract suite against CdpBrowser
  * (throwaway headless Chrome on CDP 9323, mkdtemp profile). Thin runner: it
- * constructs the port, delegates the 7 checks to runPortContract, and exits
+ * constructs the port, delegates the 8 checks to runPortContract, and exits
  * nonzero on any failure. The contract itself lives in port-contract.ts so any
  * BrowserPort implementation (e.g. ExtensionBrowser) can reuse it. */
 

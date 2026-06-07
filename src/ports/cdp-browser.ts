@@ -88,8 +88,28 @@ export class CdpBrowser implements BrowserPort {
   async type(nodeId: string, text: string): Promise<void> {
     const backendNodeId = this.backendNodeId(nodeId);
     await this.c.DOM.focus({ backendNodeId });
+    // Select all existing content first so insertText REPLACES rather than
+    // appends at the caret (a filled field would otherwise concatenate, e.g.
+    // "a@b.coma@b.co"). We stay on the Input domain — the future credential-
+    // vault channel — by sending Ctrl+A as key events (modifiers:2 = Ctrl).
+    await this.c.Input.dispatchKeyEvent({
+      type: 'rawKeyDown',
+      modifiers: 2,
+      key: 'a',
+      code: 'KeyA',
+      windowsVirtualKeyCode: 65,
+    });
+    await this.c.Input.dispatchKeyEvent({
+      type: 'keyUp',
+      modifiers: 2,
+      key: 'a',
+      code: 'KeyA',
+      windowsVirtualKeyCode: 65,
+    });
     // Input.insertText keeps the text out of key-event listeners — this is also
     // the future credential-vault path (the model never sees what gets typed).
+    // It replaces the current selection (the Ctrl+A above), giving replace
+    // semantics the planner prompt promises.
     await this.c.Input.insertText({ text });
     await sleep(150);
   }

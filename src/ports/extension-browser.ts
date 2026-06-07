@@ -35,6 +35,10 @@ export interface ExtensionBrowserOptions {
   initialUrl?: string;
   /** How long launch() waits for the extension SW to connect in. */
   connectTimeoutMs?: number;
+  /** When set, ATTACH to this existing tab (vibe mode targets the user's current
+   * tab) instead of creating a fresh one — and close() leaves the tab open,
+   * detaching only the debugger. Absent → current create/close behavior. */
+  attachTabId?: number;
 }
 
 export class ExtensionBrowser implements BrowserPort {
@@ -43,6 +47,9 @@ export class ExtensionBrowser implements BrowserPort {
   private ownsBridge = false;
   private shim: CdpShim | null = null;
   private tabId: number | null = null;
+  /** True when we ATTACHED to a pre-existing tab (attachTabId) — close() then
+   * leaves that tab open and only detaches the debugger. */
+  private attachedExisting = false;
   private capture: CaptureBuffers | null = null;
   /** planner nodeId ("n7") → backendDOMNodeId; refreshed by every axTree(). */
   private nodeMap = new Map<string, number>();
@@ -79,14 +86,24 @@ export class ExtensionBrowser implements BrowserPort {
 
     await this.bridge.waitForExtension(this.opts.connectTimeoutMs ?? 30_000);
 
-    // SW creates the tab and attaches chrome.debugger (version 1.3) to it.
-    const { tabId } = await this.b.call<{ tabId: number }>('ext.createTab', {
-      url: this.opts.initialUrl ?? 'about:blank',
-    });
-    this.tabId = tabId;
+    if (this.opts.attachTabId !== undefined) {
+      // Vibe mode: attach chrome.debugger to the user's EXISTING tab — never
+      // create one, and remember to leave it open in close().
+      const { tabId } = await this.b.call<{ tabId: number }>('ext.attachTab', {
+        tabId: this.opts.attachTabId,
+      });
+      this.tabId = tabId;
+      this.attachedExisting = true;
+    } else {
+      // SW creates the tab and attaches chrome.debugger (version 1.3) to it.
+      const { tabId } = await this.b.call<{ tabId: number }>('ext.createTab', {
+        url: this.opts.initialUrl ?? 'about:blank',
+      });
+      this.tabId = tabId;
+    }
 
     // Build the CDP shim bound to this tab; enable the same domains CdpBrowser does.
-    this.shim = createCdpShim(this.b, tabId);
+    this.shim = createCdpShim(this.b, this.tab);
     await Promise.all([
       this.c.Page.enable(),
       this.c.Runtime.enable(),
@@ -191,6 +208,15 @@ export class ExtensionBrowser implements BrowserPort {
       this.emitCursor({ kind: 'caption', caption: 'Typing into ' + this.nodeLabel(nodeId) });
     }
     await this.c.DOM.focus({ backendNodeId });
+    // Select-all (Ctrl+A) before inserting so type() REPLACES the field's current
+    // value rather than appending — mirrors CdpBrowser. insertText replaces the
+    // selection.
+    await this.c.Input.dispatchKeyEvent({
+      type: 'rawKeyDown', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65,
+    });
+    await this.c.Input.dispatchKeyEvent({
+      type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65,
+    });
     await this.c.Input.insertText({ text });
     await sleep(150);
   }
@@ -214,11 +240,16 @@ export class ExtensionBrowser implements BrowserPort {
 
   async close(): Promise<void> {
     if (this.tabId !== null && this.bridge) {
-      try { await this.b.call('ext.closeTab', { tabId: this.tabId }, 5_000); } catch { /* tab/SW gone */ }
+      // Attached-to-existing (vibe): keepTab → SW only detaches the debugger so the
+      // user's tab stays open. Created-by-us (tests): remove the tab as before.
+      try {
+        await this.b.call('ext.closeTab', { tabId: this.tabId, keepTab: this.attachedExisting }, 5_000);
+      } catch { /* tab/SW gone */ }
     }
     this.shim?.dispose();
     this.shim = null;
     this.tabId = null;
+    this.attachedExisting = false;
     this.capture = null;
     this.nodeMap.clear();
     if (this.ownsBridge && this.bridge) {

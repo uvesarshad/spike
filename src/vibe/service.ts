@@ -35,21 +35,26 @@ export class VibeService {
       if (this.busy) throw new Error('a run is already in progress');
       const task = String((params as { task?: unknown }).task ?? '');
       const url = String((params as { url?: unknown }).url ?? '');
+      // tabId (the panel's current tab) is optional — absent → create-a-tab path.
+      const rawTabId = (params as { tabId?: unknown }).tabId;
+      const tabId = typeof rawTabId === 'number' ? rawTabId : undefined;
       if (!task || !url) throw new Error('vibe.run requires { task, url }');
       this.busy = true;
       // Fire-and-forget the actual run; the request returns immediately.
-      void this.execute(task, url);
+      void this.execute(task, url, tabId);
       return { accepted: true };
     });
   }
 
-  private async execute(task: string, url: string): Promise<void> {
+  private async execute(task: string, url: string, tabId?: number): Promise<void> {
     try {
       const report = await qaRun(task, url, {
         bridge: this.bridge,
+        tabId,
         config: { via: 'extension' },
         record: false,
         onProgress: (line) => this.bridge.sendEvent('vibe.progress', { line }),
+        onStep: (info) => this.bridge.sendEvent('vibe.step', info),
       });
       this.bridge.sendEvent('vibe.done', {
         ...slimReport(report),

@@ -51,7 +51,32 @@ export class BridgeServer {
 
   constructor(private readonly port: number = DEFAULT_BRIDGE_PORT) {
     this.wss = new WebSocketServer({ port: this.port });
-    this.wss.on('connection', (ws) => this.adopt(ws));
+    // Defer adoption until the first frame: a STALE extension copy (old sw.js
+    // in another Chrome profile — its reconnect loop scans our port range)
+    // announces itself with a capability-less hello and gets rejected instead
+    // of stealing the socket from the real client. Anything else (current SW
+    // hello-with-caps, test clients that talk immediately) adopts as before.
+    this.wss.on('connection', (ws) => {
+      const probe = (data: { toString(): string }) => {
+        let first: Record<string, unknown> | null = null;
+        try {
+          first = JSON.parse(data.toString()) as Record<string, unknown>;
+        } catch {
+          /* malformed — fall through to adopt; onMessage ignores it anyway */
+        }
+        if (first && first.event === 'hello') {
+          const caps = (first.params as { caps?: unknown } | undefined)?.caps;
+          if (!Array.isArray(caps) || caps.length === 0) {
+            try { ws.close(); } catch { /* gone */ }
+            return; // stale-code SW — do not adopt
+          }
+        }
+        ws.off('message', probe);
+        this.adopt(ws);
+        this.onMessage(data.toString()); // don't lose the first frame
+      };
+      ws.on('message', probe);
+    });
   }
 
   /** Adopt a freshly connected extension socket, replacing any prior one. */

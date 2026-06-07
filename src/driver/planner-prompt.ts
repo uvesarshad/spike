@@ -51,13 +51,22 @@ ${ctx.axText}
 
 ${ctx.history.length ? `ACTIONS SO FAR (with any errors/console/network evidence they caused):\n${historyLines.join('\n')}` : 'No actions taken yet.'}
 
-Decide the SINGLE next action. Rules:
+Decide the next 1-3 actions. Rules:
 - Interact via nodeIds from the tree above (click/type). nodeIds change every step — only use ids from THIS tree.
-- type() replaces the field content; no need to clear first.
+- typing into a field REPLACES its content; no need to clear first.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
 - Console errors / failed network requests after an action are strong evidence the app is broken — investigate or finish with verdict "fail" and cite them.
+- If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input — the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
 - Do not repeat an action that already failed twice.
+
+BATCHING: PREFER returning 2-3 actions when you are confident they are independent of each other's outcomes — this is much faster. The actions run in order against THIS tree. Examples:
+- fill several fields then click submit: [type email, type password, click "Sign in"].
+- act on the page then move on: [click "Add Widget to cart", click "Go to cart"] — the add-to-cart click updates the page in place; the navigating click goes LAST.
+Rules:
+- After any action that navigates or could meaningfully change the page (a click that submits a form or navigates, or a navigate action), the remaining actions in your batch are DISCARDED and you will be asked again with the new page. So the ONLY navigating/submitting action in a batch must be the LAST one; everything before it must keep you on the same page.
+- finish, assert_visual and assert_dom must be the ONLY action in their batch (return exactly one action).
+- When unsure whether an earlier action changes the page, return a single action.
 
 Action types:
 - {"type":"navigate","url":string}
@@ -68,6 +77,6 @@ Action types:
 - {"type":"wait","ms":number}
 - {"type":"finish","verdict":"pass"|"fail","reason":string}
 
-Respond with ONLY JSON: {"thought": "<one short sentence>", "action": {...}}
-Example: {"thought":"The login form is filled, submit it.","action":{"type":"click","nodeId":"n12"}}`;
+Respond with ONLY JSON: {"thought": "<one short sentence>", "actions": [{...}, ...]}
+Example: {"thought":"Fill the login form and submit it.","actions":[{"type":"type","nodeId":"n4","text":"test@test.com"},{"type":"type","nodeId":"n6","text":"pw"},{"type":"click","nodeId":"n8"}]}`;
 }

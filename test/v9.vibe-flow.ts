@@ -55,8 +55,12 @@ try {
 
   // attach to the SW context to (a) hook incoming daemon events, (b) trigger
   // vibe.run exactly the way the panel's port handler does
-  const targets = await CDP.List({ port: CDP_PORT });
-  const sw = targets.find((t) => t.url === `chrome-extension://${launched.extensionId}/sw.js`);
+  let sw: { id: string } | undefined;
+  for (let i = 0; i < 30 && !sw; i++) {
+    const targets = await CDP.List({ port: CDP_PORT });
+    sw = targets.find((t) => t.url === `chrome-extension://${launched.extensionId}/sw.js`);
+    if (!sw) await sleep(300);
+  }
   if (!sw) throw new Error('SW target not found');
   const swClient = await CDP({ port: CDP_PORT, target: sw.id });
   await swClient.Runtime.enable();

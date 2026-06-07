@@ -22,7 +22,8 @@ export type Action = z.infer<typeof ActionSchema>;
 
 export const PlanResultSchema = z.object({
   thought: z.string(),
-  action: ActionSchema,
+  /** 1-3 actions; the loop may discard the tail of the batch (see loop.ts). */
+  actions: z.array(ActionSchema).min(1).max(3),
 });
 
 export type PlanResult = z.infer<typeof PlanResultSchema>;
@@ -30,26 +31,32 @@ export type PlanResult = z.infer<typeof PlanResultSchema>;
 /** JSON-schema twin of PlanResultSchema, given to planner models as a response constraint. */
 export const PLAN_JSON_SCHEMA = {
   type: 'object',
-  required: ['thought', 'action'],
+  required: ['thought', 'actions'],
   additionalProperties: false,
   properties: {
     thought: { type: 'string', description: 'one short sentence of reasoning' },
-    action: {
-      type: 'object',
-      required: ['type'],
-      properties: {
-        type: {
-          type: 'string',
-          enum: ['navigate', 'click', 'type', 'assert_visual', 'assert_dom', 'wait', 'finish'],
+    actions: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 3,
+      description: '1-3 actions to run in sequence; only batch ones independent of each other',
+      items: {
+        type: 'object',
+        required: ['type'],
+        properties: {
+          type: {
+            type: 'string',
+            enum: ['navigate', 'click', 'type', 'assert_visual', 'assert_dom', 'wait', 'finish'],
+          },
+          url: { type: 'string' },
+          nodeId: { type: 'string' },
+          text: { type: 'string' },
+          expectation: { type: 'string' },
+          contains: { type: 'string' },
+          ms: { type: 'integer' },
+          verdict: { type: 'string', enum: ['pass', 'fail'] },
+          reason: { type: 'string' },
         },
-        url: { type: 'string' },
-        nodeId: { type: 'string' },
-        text: { type: 'string' },
-        expectation: { type: 'string' },
-        contains: { type: 'string' },
-        ms: { type: 'integer' },
-        verdict: { type: 'string', enum: ['pass', 'fail'] },
-        reason: { type: 'string' },
       },
     },
   },

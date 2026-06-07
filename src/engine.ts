@@ -39,10 +39,16 @@ export interface QaRunOptions {
   config?: Partial<QaConfig>;
   /** Progress lines (CLI prints them; MCP ignores). */
   onProgress?: (line: string) => void;
+  /** Structured per-step hook (vibe panel animates these). Threaded into the
+   * driver loop by the planner-side work; forwarded as vibe.step events. */
+  onStep?: (info: { index: number; kind: 'plan' | 'click' | 'type' | 'navigate' | 'assert' | 'wait' | 'finish'; text: string; ok?: boolean }) => void;
   /** Caller-owned bridge (extension mode). When the panel already drives an
    * attached Chrome, the daemon reuses this bridge instead of spawning its own;
    * ownership (and close()) stays with the caller. */
   bridge?: BridgeServer;
+  /** Vibe mode: attach to the user's CURRENT tab (panel-supplied) instead of
+   * creating a fresh one. cdp mode ignores this. */
+  tabId?: number;
 }
 
 export interface QaRunResult extends Report {
@@ -75,7 +81,7 @@ export interface BrowserSession {
  */
 export async function openBrowserSession(
   config: Partial<QaConfig> = {},
-  deps: { bridge?: BridgeServer } = {},
+  deps: { bridge?: BridgeServer; tabId?: number } = {},
 ): Promise<BrowserSession> {
   const cfg = loadConfig(config);
 
@@ -102,7 +108,7 @@ export async function openBrowserSession(
         chromeProcess = chrome;
       }
 
-      const browser = new ExtensionBrowser({ bridge, connectTimeoutMs: 20_000 });
+      const browser = new ExtensionBrowser({ bridge, attachTabId: deps.tabId, connectTimeoutMs: 20_000 });
       try {
         await browser.launch(); // waits for the bridge connection, then creates the tab
       } catch (e) {
@@ -155,7 +161,7 @@ interface Session {
   close(): Promise<void>;
 }
 
-async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer } = {}): Promise<Session> {
+async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer; tabId?: number } = {}): Promise<Session> {
   const browserSession = await openBrowserSession(config, deps);
   const { cfg } = browserSession;
   // TODO: swap NanoRunnerPage for ExtensionNano in pure-extension mode.
@@ -185,7 +191,7 @@ async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeSer
 
 export async function qaRun(task: string, url: string, opts: QaRunOptions = {}): Promise<QaRunResult> {
   const progress = opts.onProgress ?? (() => {});
-  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge });
+  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId });
   const { cfg, browser, nano } = session;
 
   const adapters: ModelAdapter[] = [];
@@ -209,6 +215,7 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
   try {
     const report: QaRunResult = await runDriverLoop(browser, router, artifacts, task, url, {
       maxSteps: opts.maxSteps ?? cfg.maxSteps,
+      onStep: opts.onStep,
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);
 

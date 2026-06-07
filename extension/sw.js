@@ -107,6 +107,10 @@ function resolveRequest(msg) {
 
 const panelPorts = new Set();
 
+/** tabId of the active vibe run (the panel's current tab) — captured from the
+ * vibe.run we forward, so vibe.done/vibe.error can tell the page overlay to clear. */
+let lastRunTabId = null;
+
 function broadcastToPanels(message) {
   for (const port of panelPorts) {
     try {
@@ -131,13 +135,32 @@ function routeCursorToOverlay(params) {
   }
 }
 
+/** Tell the page overlay (green glow + badge) to clear. Fire-and-forget. */
+function sendOverlayEnd(tabId) {
+  if (tabId === null || tabId === undefined) return;
+  try {
+    chrome.tabs.sendMessage(
+      tabId,
+      { target: 'qa-overlay', kind: 'end' },
+      () => { void chrome.runtime.lastError; }, // swallow — tab may lack the content script
+    );
+  } catch {
+    /* fire-and-forget */
+  }
+}
+
 /** Dispatch a daemon event frame { event, params }. */
 function handleBridgeEvent(event, params) {
   if (event === 'vibe.cursor') {
     routeCursorToOverlay(params);
   }
+  // Run finished (or failed): clear the page overlay on the run's tab.
+  if (event === 'vibe.done' || event === 'vibe.error') {
+    sendOverlayEnd(lastRunTabId);
+  }
   if (typeof event === 'string' && event.startsWith('vibe.')) {
     // strip the 'vibe.' prefix into a panel message kind: vibe.progress -> progress
+    // (this generic fan-out already covers vibe.step → 'step', vibe.done → 'done', …)
     const kind = event.slice('vibe.'.length);
     broadcastToPanels({ kind, ...(params || {}) });
   }
@@ -153,7 +176,10 @@ chrome.runtime.onConnect.addListener((port) => {
       switch (msg.kind) {
         case 'run': {
           try {
-            const result = await sendRequest('vibe.run', { task: msg.task, url: msg.url });
+            // The panel targets the user's CURRENT tab (tabId/url from
+            // chrome.tabs.query). Remember it so the overlay end signal lands there.
+            if (msg.tabId !== undefined && msg.tabId !== null) lastRunTabId = msg.tabId;
+            const result = await sendRequest('vibe.run', { task: msg.task, tabId: msg.tabId, url: msg.url });
             port.postMessage({ kind: 'accepted', ...(result || {}) });
           } catch (e) {
             port.postMessage({ kind: 'error', message: String(e && e.message ? e.message : e) });
@@ -412,14 +438,23 @@ async function handleRequest(msg) {
         result = { tabId: tab.id };
         break;
       }
+      case 'ext.attachTab': {
+        // Attach to an EXISTING tab (vibe mode targets the user's current tab).
+        // Never create a tab; just mark it attached so closeTab/keepTab applies.
+        await attachDebugger(params.tabId);
+        result = { tabId: params.tabId };
+        break;
+      }
       case 'ext.navigate': {
         await navigateTab(params.tabId, params.url);
         result = { ok: true };
         break;
       }
       case 'ext.closeTab': {
+        // keepTab (attach-to-existing vibe runs): only detach the debugger so the
+        // user's tab stays exactly where it is. Otherwise remove it (test path).
         await detachDebugger(params.tabId);
-        await removeTab(params.tabId);
+        if (!params.keepTab) await removeTab(params.tabId);
         result = { ok: true };
         break;
       }
@@ -487,7 +522,9 @@ function connect() {
     connecting = false;
     reconnectDelay = 500;
     log('connected to bridge', socket.url);
-    emit('hello', { extension: chrome.runtime.id });
+    // `caps` advertises this SW's supported methods so a bridge can disambiguate
+    // when more than one SW (e.g. a stale install in another Chrome) dials in.
+    emit('hello', { extension: chrome.runtime.id, caps: ['ext.attachTab', 'keepTab'] });
   });
 
   socket.addEventListener('message', (ev) => {

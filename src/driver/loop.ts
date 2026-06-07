@@ -7,7 +7,7 @@
  * role+name in a fresh tree; same action 3× → uncertain; visual fail → run
  * fails; finish:pass → one confirmation visual before accepting. */
 
-import type { AxNode, BrowserPort } from '../ports/browser-port.js';
+import type { AxNode, AxSnapshot, BrowserPort } from '../ports/browser-port.js';
 import { firstError } from '../capture/console-network.js';
 import type { ModelRouter } from '../router/model-router.js';
 import type { ArtifactStore } from '../report/artifacts.js';
@@ -17,8 +17,86 @@ import { buildPlannerPrompt } from './planner-prompt.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Step-progress callback shape — VibeService forwards these verbatim to the UI. */
+export type StepKind = 'plan' | 'click' | 'type' | 'navigate' | 'assert' | 'wait' | 'finish';
+export interface StepInfo {
+  index: number;
+  kind: StepKind;
+  text: string;
+  ok?: boolean;
+}
+
 export interface LoopOptions {
   maxSteps: number;
+  onStep?: (info: StepInfo) => void;
+}
+
+/** Map an action to its onStep kind. */
+function stepKind(action: Action): StepKind {
+  switch (action.type) {
+    case 'click':
+      return 'click';
+    case 'type':
+      return 'type';
+    case 'navigate':
+      return 'navigate';
+    case 'wait':
+      return 'wait';
+    case 'finish':
+      return 'finish';
+    case 'assert_visual':
+    case 'assert_dom':
+      return 'assert';
+  }
+}
+
+/** A human-readable description of an executed action, preferring the touched
+ * node's role+name over the opaque nodeId. */
+function humanizeAction(action: Action, target?: { role: string; name?: string }): string {
+  const tgt = target ? (target.name ? `${target.role} "${target.name}"` : target.role) : undefined;
+  switch (action.type) {
+    case 'click':
+      return `Click ${tgt ?? action.nodeId}`;
+    case 'type':
+      return `Type into ${tgt ?? action.nodeId}`;
+    case 'navigate':
+      return `Navigate to ${action.url}`;
+    case 'wait':
+      return `Wait ${action.ms}ms`;
+    case 'finish':
+      return `Finish: ${action.verdict} — ${action.reason}`;
+    case 'assert_visual':
+      return `Visual check: ${action.expectation}`;
+    case 'assert_dom':
+      return `Check ${tgt ?? action.nodeId} contains "${action.contains}"`;
+  }
+}
+
+/** True if a console/network drain shows a page-level error (abort the batch). */
+function drainHasPageError(consoleEntries: { level: string }[], networkEntries: { failed?: boolean }[]): boolean {
+  return (
+    consoleEntries.some((e) => e.level === 'error' || e.level === 'page-error') ||
+    networkEntries.some((e) => e.failed)
+  );
+}
+
+/** Best-effort: pull a visible alert/error line out of the last snapshot's tree
+ * text so even the uncertain path can say WHY (e.g. "Invalid email or password"). */
+function visibleErrorText(axText: string | undefined): string | null {
+  if (!axText) return null;
+  // prefer lines whose role looks like an alert/static text AND mention
+  // error/invalid; fall back to any line mentioning error/invalid.
+  let fallback: string | null = null;
+  for (const line of axText.split('\n')) {
+    const lower = line.toLowerCase();
+    if (!lower.includes('error') && !lower.includes('invalid')) continue;
+    const quoted = line.match(/"([^"]+)"/);
+    const text = (quoted ? quoted[1] : line.trim()).trim();
+    if (!text) continue;
+    if (lower.includes('alert') || lower.includes('statictext')) return text;
+    fallback ??= text;
+  }
+  return fallback;
 }
 
 export async function runDriverLoop(
@@ -35,118 +113,170 @@ export async function runDriverLoop(
   let reason = 'step budget exhausted before the task completed';
   let failingStep: FailingStep | null = null;
 
+  const onStep = opts.onStep ?? (() => {});
+
   await browser.navigate(url);
   browser.drainConsole();
   browser.drainNetwork(); // initial page load noise is not step evidence
 
-  for (let i = 0; i < opts.maxSteps; i++) {
+  let stepIndex = 0; // running index across batches, bounded by maxSteps
+  let lastBatchFirstSig: string | null = null; // for loop detection
+  let lastSnapshotAx: AxSnapshot | null = null; // last tree text, for the uncertain-reason heuristic
+  let done = false;
+
+  // each outer iteration = ONE planner call → a batch of 1-3 actions
+  while (stepIndex < opts.maxSteps && !done) {
     const ax = await browser.axTree();
-    const currentUrl = await browser.url();
+    lastSnapshotAx = ax;
+    const batchUrl = await browser.url();
 
     // ---- plan ----
+    onStep({ index: stepIndex, kind: 'plan', text: 'Planning next step…' });
     let plan: PlanResult;
     try {
       plan = await planOnce(router, {
         prompt: buildPlannerPrompt({
           task,
-          url: currentUrl,
+          url: batchUrl,
           axText: ax.text,
           history: steps,
-          stepIndex: i,
+          stepIndex,
           maxSteps: opts.maxSteps,
         }),
-        step: i,
+        step: stepIndex,
       });
     } catch (e) {
       reason = `planner failed: ${e instanceof Error ? e.message : e}`;
       break;
     }
-    const action = plan.action;
+
+    let actions = plan.actions;
+    // finish / asserts must be alone in their batch — if the model bundled
+    // extras, keep only the first action (these never batch)
+    if (actions[0].type === 'finish' || actions[0].type === 'assert_visual' || actions[0].type === 'assert_dom') {
+      actions = [actions[0]];
+    }
 
     // ---- loop detection ----
-    const sig = JSON.stringify(action);
-    if (steps.length >= 2 && steps.slice(-2).every((s) => JSON.stringify(s.action) === sig)) {
-      reason = `planner repeated the same action 3×: ${describeAction(action)}`;
+    // compare the FIRST action of consecutive identical single-action batches.
+    const firstSig = actions.length === 1 ? JSON.stringify(actions[0]) : null;
+    if (
+      firstSig !== null &&
+      firstSig === lastBatchFirstSig &&
+      steps.length >= 2 &&
+      JSON.stringify(steps[steps.length - 1].action) === firstSig &&
+      JSON.stringify(steps[steps.length - 2].action) === firstSig
+    ) {
+      const visibleErr = visibleErrorText(lastSnapshotAx?.text);
+      reason = `planner repeated the same action 3×: ${describeAction(actions[0])}` +
+        (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : '');
       break;
     }
+    lastBatchFirstSig = firstSig;
 
-    const record: StepRecord = {
-      index: i,
-      thought: plan.thought,
-      action,
-      description: describeAction(action),
-      ok: true,
-      console: [],
-      network: [],
-      ts: Date.now(),
-    };
-    // remember WHAT the action touches (role+name) — this is what makes the
-    // run replayable later; nodeIds die with the snapshot
-    if ('nodeId' in action) {
-      const target = findNode(ax.root, action.nodeId);
-      if (target) record.target = { role: target.role, ...(target.name && { name: target.name }) };
-    }
-    steps.push(record);
+    // ---- execute the batch, one StepRecord + drain per action ----
+    for (let a = 0; a < actions.length && stepIndex < opts.maxSteps; a++) {
+      const action = actions[a];
+      const i = stepIndex++;
 
-    // ---- execute ----
-    try {
-      if (action.type === 'finish') {
-        // trust a fail immediately; confirm a pass with one visual check
-        if (action.verdict === 'fail') {
-          verdict = 'fail';
-          reason = action.reason;
-          failingStep = lastInteraction(steps) ?? { index: i, action, description: record.description };
-        } else {
+      const record: StepRecord = {
+        index: i,
+        thought: a === 0 ? plan.thought : undefined,
+        action,
+        description: describeAction(action),
+        ok: true,
+        console: [],
+        network: [],
+        ts: Date.now(),
+      };
+      // remember WHAT the action touches (role+name) — this is what makes the
+      // run replayable later; nodeIds die with the snapshot
+      if ('nodeId' in action) {
+        const t = findNode(ax.root, action.nodeId);
+        if (t) record.target = { role: t.role, ...(t.name && { name: t.name }) };
+      }
+      steps.push(record);
+
+      // ---- execute ----
+      try {
+        if (action.type === 'finish') {
+          // trust a fail immediately; confirm a pass with one visual check
+          if (action.verdict === 'fail') {
+            verdict = 'fail';
+            reason = action.reason;
+            failingStep = lastInteraction(steps) ?? { index: i, action, description: record.description };
+          } else {
+            const png = await browser.screenshot();
+            record.screenshot = artifacts.saveScreenshot(i, png);
+            const confirm = await router.visualVerdict(
+              png,
+              `The task "${task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
+              i,
+            );
+            record.visual = confirm;
+            if (confirm.verdict === 'fail') {
+              verdict = 'fail';
+              reason = `planner claimed success but the confirmation visual check failed: ${confirm.summary}`;
+              failingStep = { index: i, action, description: record.description };
+            } else {
+              verdict = 'pass';
+              reason = action.reason;
+            }
+          }
+        } else if (action.type === 'assert_visual') {
           const png = await browser.screenshot();
           record.screenshot = artifacts.saveScreenshot(i, png);
-          const confirm = await router.visualVerdict(
-            png,
-            `The task "${task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
-            i,
-          );
-          record.visual = confirm;
-          if (confirm.verdict === 'fail') {
+          const v = await router.visualVerdict(png, action.expectation, i);
+          record.visual = v;
+          if (v.verdict === 'fail') {
             verdict = 'fail';
-            reason = `planner claimed success but the confirmation visual check failed: ${confirm.summary}`;
+            reason = `visual assertion failed: ${v.summary}${v.issues.length ? ` — ${v.issues.join('; ')}` : ''}`;
             failingStep = { index: i, action, description: record.description };
-          } else {
-            verdict = 'pass';
-            reason = action.reason;
           }
+        } else if (action.type === 'assert_dom') {
+          const t = findNode(ax.root, action.nodeId);
+          const hay = t ? subtreeText(t) : '';
+          if (!t) {
+            record.ok = false;
+            record.error = `nodeId ${action.nodeId} not in current tree`;
+          } else if (!hay.toLowerCase().includes(action.contains.toLowerCase())) {
+            record.ok = false;
+            record.error = `expected ${JSON.stringify(action.contains)} in ${action.nodeId}, found: ${hay.slice(0, 150)}`;
+          }
+        } else {
+          await executeWithRetry(browser, action, ax.root);
         }
-      } else if (action.type === 'assert_visual') {
-        const png = await browser.screenshot();
-        record.screenshot = artifacts.saveScreenshot(i, png);
-        const v = await router.visualVerdict(png, action.expectation, i);
-        record.visual = v;
-        if (v.verdict === 'fail') {
-          verdict = 'fail';
-          reason = `visual assertion failed: ${v.summary}${v.issues.length ? ` — ${v.issues.join('; ')}` : ''}`;
-          failingStep = { index: i, action, description: record.description };
-        }
-      } else if (action.type === 'assert_dom') {
-        const target = findNode(ax.root, action.nodeId);
-        const hay = target ? subtreeText(target) : '';
-        if (!target) {
-          record.ok = false;
-          record.error = `nodeId ${action.nodeId} not in current tree`;
-        } else if (!hay.toLowerCase().includes(action.contains.toLowerCase())) {
-          record.ok = false;
-          record.error = `expected ${JSON.stringify(action.contains)} in ${action.nodeId}, found: ${hay.slice(0, 150)}`;
-        }
-      } else {
-        await executeWithRetry(browser, action, ax.root);
+      } catch (e) {
+        record.ok = false;
+        record.error = e instanceof Error ? e.message : String(e);
       }
-    } catch (e) {
-      record.ok = false;
-      record.error = e instanceof Error ? e.message : String(e);
+
+      await sleep(150); // let async fallout (fetches, navigations) land
+      record.console = browser.drainConsole();
+      record.network = browser.drainNetwork();
+
+      onStep({
+        index: i,
+        kind: stepKind(action),
+        text: humanizeAction(action, record.target),
+        ok: record.ok,
+      });
+
+      // a finish or a settled verdict ends the whole run
+      if (verdict !== 'uncertain' || action.type === 'finish') {
+        done = true;
+        break;
+      }
+
+      // ---- batch abort conditions: stop running the REST of the batch when
+      // an action failed, a drain shows a page-error, or the URL changed ----
+      if (a < actions.length - 1) {
+        if (!record.ok) break;
+        if (drainHasPageError(record.console, record.network)) break;
+        const nowUrl = await browser.url();
+        if (nowUrl !== batchUrl) break;
+      }
     }
-
-    await sleep(250); // let async fallout (fetches, navigations) land
-    record.console = browser.drainConsole();
-    record.network = browser.drainNetwork();
-
-    if (verdict !== 'uncertain' || action.type === 'finish') break;
   }
 
   // ---- final evidence ----

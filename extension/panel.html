@@ -17,13 +17,40 @@
 
   <main class="body">
     <section class="inputs">
-      <label class="field-label" for="url">URL to test</label>
-      <input id="url" class="text-input" type="text" spellcheck="false"
-             placeholder="http://localhost:9401/login" />
+      <div class="field-label">Testing this tab</div>
+      <div id="tabCard" class="tab-card">
+        <span id="tabFavicon" class="tab-favicon">🌐</span>
+        <div class="tab-meta">
+          <span id="tabTitle" class="tab-title">Loading tab…</span>
+          <span id="tabHost" class="tab-host"></span>
+        </div>
+      </div>
+      <div id="tabWarning" class="tab-warning" hidden>
+        Open the page you want to test in this tab.
+      </div>
+
+      <div class="field-label">Try one of these</div>
+      <div id="suggestions" class="suggestions">
+        <button class="suggestion-card" type="button"
+                data-task="Log in with the demo credentials and verify the dashboard loads">
+          <span class="suggestion-emoji">🔐</span>
+          <span class="suggestion-text">Test the login flow</span>
+        </button>
+        <button class="suggestion-card" type="button"
+                data-task="Add an item to the cart, check out, and verify the order confirmation page">
+          <span class="suggestion-emoji">🛒</span>
+          <span class="suggestion-text">Add to cart &amp; checkout</span>
+        </button>
+        <button class="suggestion-card" type="button"
+                data-task="Click through the main pages and report any errors, broken buttons or blank content">
+          <span class="suggestion-emoji">🔎</span>
+          <span class="suggestion-text">Find anything broken</span>
+        </button>
+      </div>
 
       <label class="field-label" for="task">What should I test?</label>
       <textarea id="task" class="text-area" rows="3"
-                placeholder="e.g. Log in as test@test.com with password pw and complete checkout"></textarea>
+                placeholder="…or describe what to test"></textarea>
 
       <button id="runBtn" class="run-btn" type="button">Run test</button>
     </section>
