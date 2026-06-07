@@ -159,4 +159,4 @@ Conventions worth knowing: logpoint lines are located by content, never hardcode
 
 ## License
 
-TBD (pre-release).
+[Apache-2.0](LICENSE).

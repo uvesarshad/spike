@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Browser QA/debug subagent: a cheap-model ladder drives a real Chrome and returns a ~2K-token verdict to your coding agent.",
   "type": "module",
+  "license": "Apache-2.0",
   "private": true,
   "engines": { "node": ">=20" },
   "bin": { "qa": "dist/cli.js" },
