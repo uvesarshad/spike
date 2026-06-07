@@ -1,0 +1,124 @@
+/* Secrets vault — Tier-4 guardrail: credentials live encrypted on-device and
+ * the model NEVER sees them. Plaintext only ever exists in memory at execute
+ * time (loop.ts resolves {{secret:NAME}} immediately before browser.type()).
+ *
+ * v1 storage: an AES-256-GCM blob at %LOCALAPPDATA%/qa-subagent-vault/secrets.enc,
+ * with the 32-byte key in key.bin (created on first use). This is "encrypted at
+ * rest, key on the same machine" — it protects the file if it's copied off the
+ * box, not against a local attacker who can read both files. That tradeoff is
+ * deliberate for v1.
+ *
+ * KEYCHAIN-SWAP SEAM: all key access goes through the KeyProvider interface
+ * below. The default FileKeyProvider reads/writes key.bin; an OS-keychain
+ * backend (Windows DPAPI / macOS Keychain / libsecret) can later implement the
+ * same { getKey(): Buffer } contract and be injected via the Vault constructor —
+ * no change to the encryption path or the public API. */
+
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const ALGO = 'aes-256-gcm';
+const KEY_BYTES = 32;
+const IV_BYTES = 12;
+
+/** The key-management seam. Swap FileKeyProvider for an OS-keychain provider
+ * later without touching the encryption path or the Vault public API. */
+export interface KeyProvider {
+  /** Return the 32-byte data-encryption key, creating it on first use. */
+  getKey(): Buffer;
+}
+
+/** Default v1 provider: a random 32-byte key persisted at key.bin (mode 0600). */
+export class FileKeyProvider implements KeyProvider {
+  constructor(private readonly keyPath: string) {}
+
+  getKey(): Buffer {
+    if (fs.existsSync(this.keyPath)) {
+      const key = fs.readFileSync(this.keyPath);
+      if (key.length === KEY_BYTES) return key;
+      // corrupt/short key file — fail loudly rather than silently re-keying
+      // (re-keying would orphan the existing encrypted secrets).
+      throw new Error(`vault key file ${this.keyPath} is corrupt (expected ${KEY_BYTES} bytes, got ${key.length})`);
+    }
+    const key = crypto.randomBytes(KEY_BYTES);
+    fs.mkdirSync(path.dirname(this.keyPath), { recursive: true });
+    fs.writeFileSync(this.keyPath, key, { mode: 0o600 });
+    return key;
+  }
+}
+
+function defaultVaultDir(): string {
+  const base = process.env.LOCALAPPDATA ?? process.env.HOME ?? '.';
+  return path.join(base, 'qa-subagent-vault');
+}
+
+export interface VaultOptions {
+  /** Vault directory (default %LOCALAPPDATA%/qa-subagent-vault). */
+  dir?: string;
+  /** Key backend — defaults to FileKeyProvider over <dir>/key.bin. */
+  keyProvider?: KeyProvider;
+}
+
+/** File-based AES-256-GCM secrets store. Sync fs throughout — the secret set is
+ * tiny and access is rare (interactive `qa secret …` + per-step resolution). */
+export class Vault {
+  private readonly dir: string;
+  private readonly secretsPath: string;
+  private readonly keyProvider: KeyProvider;
+
+  constructor(opts: VaultOptions = {}) {
+    this.dir = opts.dir ?? defaultVaultDir();
+    this.secretsPath = path.join(this.dir, 'secrets.enc');
+    this.keyProvider = opts.keyProvider ?? new FileKeyProvider(path.join(this.dir, 'key.bin'));
+  }
+
+  /** Decrypt the secrets map. {} when the file does not exist yet. */
+  private read(): Record<string, string> {
+    if (!fs.existsSync(this.secretsPath)) return {};
+    const blob = fs.readFileSync(this.secretsPath);
+    // layout: [12B iv][16B authTag][ciphertext]
+    const iv = blob.subarray(0, IV_BYTES);
+    const tag = blob.subarray(IV_BYTES, IV_BYTES + 16);
+    const ciphertext = blob.subarray(IV_BYTES + 16);
+    const decipher = crypto.createDecipheriv(ALGO, this.keyProvider.getKey(), iv);
+    decipher.setAuthTag(tag);
+    const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return JSON.parse(plain.toString('utf8')) as Record<string, string>;
+  }
+
+  /** Encrypt + persist the secrets map (atomic-ish: write temp then rename). */
+  private write(map: Record<string, string>): void {
+    fs.mkdirSync(this.dir, { recursive: true });
+    const iv = crypto.randomBytes(IV_BYTES);
+    const cipher = crypto.createCipheriv(ALGO, this.keyProvider.getKey(), iv);
+    const ciphertext = Buffer.concat([cipher.update(JSON.stringify(map), 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const blob = Buffer.concat([iv, tag, ciphertext]);
+    const tmp = this.secretsPath + '.tmp';
+    fs.writeFileSync(tmp, blob, { mode: 0o600 });
+    fs.renameSync(tmp, this.secretsPath);
+  }
+
+  set(name: string, value: string): void {
+    const map = this.read();
+    map[name] = value;
+    this.write(map);
+  }
+
+  get(name: string): string | undefined {
+    return this.read()[name];
+  }
+
+  list(): string[] {
+    return Object.keys(this.read()).sort();
+  }
+
+  delete(name: string): boolean {
+    const map = this.read();
+    if (!(name in map)) return false;
+    delete map[name];
+    this.write(map);
+    return true;
+  }
+}

@@ -59,6 +59,7 @@ Decide the next 1-3 actions. Rules:
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input — the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
 - Do not repeat an action that already failed twice.
+- If the task references a stored secret like {{secret:NAME}}, pass that placeholder VERBATIM as the text of a type action — never invent its value.
 
 BATCHING: PREFER returning 2-3 actions when you are confident they are independent of each other's outcomes — this is much faster. The actions run in order against THIS tree. Examples:
 - fill several fields then click submit: [type email, type password, click "Sign in"].

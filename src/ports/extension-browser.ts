@@ -68,6 +68,12 @@ export class ExtensionBrowser implements BrowserPort {
     return this.shim.client;
   }
 
+  /** Raw CDP-shaped client (the bridge shim) for extras outside the BrowserPort
+   * contract (clip recorder) — same surface as CdpBrowser.cdpClient(). */
+  cdpClient() {
+    return this.c;
+  }
+
   private get tab(): number {
     if (this.tabId === null) throw new Error('ExtensionBrowser: launch() first');
     return this.tabId;

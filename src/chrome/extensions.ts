@@ -35,6 +35,10 @@ export interface LaunchWithExtensionOptions {
   /** Headed by default; set true for --headless=new. */
   headless?: boolean;
   windowSize?: string;
+  /** Pin this Chrome's extension SW to dial ONLY these bridge ports
+   * (chrome.storage.local override) — isolates tests/instances from other
+   * Chromes running the same extension, whose SWs scan the default 9410-9413. */
+  bridgePorts?: number[];
 }
 
 export interface LaunchWithExtensionResult {
@@ -156,9 +160,37 @@ export async function launchChromeWithExtension(
       path: opts.extensionDir,
     });
     if (!id) throw new Error('Extensions.loadUnpacked returned no extension id');
+
+    if (opts.bridgePorts?.length) {
+      await pinBridgePorts(opts.cdpPort, id, opts.bridgePorts);
+    }
     return { extensionId: id, chrome };
   } catch (e) {
     try { chrome.kill(); } catch { /* gone */ }
     throw e;
+  }
+}
+
+/** Set chrome.storage.local.bridgePorts in the extension SW so its reconnect
+ * loop dials ONLY the given ports (the SW watches storage.onChanged and
+ * redials immediately). */
+async function pinBridgePorts(cdpPort: number, extensionId: string, ports: number[]): Promise<void> {
+  const CDP = (await import('chrome-remote-interface')).default;
+  const swUrl = `chrome-extension://${extensionId}/sw.js`;
+  let target: { id: string } | undefined;
+  for (let i = 0; i < 30 && !target; i++) {
+    const targets = await CDP.List({ port: cdpPort });
+    target = targets.find((t) => t.url === swUrl);
+    if (!target) await sleep(300);
+  }
+  if (!target) throw new Error('extension SW target never appeared — cannot pin bridge ports');
+  const client = await CDP({ port: cdpPort, target: target.id });
+  try {
+    await client.Runtime.evaluate({
+      expression: `chrome.storage.local.set({ bridgePorts: ${JSON.stringify(ports)} })`,
+      awaitPromise: true,
+    });
+  } finally {
+    await client.close();
   }
 }

@@ -29,6 +29,11 @@ export class CdpBrowser implements BrowserPort {
     return this.client;
   }
 
+  /** Raw CDP client for extras outside the BrowserPort contract (clip recorder). */
+  cdpClient(): CDP.Client {
+    return this.c;
+  }
+
   async launch(): Promise<void> {
     if (this.client) return;
     await ensureChrome(this.opts);

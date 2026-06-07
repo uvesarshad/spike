@@ -40,6 +40,42 @@ async function warmup() {
   return 'warm';
 }
 
+/**
+ * Download the model with progress reporting. The SW relays a 'download' op
+ * here; we create a session with a `monitor` and stream each 'downloadprogress'
+ * update back to the SW via chrome.runtime.sendMessage({ target:'nano-progress' }).
+ * The SW rebroadcasts to the panel. We keep the warm session afterwards.
+ */
+async function download() {
+  if (typeof LanguageModel === 'undefined') throw new Error('LanguageModel API missing in offscreen document');
+  const session = await LanguageModel.create({
+    ...MODEL_OPTS,
+    monitor(m) {
+      m.addEventListener('downloadprogress', (e) => {
+        try {
+          chrome.runtime.sendMessage({
+            target: 'nano-progress',
+            status: {
+              loaded: typeof e.loaded === 'number' ? e.loaded : undefined,
+              total: typeof e.total === 'number' ? e.total : undefined,
+              progress: typeof e.loaded === 'number' && (e.total === undefined || e.total === 1)
+                ? e.loaded : undefined,
+            },
+          }, () => { void chrome.runtime.lastError; });
+        } catch { /* fire-and-forget */ }
+      });
+    },
+  });
+  // prime so the model is resident and the first real verdict starts warm
+  try {
+    await session.prompt([{ role: 'user', content: [{ type: 'text', value: 'ok' }] }]);
+    warmSession = session;
+  } catch {
+    try { session.destroy(); } catch { /* noop */ }
+  }
+  return 'downloaded';
+}
+
 async function verdict(dataUrl, task) {
   if (typeof LanguageModel === 'undefined') throw new Error('LanguageModel API missing in offscreen document');
   const blob = await (await fetch(dataUrl)).blob();
@@ -73,9 +109,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     try {
       let result;
       switch (msg.op) {
-        case 'avail':   result = await avail(); break;
-        case 'warmup':  result = await warmup(); break;
-        case 'verdict': result = await verdict(msg.args.dataUrl, msg.args.task); break;
+        case 'avail':    result = await avail(); break;
+        case 'warmup':   result = await warmup(); break;
+        case 'download': result = await download(); break;
+        case 'verdict':  result = await verdict(msg.args.dataUrl, msg.args.task); break;
         default: throw new Error('unknown nano offscreen op ' + msg.op);
       }
       sendResponse({ ok: true, result });

@@ -16,10 +16,36 @@
  */
 
 /* The daemon's bridge usually listens on 9410 (config default), but tests and
- * multi-instance setups bind nearby ports — the reconnect loop scans this small
- * candidate range round-robin, so no config has to reach the SW. */
-const BRIDGE_PORT_CANDIDATES = [9410, 9411, 9412, 9413];
+ * multi-instance setups bind nearby ports — the reconnect loop scans a small
+ * candidate list round-robin. The list can be PINNED per Chrome instance via
+ * chrome.storage.local {bridgePorts:[...]} (the dev-loader sets it), which is
+ * how two Chromes running this extension stay out of each other's bridges. */
+const DEFAULT_BRIDGE_PORTS = [9410, 9411, 9412, 9413];
+let bridgePorts = DEFAULT_BRIDGE_PORTS;
 let bridgePortIdx = 0;
+try {
+  chrome.storage.local.get('bridgePorts', (v) => {
+    if (Array.isArray(v?.bridgePorts) && v.bridgePorts.length) {
+      bridgePorts = v.bridgePorts.map(Number).filter((n) => Number.isFinite(n));
+      bridgePortIdx = 0;
+      log('bridge ports pinned to', bridgePorts.join(','));
+      // drop any connection made with the default list and redial
+      if (ws) { try { ws.close(); } catch { /* noop */ } }
+      connect();
+    }
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes.bridgePorts) return;
+    const next = changes.bridgePorts.newValue;
+    if (Array.isArray(next) && next.length) {
+      bridgePorts = next.map(Number).filter((n) => Number.isFinite(n));
+      bridgePortIdx = 0;
+      log('bridge ports re-pinned to', bridgePorts.join(','));
+      if (ws) { try { ws.close(); } catch { /* noop */ } }
+      connect();
+    }
+  });
+} catch { /* storage unavailable — defaults stand */ }
 const DEBUGGER_VERSION = '1.3';
 const NAVIGATE_TIMEOUT_MS = 30_000;
 
@@ -186,6 +212,32 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           break;
         }
+        case 'cancel': {
+          try {
+            const result = await sendRequest('vibe.cancel', {});
+            // {cancelled: boolean}. Old daemons answer 'unknown method …' → surfaced below.
+            port.postMessage({ kind: 'cancelled', cancelled: !!(result && result.cancelled) });
+          } catch (e) {
+            port.postMessage({ kind: 'error', message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'fix': {
+          try {
+            // {accepted:true} on success; fix-progress / fix-done stream as vibe.*
+            // events handled by the generic fan-out in handleBridgeEvent.
+            await sendRequest('vibe.fix', {});
+            // no panel message on accept; the daemon's fix-progress/fix-done drive UI
+          } catch (e) {
+            // includes 'unknown method vibe.fix' from an old daemon
+            port.postMessage({ kind: 'fix-done', ok: false, message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'nano-download': {
+          await handleNanoDownload();
+          break;
+        }
         case 'status': {
           try {
             const result = await sendRequest('vibe.status', {});
@@ -335,6 +387,14 @@ const OFFSCREEN_URL = 'nano-offscreen.html';
 let nanoWarmSession = null; // used only when LanguageModel lives in the SW
 let offscreenReady = null;
 
+/** Reject a hung promise after ms — bridge requests must always get an answer. */
+function withSwTimeout(promise, ms, label) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms in the extension`)), ms)),
+  ]);
+}
+
 /** Is the web-exposed Prompt API reachable from this service worker? */
 function nanoInSW() {
   return typeof LanguageModel !== 'undefined';
@@ -399,6 +459,72 @@ async function nanoWarmup() {
   return callOffscreen('warmup');
 }
 
+/**
+ * Kick off the Gemini Nano model download with PROGRESS broadcast to panels.
+ *
+ * Two paths mirror the rest of the nano plumbing:
+ *  - SW-direct (LanguageModel reachable in the SW): create a session with a
+ *    `monitor` that listens for 'downloadprogress' and broadcasts each update
+ *    straight to panel ports as { kind:'nano-progress', status }.
+ *  - Offscreen: ask the offscreen document to start the download; it
+ *    chrome.runtime.sendMessage's progress to the SW, which rebroadcasts (see
+ *    the chrome.runtime.onMessage listener below).
+ * Either way, once the model is resident we re-probe availability and broadcast
+ * the resulting { kind:'nano', availability } so the panel can flip to 'ready'.
+ */
+let nanoDownloadInFlight = false;
+async function handleNanoDownload() {
+  if (nanoDownloadInFlight) return;
+  nanoDownloadInFlight = true;
+  try {
+    if (nanoInSW()) {
+      broadcastToPanels({ kind: 'nano-progress', status: { state: 'starting' } });
+      const session = await LanguageModel.create({
+        ...NANO_MODEL_OPTS,
+        monitor(m) {
+          m.addEventListener('downloadprogress', (e) => {
+            // e.loaded / e.total are bytes (0..1 fraction in some builds via e.loaded only)
+            broadcastToPanels({
+              kind: 'nano-progress',
+              status: {
+                loaded: typeof e.loaded === 'number' ? e.loaded : undefined,
+                total: typeof e.total === 'number' ? e.total : undefined,
+                progress: typeof e.loaded === 'number' && (e.total === undefined || e.total === 1)
+                  ? e.loaded : undefined,
+              },
+            });
+          });
+        },
+      });
+      // prime + keep as the warm session so a subsequent verdict starts hot
+      try {
+        await session.prompt([{ role: 'user', content: [{ type: 'text', value: 'ok' }] }]);
+        nanoWarmSession = session;
+      } catch {
+        try { session.destroy(); } catch { /* noop */ }
+      }
+    } else if (chrome.offscreen) {
+      // offscreen path: it streams progress back via chrome.runtime.sendMessage
+      broadcastToPanels({ kind: 'nano-progress', status: { state: 'starting' } });
+      await callOffscreen('download');
+    } else {
+      broadcastToPanels({ kind: 'nano', availability: 'unavailable' });
+      return;
+    }
+    // re-probe and tell the panel the final state (→ 'available' flips to ready)
+    const availability = await nanoAvail();
+    broadcastToPanels({ kind: 'nano', availability });
+  } catch (e) {
+    broadcastToPanels({ kind: 'nano-progress', status: { state: 'error', message: String(e && e.message ? e.message : e) } });
+    try {
+      const availability = await nanoAvail();
+      broadcastToPanels({ kind: 'nano', availability });
+    } catch { /* leave panel on last state */ }
+  } finally {
+    nanoDownloadInFlight = false;
+  }
+}
+
 async function nanoVerdict(dataUrl, task) {
   if (nanoInSW()) {
     const blob = await (await fetch(dataUrl)).blob();
@@ -426,6 +552,14 @@ async function nanoVerdict(dataUrl, task) {
   }
   return callOffscreen('verdict', { dataUrl, task });
 }
+
+// Offscreen → SW: nano download progress. The offscreen document streams
+// { target:'nano-progress', status } updates here; rebroadcast to panel ports.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (!msg || msg.target !== 'nano-progress') return false;
+  broadcastToPanels({ kind: 'nano-progress', status: msg.status || {} });
+  return false; // no response needed
+});
 
 async function handleRequest(msg) {
   const { id, method, params = {} } = msg;
@@ -468,15 +602,21 @@ async function handleRequest(msg) {
         break;
       }
       case 'nano.avail': {
-        result = await nanoAvail();
+        // never hang the bridge: offscreen-document creation can stall in some
+        // environments (observed headless) — degrade to 'unavailable' so the
+        // daemon's model ladder falls to rung 1 instead of timing out the run
+        result = await Promise.race([
+          nanoAvail(),
+          new Promise((resolve) => setTimeout(() => resolve('unavailable'), 10_000)),
+        ]);
         break;
       }
       case 'nano.warmup': {
-        result = await nanoWarmup();
+        result = await withSwTimeout(nanoWarmup(), 120_000, 'nano.warmup');
         break;
       }
       case 'nano.verdict': {
-        result = await nanoVerdict(params.dataUrl, params.task);
+        result = await withSwTimeout(nanoVerdict(params.dataUrl, params.task), 5 * 60_000, 'nano.verdict');
         break;
       }
       default:
@@ -506,8 +646,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 function connect() {
   if (connecting || (ws && ws.readyState === WebSocket.OPEN)) return;
   connecting = true;
-  const url = `ws://localhost:${BRIDGE_PORT_CANDIDATES[bridgePortIdx]}/`;
-  bridgePortIdx = (bridgePortIdx + 1) % BRIDGE_PORT_CANDIDATES.length; // next attempt tries the next port
+  const url = `ws://localhost:${bridgePorts[bridgePortIdx % bridgePorts.length]}/`;
+  bridgePortIdx = (bridgePortIdx + 1) % bridgePorts.length; // next attempt tries the next port
   let socket;
   try {
     socket = new WebSocket(url);

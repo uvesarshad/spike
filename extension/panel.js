@@ -8,11 +8,18 @@
  * daemon and broadcasts the daemon's vibe.* events back to us.
  *
  *   panel -> SW : { kind:'run', task, tabId, url }
+ *                 { kind:'cancel' }
+ *                 { kind:'fix' }
+ *                 { kind:'nano-download' }
  *                 { kind:'status' }
  *                 { kind:'nano' }
  *                 { kind:'bridge-status' }
  *   SW -> panel : { kind:'accepted', accepted? }
  *                 { kind:'error', message }       (run rejected / daemon down)
+ *                 { kind:'cancelled', cancelled }  (relayed vibe.cancel result)
+ *                 { kind:'fix-progress', line }    (relayed vibe.fix-progress)
+ *                 { kind:'fix-done', ok, agent?, message? } (relayed vibe.fix-done)
+ *                 { kind:'nano-progress', status } (download progress)
  *                 { kind:'status', busy }
  *                 { kind:'nano', availability }
  *                 { kind:'bridge-status', connected }
@@ -58,13 +65,34 @@ const plainReport = $('plainReport');
 const fixSection = $('fixSection');
 const fixPrompt = $('fixPrompt');
 const copyBtn = $('copyBtn');
+const autoFixBtn = $('autoFixBtn');
+const fixStatus = $('fixStatus');
+const fixNote = $('fixNote');
 const suggestions = $('suggestions');
 const tabFavicon = $('tabFavicon');
 const tabTitle = $('tabTitle');
 const tabHost = $('tabHost');
 const tabWarning = $('tabWarning');
+const stopBtn = $('stopBtn');
+const nanoOnboard = $('nanoOnboard');
+const nanoDownloadBtn = $('nanoDownloadBtn');
+const nanoProgress = $('nanoProgress');
+const nanoProgressFill = $('nanoProgressFill');
+const nanoProgressText = $('nanoProgressText');
+const nanoGate = $('nanoGate');
+const historySection = $('historySection');
+const historyToggle = $('historyToggle');
+const historyList = $('historyList');
 
 let busy = false;
+let fixing = false;
+
+// the task + verdict of the most recent result (for history persistence)
+let lastResult = null; // { task, verdict, reason }
+
+// ---- run history (chrome.storage.local) ------------------------------------
+const HISTORY_KEY = 'qaHistory';
+const HISTORY_CAP = 10;
 
 // the active tab we will test (refreshed on activation/update)
 let activeTab = null; // { id, url, title, favIconUrl }
@@ -145,6 +173,22 @@ function onPortMessage(msg) {
       setBusy(false);
       showError(msg.message || 'Something went wrong.');
       break;
+    case 'cancelled':
+      // The run will also emit done/error; handle both orders gracefully —
+      // returning to idle here is safe even if the run already finalized.
+      finalizePendingStep(null);
+      setBusy(false);
+      addProgressLine(msg.cancelled === false ? 'Nothing to stop.' : 'Stopped.');
+      break;
+    case 'fix-progress':
+      addFixLine(msg.line);
+      break;
+    case 'fix-done':
+      onFixDone(msg);
+      break;
+    case 'nano-progress':
+      renderNanoProgress(msg.status);
+      break;
     default:
       break;
   }
@@ -158,34 +202,118 @@ function setBridge(connected) {
 }
 
 function setNano(availability) {
+  const a = String(availability || '').toLowerCase();
   let text;
-  switch (availability) {
+  // onboarding sub-elements default hidden; specific states reveal them
+  let showOnboard = false;
+  let showDownloadBtn = false;
+  let showGate = false;
+
+  switch (a) {
     case 'available':
     case 'readily':
-      text = 'On-device AI: ready';
+      text = 'On-device AI: ready ✅';
+      // a completed download leaves the progress visible until flip; clear it
+      hideNanoProgress();
       break;
     case 'downloadable':
-    case 'downloading':
     case 'after-download':
+      text = 'On-device AI: available to download';
+      showOnboard = true;
+      showDownloadBtn = !nanoDownloading;
+      break;
+    case 'downloading':
       text = 'On-device AI: downloading — testing still works via cloud free tier';
+      showOnboard = true;
+      showDownloadBtn = false;
+      break;
+    case 'unavailable':
+      text = 'On-device AI: unavailable — testing still works via cloud free tier';
+      showOnboard = true;
+      showGate = true;
       break;
     default:
       text = 'On-device AI: unavailable — testing still works via cloud free tier';
       break;
   }
   nanoLine.textContent = text;
+
+  nanoOnboard.hidden = !showOnboard;
+  nanoDownloadBtn.hidden = !showDownloadBtn;
+  nanoGate.hidden = !showGate;
 }
+
+// ---- nano download / onboarding -------------------------------------------
+let nanoDownloading = false;
+
+function renderNanoProgress(status) {
+  nanoDownloading = true;
+  nanoOnboard.hidden = false;
+  nanoDownloadBtn.hidden = true;
+  nanoGate.hidden = true;
+  nanoProgress.hidden = false;
+
+  const s = status || {};
+  // status may carry { loaded, total } bytes and/or a state string.
+  let pct = null;
+  if (typeof s.loaded === 'number' && typeof s.total === 'number' && s.total > 0) {
+    pct = Math.max(0, Math.min(100, Math.round((s.loaded / s.total) * 100)));
+  } else if (typeof s.progress === 'number') {
+    // progress may be 0..1 or 0..100
+    pct = s.progress <= 1 ? Math.round(s.progress * 100) : Math.round(s.progress);
+    pct = Math.max(0, Math.min(100, pct));
+  }
+
+  if (pct !== null) {
+    nanoProgressFill.style.width = pct + '%';
+    nanoProgressText.textContent = `Downloading on-device AI… ${pct}%`;
+  } else {
+    // indeterminate — show a label, keep last width
+    nanoProgressText.textContent = s.state
+      ? `Downloading on-device AI… (${s.state})`
+      : 'Downloading on-device AI…';
+  }
+  nanoLine.textContent = 'On-device AI: downloading — testing still works via cloud free tier';
+}
+
+function hideNanoProgress() {
+  nanoDownloading = false;
+  nanoProgress.hidden = true;
+  nanoProgressFill.style.width = '0%';
+  nanoProgressText.textContent = '';
+}
+
+nanoDownloadBtn.addEventListener('click', () => {
+  nanoDownloading = true;
+  nanoDownloadBtn.hidden = true;
+  nanoGate.hidden = true;
+  nanoProgress.hidden = false;
+  nanoProgressText.textContent = 'Starting download…';
+  postToSW({ kind: 'nano-download' });
+});
 
 // ---- busy / run button -----------------------------------------------------
 function setBusy(value) {
   busy = value;
   refreshRunEnabled();
   runBtn.textContent = value ? 'Testing…' : 'Run test';
+  stopBtn.hidden = !value;
+  stopBtn.disabled = false;
+  stopBtn.textContent = 'Stop';
   suggestions.querySelectorAll('.suggestion-card').forEach((c) => {
     c.disabled = value;
   });
   if (!value) finalizePendingStep(null);
 }
+
+// ---- stop / cancel ---------------------------------------------------------
+stopBtn.addEventListener('click', () => {
+  if (!busy) return;
+  stopBtn.disabled = true;
+  stopBtn.textContent = 'Stopping…';
+  addProgressLine('Stopping the test…');
+  postToSW({ kind: 'cancel' });
+});
 
 // ---- active-tab tracking ---------------------------------------------------
 function isTestableUrl(url) {
@@ -266,6 +394,20 @@ function addProgressLine(line) {
   ts.textContent = new Date().toLocaleTimeString();
   el.appendChild(ts);
   el.appendChild(document.createTextNode(String(line)));
+  feed.appendChild(el);
+  feed.scrollTop = feed.scrollHeight;
+}
+
+// ---- feed: auto-fix progress lines (distinct style) ------------------------
+function addFixLine(line) {
+  if (line === undefined || line === null) return;
+  const el = document.createElement('span');
+  el.className = 'feed-line fix-line';
+  const ts = document.createElement('span');
+  ts.className = 'feed-ts';
+  ts.textContent = new Date().toLocaleTimeString();
+  el.appendChild(ts);
+  el.appendChild(document.createTextNode('🛠️ ' + String(line)));
   feed.appendChild(el);
   feed.scrollTop = feed.scrollHeight;
 }
@@ -399,13 +541,17 @@ function renderResult(params) {
     verdictBadge.textContent = '🤔 UNCERTAIN';
   }
 
-  plainReport.textContent = params.plainReport || params.reason || '(no report)';
+  const reportText = params.plainReport || params.reason || '(no report)';
+  plainReport.textContent = reportText;
 
   const fix = (params.fixPrompt || '').trim();
   if (fix) {
     fixPrompt.value = fix;
     fixSection.hidden = false;
     resetCopyBtn();
+    // auto-fix is only meaningful on a non-pass verdict that produced a fix prompt
+    resetFixUi();
+    autoFixBtn.hidden = (verdict === 'pass');
   } else {
     fixSection.hidden = true;
   }
@@ -418,6 +564,14 @@ function renderResult(params) {
   } else {
     addProgressLine('Done.');
   }
+
+  // persist to run history
+  lastResult = {
+    task: (taskInput.value || '').trim(),
+    verdict,
+    reason: reportText,
+  };
+  void saveHistory(lastResult);
 }
 
 // ---- copy fix prompt -------------------------------------------------------
@@ -452,6 +606,153 @@ copyBtn.addEventListener('click', async () => {
   }
 });
 
+// ---- auto-fix --------------------------------------------------------------
+function resetFixUi() {
+  fixing = false;
+  autoFixBtn.hidden = false;
+  autoFixBtn.disabled = false;
+  autoFixBtn.textContent = '🤖 Auto-fix with my coding agent';
+  fixStatus.hidden = true;
+  fixStatus.textContent = '';
+  fixNote.hidden = true;
+  fixNote.textContent = '';
+}
+
+autoFixBtn.addEventListener('click', () => {
+  if (fixing) return;
+  fixing = true;
+  autoFixBtn.disabled = true;
+  autoFixBtn.textContent = 'Fixing…';
+  fixNote.hidden = true;
+  fixStatus.hidden = false;
+  fixStatus.textContent = 'Handing the fix to your coding agent…';
+  hideError();
+  // keep the suggestion cards / run disabled while a fix is in flight
+  suggestions.querySelectorAll('.suggestion-card').forEach((c) => { c.disabled = true; });
+  runBtn.disabled = true;
+  addFixLine('Starting auto-fix…');
+  postToSW({ kind: 'fix' });
+});
+
+function onFixDone(msg) {
+  fixing = false;
+  // re-enable run + suggestions (respecting tab testability)
+  suggestions.querySelectorAll('.suggestion-card').forEach((c) => { c.disabled = false; });
+  refreshRunEnabled();
+
+  if (msg && msg.ok) {
+    const agent = msg.agent ? String(msg.agent) : 'your coding agent';
+    autoFixBtn.hidden = true;
+    fixStatus.hidden = true;
+    fixNote.hidden = false;
+    fixNote.textContent = `Fix applied by ${agent} — run the test again to verify`;
+    addFixLine(`Fix applied by ${agent}.`);
+  } else {
+    // failure → error banner with the message; re-enable the button to retry
+    autoFixBtn.disabled = false;
+    autoFixBtn.textContent = '🤖 Auto-fix with my coding agent';
+    fixStatus.hidden = true;
+    const m = (msg && msg.message) ? String(msg.message) : 'Auto-fix failed.';
+    showError(m);
+    addFixLine('Auto-fix failed: ' + m);
+  }
+}
+
+// ---- run history (chrome.storage.local) ------------------------------------
+function relativeTime(ts) {
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return 'just now';
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
+function verdictEmoji(verdict) {
+  switch (String(verdict || '').toLowerCase()) {
+    case 'pass': return '✅';
+    case 'fail': return '❌';
+    default: return '🤔';
+  }
+}
+
+function loadHistory() {
+  return new Promise((resolve) => {
+    try {
+      chrome.storage.local.get(HISTORY_KEY, (res) => {
+        void chrome.runtime.lastError;
+        const arr = res && Array.isArray(res[HISTORY_KEY]) ? res[HISTORY_KEY] : [];
+        resolve(arr);
+      });
+    } catch {
+      resolve([]);
+    }
+  });
+}
+
+async function saveHistory(result) {
+  if (!result) return;
+  const entry = {
+    ts: Date.now(),
+    task: String(result.task || '').slice(0, 80),
+    verdict: result.verdict,
+    reason: String(result.reason || '').slice(0, 120),
+  };
+  const list = await loadHistory();
+  list.unshift(entry);
+  const capped = list.slice(0, HISTORY_CAP);
+  try {
+    chrome.storage.local.set({ [HISTORY_KEY]: capped }, () => { void chrome.runtime.lastError; });
+  } catch { /* storage unavailable — non-fatal */ }
+  renderHistory(capped);
+}
+
+function renderHistory(list) {
+  historyList.textContent = '';
+  if (!list || list.length === 0) {
+    historySection.hidden = true;
+    return;
+  }
+  historySection.hidden = false;
+  for (const item of list) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'history-item';
+
+    const emoji = document.createElement('span');
+    emoji.className = 'history-emoji';
+    emoji.textContent = verdictEmoji(item.verdict);
+    row.appendChild(emoji);
+
+    const task = document.createElement('span');
+    task.className = 'history-task';
+    task.textContent = item.task || '(no task)';
+    task.title = item.reason || '';
+    row.appendChild(task);
+
+    const time = document.createElement('span');
+    time.className = 'history-time';
+    time.textContent = relativeTime(item.ts);
+    row.appendChild(time);
+
+    // clicking re-fills the task textarea (no auto-run)
+    row.addEventListener('click', () => {
+      taskInput.value = item.task || '';
+      taskInput.focus();
+    });
+
+    historyList.appendChild(row);
+  }
+}
+
+historyToggle.addEventListener('click', () => {
+  const open = historyToggle.getAttribute('aria-expanded') === 'true';
+  historyToggle.setAttribute('aria-expanded', String(!open));
+  historyList.hidden = open;
+});
+
 // ---- run -------------------------------------------------------------------
 function startRun(task) {
   if (busy) return;
@@ -467,6 +768,7 @@ function startRun(task) {
   }
   hideError();
   resultCard.hidden = true;
+  resetFixUi();
   clearFeed();
   addProgressLine(`Asking the agent to test: ${activeTab.url}`);
   // optimistic; the SW confirms with 'accepted' or 'error'
@@ -494,6 +796,7 @@ function requestInitialState() {
 
 loadActiveTab();
 requestInitialState();
+void loadHistory().then(renderHistory);
 
 // poll the bridge connection so the dot stays accurate
 setInterval(() => postToSW({ kind: 'bridge-status' }), 3000);

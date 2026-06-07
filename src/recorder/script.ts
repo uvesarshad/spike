@@ -10,11 +10,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Report, StepTarget } from '../report/report.js';
 
+/** A script-step locator: role+name plus an optional `nth` disambiguator.
+ *
+ * `nth` (0-based) picks which of several role+name matches to act on when a page
+ * has duplicates (two "Edit" buttons, three "Delete" links…). It is OPTIONAL:
+ * scripts recorded today omit it (the StepRecord the loop emits doesn't yet say
+ * which of N matches was used — see the COMPROMISE note in replay.ts), and
+ * replay treats a missing `nth` as "there must be exactly one match". The field
+ * is here so a future loop change can populate it without a schema/version bump. */
+export interface ScriptTarget extends StepTarget {
+  /** 0-based index among role+name matches. Absent → exactly-one-match required. */
+  nth?: number;
+}
+
 export type ScriptStep =
   | { type: 'navigate'; url: string }
-  | { type: 'click'; target: StepTarget }
-  | { type: 'type'; target: StepTarget; text: string }
-  | { type: 'assert_dom'; target: StepTarget; contains: string }
+  | { type: 'click'; target: ScriptTarget }
+  | { type: 'type'; target: ScriptTarget; text: string }
+  | { type: 'assert_dom'; target: ScriptTarget; contains: string }
   | { type: 'assert_visual'; expectation: string }
   | { type: 'wait'; ms: number };
 
@@ -121,6 +134,63 @@ export function listScripts(root = process.cwd()): string[] {
     .map((f) => path.join(dir, f));
 }
 
+/* ---------- heal diff report ---------- */
+
+/** A one-line-per-change, human-readable diff between two scripts, compared by
+ * index. Used in the self-heal path to show WHAT the AI re-recording changed
+ * (drift fixes show up as "changed" steps; added/removed flow steps as such).
+ *
+ * Comparison key per step: type + target (role/name/nth) + text/contains/url —
+ * everything that affects replay. Returns "no changes" when identical. */
+export function diffScripts(oldS: QaScript, newS: QaScript): string {
+  const a = oldS.steps;
+  const b = newS.steps;
+  const n = Math.max(a.length, b.length);
+  const lines: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const o = a[i];
+    const w = b[i];
+    if (o && !w) {
+      lines.push(`- [${i}] removed: ${stepSig(o)}`);
+    } else if (!o && w) {
+      lines.push(`+ [${i}] added: ${stepSig(w)}`);
+    } else if (o && w) {
+      const so = stepSig(o);
+      const sw = stepSig(w);
+      if (so !== sw) lines.push(`~ [${i}] changed: ${so}  →  ${sw}`);
+    }
+  }
+  const changed = lines.length;
+  const header =
+    changed === 0
+      ? `no changes (${a.length} step(s))`
+      : `${changed} change(s) across ${a.length}→${b.length} steps`;
+  return changed === 0 ? header : `${header}\n${lines.join('\n')}`;
+}
+
+/** A compact, comparable signature of a step — what diffScripts compares on. */
+function stepSig(s: ScriptStep): string {
+  switch (s.type) {
+    case 'navigate':
+      return `navigate ${s.url}`;
+    case 'click':
+      return `click ${targetSig(s.target)}`;
+    case 'type':
+      return `type ${JSON.stringify(s.text)} → ${targetSig(s.target)}`;
+    case 'assert_dom':
+      return `assert_dom ${targetSig(s.target)} contains ${JSON.stringify(s.contains)}`;
+    case 'assert_visual':
+      return `assert_visual ${JSON.stringify(s.expectation.slice(0, 60))}`;
+    case 'wait':
+      return `wait ${s.ms}ms`;
+  }
+}
+
+function targetSig(t: ScriptTarget): string {
+  const nth = typeof t.nth === 'number' ? `#${t.nth}` : '';
+  return `${t.role}${nth}"${t.name ?? ''}"`;
+}
+
 /* ---------- Playwright codegen (portable artifact) ---------- */
 
 const ROLE_MAP: Record<string, string> = {
@@ -135,11 +205,12 @@ const ROLE_MAP: Record<string, string> = {
   alert: 'alert',
 };
 
-function locator(target: StepTarget): string {
+function locator(target: ScriptTarget): string {
   const role = ROLE_MAP[target.role] ?? target.role;
-  return target.name
+  const base = target.name
     ? `page.getByRole('${role}', { name: ${JSON.stringify(target.name)} })`
     : `page.getByRole('${role}')`;
+  return typeof target.nth === 'number' ? `${base}.nth(${target.nth})` : base;
 }
 
 export function toPlaywrightSpec(script: QaScript): string {

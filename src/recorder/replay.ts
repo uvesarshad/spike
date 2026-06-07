@@ -13,7 +13,7 @@ import type { NanoPort } from '../ports/nano-port.js';
 import { firstError } from '../capture/console-network.js';
 import type { ArtifactStore } from '../report/artifacts.js';
 import type { FailingStep, Report, RunVerdict, StepRecord } from '../report/report.js';
-import type { QaScript, ScriptStep } from './script.js';
+import type { QaScript, ScriptStep, ScriptTarget } from './script.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const FIND_TIMEOUT_MS = 5_000;
@@ -66,17 +66,17 @@ export async function replayScript(
           await browser.navigate(s.url);
           break;
         case 'click': {
-          const node = await findByTarget(browser, s.target.role, s.target.name);
+          const node = await findByTarget(browser, s.target);
           await browser.click(node.id);
           break;
         }
         case 'type': {
-          const node = await findByTarget(browser, s.target.role, s.target.name);
+          const node = await findByTarget(browser, s.target);
           await browser.type(node.id, s.text);
           break;
         }
         case 'assert_dom': {
-          const node = await findByTarget(browser, s.target.role, s.target.name);
+          const node = await findByTarget(browser, s.target);
           const ax = await browser.axTree();
           const fresh = findNodeById(ax.root, node.id) ?? node;
           const hay = subtreeText(fresh).toLowerCase();
@@ -210,13 +210,38 @@ function describeScriptStep(s: ScriptStep): string {
   }
 }
 
-/** Find a node by role+name, polling while the page settles. */
-async function findByTarget(browser: BrowserPort, role: string, name?: string): Promise<AxNode> {
+/** Find the node a target locator points at, polling while the page settles.
+ *
+ * Disambiguation semantics:
+ *   - `nth` set → use the nth (0-based) role+name match; out-of-range fails.
+ *   - `nth` unset + exactly one match → use it.
+ *   - `nth` unset + MULTIPLE matches → FAIL with a precise 'ambiguous locator'
+ *     error rather than silently picking the first. (COMPROMISE for this round:
+ *     the loop doesn't yet record which of N matches it used, so a recorded
+ *     script can't carry `nth` automatically — but the replay schema accepts it,
+ *     so a future loop change can populate `nth` with no version bump, and
+ *     hand-authored scripts can use it today.)
+ *   - zero matches → UI-drift error after the settle timeout. */
+async function findByTarget(browser: BrowserPort, target: ScriptTarget): Promise<AxNode> {
+  const { role, name, nth } = target;
   const deadline = Date.now() + FIND_TIMEOUT_MS;
   for (;;) {
     const ax = await browser.axTree();
-    const hit = findByRoleName(ax.root, role, name);
-    if (hit) return hit;
+    const matches = collectByRoleName(ax.root, role, name);
+    if (matches.length > 0) {
+      if (typeof nth === 'number') {
+        if (nth < 0 || nth >= matches.length) {
+          throw new Error(
+            `locator out of range: nth=${nth} but only ${matches.length} × ${role} "${name ?? ''}" on the page`,
+          );
+        }
+        return matches[nth];
+      }
+      if (matches.length === 1) return matches[0];
+      throw new Error(
+        `ambiguous locator: ${matches.length} × ${role} "${name ?? ''}" — re-record or refine (add nth)`,
+      );
+    }
     if (Date.now() > deadline) {
       throw new Error(`UI drift: no ${role} ${name ? `"${name}" ` : ''}on the page after ${FIND_TIMEOUT_MS}ms`);
     }
@@ -224,13 +249,15 @@ async function findByTarget(browser: BrowserPort, role: string, name?: string): 
   }
 }
 
-function findByRoleName(root: AxNode, role: string, name?: string): AxNode | undefined {
-  if (root.role === role && root.name === name) return root;
-  for (const c of root.children ?? []) {
-    const hit = findByRoleName(c, role, name);
-    if (hit) return hit;
-  }
-  return undefined;
+/** All nodes matching role+name, in document (pre-order) order. */
+function collectByRoleName(root: AxNode, role: string, name?: string): AxNode[] {
+  const out: AxNode[] = [];
+  const walk = (n: AxNode): void => {
+    if (n.role === role && n.name === name) out.push(n);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+  return out;
 }
 
 function findNodeById(root: AxNode, id: string): AxNode | undefined {

@@ -40,6 +40,18 @@ export interface QaConfig {
   artifactsDir: string;
   /** Default driver-loop step budget. */
   maxSteps: number;
+  /** Auto-fix: coding-agent CLI that receives the fix prompt headlessly
+   * (e.g. bin 'claude', args ['-p','{prompt}','--permission-mode','acceptEdits']).
+   * Unset bin → auto-detect claude/codex on PATH. '{prompt}' is substituted. */
+  fixAgentBin?: string;
+  fixAgentArgs?: string[];
+  /** Project directory the fix agent runs in (defaults to cwd). */
+  fixAgentCwd?: string;
+  /** Hosts the driver may click/type on; everywhere else is read-only
+   * (navigation + looking allowed, mutation blocked) — Tier-4 guardrail. */
+  allowedHosts: string[];
+  /** Record a replay GIF (ghost cursor + captions are in-page, so they're in frame). */
+  recordClip: boolean;
 }
 
 const DEFAULTS: QaConfig = {
@@ -55,6 +67,12 @@ const DEFAULTS: QaConfig = {
   googleCliEnv: { NODE_OPTIONS: '--use-system-ca' },
   artifactsDir: path.resolve('artifacts'),
   maxSteps: 12,
+  allowedHosts: ['localhost', '127.0.0.1'],
+  // opt-in (QA_RECORD_CLIP=1): GIF capture works over raw CDP (test/v14) but
+  // chrome.debugger does NOT expose Page.startScreencast (extension mode), and
+  // one cdp-mode run showed an unexplained input interaction — see TODO.md.
+  // Vibe-mode clips need a chrome.tabCapture recorder (planned).
+  recordClip: false,
 };
 
 function fromFile(cwd: string): Partial<QaConfig> {
@@ -78,6 +96,13 @@ function fromEnv(): Partial<QaConfig> {
   if (e.GEMINI_API_KEY) out.geminiApiKey = e.GEMINI_API_KEY;
   if (e.QA_ARTIFACTS_DIR) out.artifactsDir = e.QA_ARTIFACTS_DIR;
   if (e.QA_MAX_STEPS) out.maxSteps = Number(e.QA_MAX_STEPS);
+  if (e.QA_FIX_AGENT_BIN) out.fixAgentBin = e.QA_FIX_AGENT_BIN;
+  if (e.QA_FIX_AGENT_ARGS) {
+    try { out.fixAgentArgs = JSON.parse(e.QA_FIX_AGENT_ARGS); } catch { /* ignore malformed */ }
+  }
+  if (e.QA_FIX_AGENT_CWD) out.fixAgentCwd = e.QA_FIX_AGENT_CWD;
+  if (e.QA_ALLOWED_HOSTS) out.allowedHosts = e.QA_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
+  if (e.QA_RECORD_CLIP) out.recordClip = e.QA_RECORD_CLIP !== '0' && e.QA_RECORD_CLIP !== 'false';
   return out;
 }
 

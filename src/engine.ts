@@ -16,6 +16,8 @@ import { loadConfig, type QaConfig } from './config.js';
 import { CdpBrowser } from './ports/cdp-browser.js';
 import { ExtensionBrowser } from './ports/extension-browser.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
+import { ExtensionNano } from './ports/extension-nano.js';
+import type { NanoPort } from './ports/nano-port.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { launchChromeWithExtension } from './chrome/extensions.js';
 import { cdpAlive } from './chrome/launch.js';
@@ -28,9 +30,11 @@ import { ByokGeminiAdapter } from './router/adapters/byok-gemini.js';
 import { OllamaAdapter } from './router/adapters/ollama.js';
 import { ArtifactStore } from './report/artifacts.js';
 import { runDriverLoop } from './driver/loop.js';
+import { Vault } from './vault/vault.js';
 import type { Report } from './report/report.js';
-import { loadScript, saveScript, scriptFromReport, type QaScript } from './recorder/script.js';
+import { diffScripts, loadScript, saveScript, scriptFromReport, type QaScript } from './recorder/script.js';
 import { replayScript } from './recorder/replay.js';
+import { startClipRecorder, type ClipRecorder } from './clip/screencast.js';
 
 export interface QaRunOptions {
   maxSteps?: number;
@@ -49,6 +53,9 @@ export interface QaRunOptions {
   /** Vibe mode: attach to the user's CURRENT tab (panel-supplied) instead of
    * creating a fresh one. cdp mode ignores this. */
   tabId?: number;
+  /** Cooperative cancellation, threaded into the driver loop: when aborted the
+   * run ends 'uncertain' / 'cancelled by user'. (vibe.cancel depends on this.) */
+  signal?: AbortSignal;
 }
 
 export interface QaRunResult extends Report {
@@ -157,21 +164,27 @@ export async function openBrowserSession(
 interface Session {
   cfg: QaConfig;
   browser: BrowserPort;
-  nano: NanoRunnerPage;
+  nano: NanoPort;
   close(): Promise<void>;
 }
 
 async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer; tabId?: number } = {}): Promise<Session> {
   const browserSession = await openBrowserSession(config, deps);
   const { cfg } = browserSession;
-  // TODO: swap NanoRunnerPage for ExtensionNano in pure-extension mode.
-  // NanoRunnerPage works in BOTH modes: the extension-launched Chrome still
-  // exposes cfg.cdpPort, so the runner page is driven the same way.
-  const nano = new NanoRunnerPage({
-    cdpPort: cfg.cdpPort,
-    runnerPort: cfg.runnerPort,
-    profileDir: cfg.chromeProfile,
-  });
+  // Nano access depends on HOW Chrome got here:
+  //  - injected bridge (vibe path: the user's own Chrome, no daemon CDP) → talk
+  //    to the extension's own Prompt API over the bridge (ExtensionNano). There
+  //    is no daemon CDP page here to host the localhost runner.
+  //  - we launched Chrome ourselves (proven cdp path; extension mode that
+  //    spawned its own Chrome) → NanoRunnerPage over cfg.cdpPort.
+  const nano: NanoPort =
+    cfg.via === 'extension' && deps.bridge
+      ? new ExtensionNano({ bridge: deps.bridge })
+      : new NanoRunnerPage({
+          cdpPort: cfg.cdpPort,
+          runnerPort: cfg.runnerPort,
+          profileDir: cfg.chromeProfile,
+        });
   try {
     await nano.start();
   } catch (e) {
@@ -189,13 +202,37 @@ async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeSer
   };
 }
 
+/** Nano availability with a download grace window. A fresh Chrome reports
+ * 'downloading' (or 'downloadable') for ~60s while it re-validates the on-disk
+ * model; giving up to rung 1 immediately would needlessly skip the $0 rung.
+ * Poll every 5s up to 60s (progress line every 15s); return as soon as it
+ * settles to 'available', or on any terminal state ('unavailable'/'api-missing'). */
+async function pollNanoAvailable(
+  nano: NanoPort,
+  progress: (line: string) => void,
+): Promise<string> {
+  const deadline = Date.now() + 60_000;
+  let lastProgress = 0;
+  let a = await nano.availability();
+  while ((a === 'downloading' || a === 'downloadable') && Date.now() < deadline) {
+    const elapsed = Date.now() - (deadline - 60_000);
+    if (elapsed - lastProgress >= 15_000) {
+      progress(`rung 0: Gemini Nano ${a} — waiting up to 60s for it to become ready (${Math.round(elapsed / 1000)}s)`);
+      lastProgress = elapsed;
+    }
+    await new Promise<void>((r) => setTimeout(r, 5_000));
+    a = await nano.availability();
+  }
+  return a;
+}
+
 export async function qaRun(task: string, url: string, opts: QaRunOptions = {}): Promise<QaRunResult> {
   const progress = opts.onProgress ?? (() => {});
   const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId });
   const { cfg, browser, nano } = session;
 
   const adapters: ModelAdapter[] = [];
-  if ((await nano.availability()) === 'available') {
+  if ((await pollNanoAvailable(nano, progress)) === 'available') {
     progress('rung 0: Gemini Nano available — warming up');
     await nano.warmup();
     adapters.push(new NanoAdapter(nano));
@@ -213,10 +250,43 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
   progress(`run ${artifacts.runId}: "${task}" on ${url}`);
 
   try {
+    // replay clip: the ghost cursor + captions render in-page, so the
+    // screencast captures the whole show; cheap (jpeg @ ~2fps) and optional.
+    // EXTENSION MODE ONLY for now: one cdp-mode run showed post-navigation
+    // clicks no-op'ing with the screencast active (warm daemon Chrome; not
+    // reproducible on fresh profiles — see test/v16.clip-input-interaction.ts).
+    // Clips are a vibe-mode feature anyway; revisit when the interaction is
+    // understood.
+    let clip: ClipRecorder | null = null;
+    if (cfg.recordClip && browser.cdpClient) {
+      try {
+        // 5s guard: chrome.debugger silently never answers Page.startScreencast
+        // (extension transport) — never let the clip hang the run
+        clip = await Promise.race([
+          startClipRecorder(browser.cdpClient() as Parameters<typeof startClipRecorder>[0], artifacts),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+        ]);
+        if (!clip) progress('clip recorder unavailable on this transport — continuing without');
+      } catch {
+        progress('clip recorder unavailable on this transport — continuing without');
+      }
+    }
+
     const report: QaRunResult = await runDriverLoop(browser, router, artifacts, task, url, {
       maxSteps: opts.maxSteps ?? cfg.maxSteps,
       onStep: opts.onStep,
+      allowedHosts: cfg.allowedHosts,
+      vault: new Vault(),
+      signal: opts.signal,
     });
+    if (clip) {
+      const gif = await clip.stop().catch(() => null);
+      if (gif) {
+        report.evidence_paths.push(gif);
+        artifacts.saveReport(report); // re-save with the clip path included
+        progress(`replay clip: ${gif}`);
+      }
+    }
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);
 
     if (report.verdict === 'pass' && (opts.record ?? true)) {
@@ -275,6 +345,7 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
         failedStep: report.failing_step?.index ?? -1,
         healedAt: new Date().toISOString(),
       };
+      progress(`what changed: ${diffScripts(script, newScript)}`);
       const { jsonPath } = saveScript(newScript);
       progress(`self-heal succeeded — script re-emitted: ${jsonPath}`);
       return { ...healed, healed: true, recordedScript: jsonPath };

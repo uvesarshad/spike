@@ -14,8 +14,50 @@ import type { ArtifactStore } from '../report/artifacts.js';
 import { describeAction, type FailingStep, type Report, type StepRecord, type RunVerdict } from '../report/report.js';
 import { PLAN_JSON_SCHEMA, PlanResultSchema, type Action, type PlanResult } from './actions.js';
 import { buildPlannerPrompt } from './planner-prompt.js';
+import type { Vault } from '../vault/vault.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** {{secret:NAME}} — NAME is [a-zA-Z0-9_-]+. Resolved AT EXECUTE TIME ONLY; the
+ * placeholder is what lives in every recorded/reported/logged surface. */
+const SECRET_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
+
+/** Thrown when a type action references a secret the vault doesn't hold. */
+class SecretNotFoundError extends Error {}
+
+/** Resolve any {{secret:NAME}} occurrences in `text` via the vault. Throws
+ * SecretNotFoundError (with the qa-cli hint) when a referenced secret is missing.
+ * Returns the original string unchanged when there are no placeholders. */
+function resolveSecrets(text: string, vault: Vault | undefined): string {
+  if (!SECRET_RE.test(text)) return text;
+  SECRET_RE.lastIndex = 0;
+  return text.replace(SECRET_RE, (_m, name: string) => {
+    const value = vault?.get(name);
+    if (value === undefined) {
+      throw new SecretNotFoundError(
+        `secret "${name}" not found — add it with: qa secret set ${name}`,
+      );
+    }
+    return value;
+  });
+}
+
+/** Host of a URL, lowercased; '' for unparseable/non-http urls (about:blank etc). */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/** True when host is exactly in allowedHosts or a subdomain of one of them. */
+function hostAllowed(host: string, allowedHosts: string[]): boolean {
+  return allowedHosts.some((allowed) => {
+    const a = allowed.toLowerCase();
+    return host === a || host.endsWith('.' + a);
+  });
+}
 
 /** Step-progress callback shape — VibeService forwards these verbatim to the UI. */
 export type StepKind = 'plan' | 'click' | 'type' | 'navigate' | 'assert' | 'wait' | 'finish';
@@ -29,6 +71,16 @@ export interface StepInfo {
 export interface LoopOptions {
   maxSteps: number;
   onStep?: (info: StepInfo) => void;
+  /** Hosts the driver may click/type on; everywhere else is read-only (Tier-4).
+   * navigate/asserts/wait stay allowed. Defaults to localhost/127.0.0.1 when
+   * omitted so a misconfigured caller can't silently disable the guard. */
+  allowedHosts?: string[];
+  /** Secrets store for {{secret:NAME}} resolution at execute time. Optional:
+   * without it, a {{secret:…}} placeholder fails the step (secret not found). */
+  vault?: Vault;
+  /** Cooperative cancellation — checked before each planner call and each
+   * action; aborting ends the run 'uncertain' with reason 'cancelled by user'. */
+  signal?: AbortSignal;
 }
 
 /** Map an action to its onStep kind. */
@@ -114,6 +166,9 @@ export async function runDriverLoop(
   let failingStep: FailingStep | null = null;
 
   const onStep = opts.onStep ?? (() => {});
+  const allowedHosts = opts.allowedHosts ?? ['localhost', '127.0.0.1'];
+  const vault = opts.vault;
+  const signal = opts.signal;
 
   await browser.navigate(url);
   browser.drainConsole();
@@ -126,6 +181,10 @@ export async function runDriverLoop(
 
   // each outer iteration = ONE planner call → a batch of 1-3 actions
   while (stepIndex < opts.maxSteps && !done) {
+    if (signal?.aborted) {
+      reason = 'cancelled by user';
+      break;
+    }
     const ax = await browser.axTree();
     lastSnapshotAx = ax;
     const batchUrl = await browser.url();
@@ -175,8 +234,28 @@ export async function runDriverLoop(
     lastBatchFirstSig = firstSig;
 
     // ---- execute the batch, one StepRecord + drain per action ----
+    let aborted = false;
+    let readOnlyBlock: string | null = null; // set when a mutation hits a non-allowed host
     for (let a = 0; a < actions.length && stepIndex < opts.maxSteps; a++) {
       const action = actions[a];
+
+      if (signal?.aborted) {
+        aborted = true;
+        reason = 'cancelled by user';
+        break;
+      }
+
+      // ---- read-only-by-default guard: mutations (click/type) only on allowed
+      // hosts. Check the LIVE page host, not batchUrl — an earlier action in the
+      // batch may have navigated us elsewhere. navigate/assert/wait stay allowed.
+      if (action.type === 'click' || action.type === 'type') {
+        const host = hostOf(await browser.url());
+        if (host && !hostAllowed(host, allowedHosts)) {
+          readOnlyBlock = host;
+          break;
+        }
+      }
+
       const i = stepIndex++;
 
       const record: StepRecord = {
@@ -243,6 +322,12 @@ export async function runDriverLoop(
             record.ok = false;
             record.error = `expected ${JSON.stringify(action.contains)} in ${action.nodeId}, found: ${hay.slice(0, 150)}`;
           }
+        } else if (action.type === 'type') {
+          // resolve {{secret:NAME}} AT EXECUTE TIME ONLY — the record keeps the
+          // PLACEHOLDER (action is unchanged), so history/report/recorder/audit
+          // never hold the real value. Missing secret → step fails.
+          const resolved = resolveSecrets(action.text, vault);
+          await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
         } else {
           await executeWithRetry(browser, action, ax.root);
         }
@@ -254,6 +339,17 @@ export async function runDriverLoop(
       await sleep(150); // let async fallout (fetches, navigations) land
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
+
+      // ---- audit trail: one redacted JSON line per EXECUTED action. target is
+      // role+name or url (placeholders, never resolved secrets). ----
+      artifacts.appendAudit({
+        ts: record.ts,
+        runId: artifacts.runId,
+        action: action.type,
+        target: auditTarget(action, record.target),
+        url: await browser.url(),
+        ok: record.ok,
+      });
 
       onStep({
         index: i,
@@ -276,6 +372,19 @@ export async function runDriverLoop(
         const nowUrl = await browser.url();
         if (nowUrl !== batchUrl) break;
       }
+    }
+
+    // cancellation / read-only guard end the whole run immediately (the guard
+    // must NOT burn the step budget — finish 'uncertain' citing the host).
+    if (aborted) {
+      break; // reason already set to 'cancelled by user'
+    }
+    if (readOnlyBlock) {
+      verdict = 'uncertain';
+      reason =
+        `read-only mode: ${readOnlyBlock} is not in allowedHosts — ` +
+        'add it via QA_ALLOWED_HOSTS or qa.config.json to allow interaction';
+      break;
     }
   }
 
@@ -422,6 +531,16 @@ function subtreeText(node: AxNode): string {
   };
   walk(node);
   return parts.join(' ');
+}
+
+/** A redacted target string for the audit log: the touched node's role+name,
+ * or the navigate url, or undefined. NEVER includes resolved secret values
+ * (a type action's text — which may carry the {{secret:…}} placeholder — is
+ * deliberately not logged as the target). */
+function auditTarget(action: Action, target?: { role: string; name?: string }): string | undefined {
+  if (action.type === 'navigate') return action.url;
+  if (target) return target.name ? `${target.role} "${target.name}"` : target.role;
+  return undefined;
 }
 
 function lastInteraction(steps: StepRecord[]): FailingStep | null {

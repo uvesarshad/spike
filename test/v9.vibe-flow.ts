@@ -36,8 +36,9 @@ const check = (label: string, ok: boolean) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
 };
 
+const BRIDGE_PORT = 9418; // private — other Chromes running this extension scan 9410-9413 and must not steal our socket
 const fixture = startFixture(cfg.fixturePort, true); // bug ON
-const bridge = new BridgeServer(cfg.bridgePort); // 9410 — the daemon default the SW dials
+const bridge = new BridgeServer(BRIDGE_PORT);
 new VibeService(bridge).start();
 
 let chrome: Awaited<ReturnType<typeof launchChromeWithExtension>>['chrome'] | null = null;
@@ -48,6 +49,7 @@ try {
     extensionDir: EXT_DIR,
     profileDir: fs.mkdtempSync(path.join(os.tmpdir(), 'qa-v9-')),
     headless: true,
+    bridgePorts: [BRIDGE_PORT],
   });
   chrome = launched.chrome;
   await bridge.waitForExtension(30_000);

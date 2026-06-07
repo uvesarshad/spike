@@ -61,5 +61,8 @@ export interface BrowserPort {
   /** Everything captured since the previous drain — per-step evidence correlation. */
   drainConsole(): ConsoleEntry[];
   drainNetwork(): NetworkEntry[];
+  /** Raw CDP-shaped client for extras outside this contract (clip recorder).
+   * Optional: a future transport may not expose one. */
+  cdpClient?(): unknown;
   close(): Promise<void>;
 }

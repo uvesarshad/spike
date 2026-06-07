@@ -12,6 +12,8 @@ import { listScripts } from './recorder/script.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
 import { buildFixPrompt } from './vibe/fix-prompt.js';
+import { dispatchFix, runWithAutoFix } from './vibe/auto-fix.js';
+import { Vault } from './vault/vault.js';
 import { startFixture } from '../fixture/server.js';
 
 const program = new Command();
@@ -25,20 +27,27 @@ program
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
   .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
   .option('--no-record', 'do not record a passing run to generated-tests/')
+  .option('--fix', 'on failure, hand the fix prompt to your coding agent (claude/codex/gemini) and re-test', false)
+  .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension'; record: boolean; json: boolean }) => {
-    const report = await qaRun(task, opts.url, {
+  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension'; record: boolean; fix: boolean; maxFixAttempts?: number; json: boolean }) => {
+    const onProgress = opts.json ? undefined : (l: string) => console.log(l);
+    const qaRunOpts = {
       maxSteps: opts.maxSteps,
       record: opts.record,
-      ...(opts.via && { config: { via: opts.via } }),
-      onProgress: opts.json ? undefined : (l) => console.log(l),
-    });
-    if (opts.json) {
-      console.log(JSON.stringify(slimReport(report), null, 2));
-    } else {
-      console.log(JSON.stringify(slimReport(report), null, 2));
-      console.log(`full report: ${report.evidence_paths[0]}`);
-    }
+      ...(opts.via && { config: { via: opts.via } as const }),
+      onProgress,
+    };
+    const report = opts.fix
+      ? (await runWithAutoFix(task, opts.url, {
+          maxAttempts: opts.maxFixAttempts ?? 2,
+          config: qaRunOpts.config,
+          onProgress,
+          qaRunOpts,
+        })).finalReport
+      : await qaRun(task, opts.url, qaRunOpts);
+    console.log(JSON.stringify(slimReport(report), null, 2));
+    if (!opts.json) console.log(`full report: ${report.evidence_paths[0]}`);
     process.exit(report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
   });
 
@@ -106,9 +115,10 @@ program
 
 program
   .command('fix')
-  .description('print the paste-ready fix prompt for a finished run (runId or path to report.json)')
+  .description('print the fix prompt for a finished run — or with --apply, hand it to your coding agent headlessly')
   .argument('<runIdOrPath>', 'a runId under artifacts/, or a path to a report.json')
-  .action((runIdOrPath: string) => {
+  .option('--apply', 'dispatch the prompt to the configured coding agent (claude/codex/gemini auto-detected)', false)
+  .action(async (runIdOrPath: string, opts: { apply: boolean }) => {
     const cfg = loadConfig();
     const candidates = [
       runIdOrPath,
@@ -134,7 +144,50 @@ program
       console.log(`run ${report.runId} passed (${report.verdict}) — no fix prompt needed.`);
       return;
     }
+    if (opts.apply) {
+      const result = await dispatchFix(report, { onProgress: (l) => console.log(l) });
+      console.log(result.ok ? `fix applied by ${result.agent} — re-run the test to verify` : `fix agent failed`);
+      process.exit(result.ok ? 0 : 1);
+    }
     console.log(prompt);
+  });
+
+program
+  .command('secret')
+  .description('manage the local encrypted vault — secrets are typed via {{secret:NAME}} and never reach any model')
+  .argument('<action>', 'set | get | list | delete')
+  .argument('[name]', 'secret name')
+  .argument('[value]', 'secret value (for set)')
+  .option('--reveal', 'with get: print the value (default only confirms existence)', false)
+  .action((action: string, name?: string, value?: string, opts?: { reveal: boolean }) => {
+    const vault = new Vault();
+    switch (action) {
+      case 'set':
+        if (!name || value === undefined) {
+          console.error('usage: qa secret set <name> <value>');
+          process.exit(2);
+        }
+        vault.set(name, value);
+        console.log(`set "${name}" — use it in tasks as {{secret:${name}}}`);
+        break;
+      case 'get': {
+        if (!name) { console.error('usage: qa secret get <name> [--reveal]'); process.exit(2); }
+        const v = vault.get(name);
+        if (v === undefined) { console.error(`no secret "${name}"`); process.exit(1); }
+        console.log(opts?.reveal ? v : `"${name}" exists (use --reveal to print)`);
+        break;
+      }
+      case 'list':
+        console.log(vault.list().join('\n') || '(no secrets)');
+        break;
+      case 'delete':
+        if (!name) { console.error('usage: qa secret delete <name>'); process.exit(2); }
+        console.log(vault.delete(name) ? `deleted "${name}"` : `no secret "${name}"`);
+        break;
+      default:
+        console.error('usage: qa secret <set|get|list|delete>');
+        process.exit(2);
+    }
   });
 
 program
