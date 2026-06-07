@@ -39,6 +39,10 @@ export interface QaRunOptions {
   config?: Partial<QaConfig>;
   /** Progress lines (CLI prints them; MCP ignores). */
   onProgress?: (line: string) => void;
+  /** Caller-owned bridge (extension mode). When the panel already drives an
+   * attached Chrome, the daemon reuses this bridge instead of spawning its own;
+   * ownership (and close()) stays with the caller. */
+  bridge?: BridgeServer;
 }
 
 export interface QaRunResult extends Report {
@@ -69,14 +73,23 @@ export interface BrowserSession {
  *                 persists in the profile) and just wait for the SW to connect;
  *                 otherwise we spawn a fresh Chrome with the extension loaded.
  */
-export async function openBrowserSession(config: Partial<QaConfig> = {}): Promise<BrowserSession> {
+export async function openBrowserSession(
+  config: Partial<QaConfig> = {},
+  deps: { bridge?: BridgeServer } = {},
+): Promise<BrowserSession> {
   const cfg = loadConfig(config);
 
   if (cfg.via === 'extension') {
-    const bridge = new BridgeServer(cfg.bridgePort);
+    // Injected bridge (vibe daemon): the caller owns it — never close it here and
+    // never spawn Chrome (the user's own Chrome is already attached via the panel).
+    const injected = deps.bridge;
+    const bridge = injected ?? new BridgeServer(cfg.bridgePort);
     let chromeProcess: ChildProcess | undefined;
     try {
-      if (await cdpAlive(cfg.cdpPort)) {
+      if (injected) {
+        // The panel's Chrome is already attached to this bridge — its SW is
+        // connected. Skip the cdpAlive/spawn dance entirely.
+      } else if (await cdpAlive(cfg.cdpPort)) {
         // Chrome already up on this port — its persistent profile should carry
         // the extension. Nothing to spawn; the SW reconnects to our bridge.
       } else {
@@ -107,12 +120,14 @@ export async function openBrowserSession(config: Partial<QaConfig> = {}): Promis
         chromeProcess,
         async close() {
           await browser.close();
-          await bridge.close();
+          // Injected bridge: ownership stays with the caller — don't close it.
+          if (!injected) await bridge.close();
           // Chrome stays warm (same as cdp mode); we never kill it here.
         },
       };
     } catch (e) {
-      try { await bridge.close(); } catch { /* already closed */ }
+      // Only close a bridge WE created — never the caller's injected one.
+      if (!injected) { try { await bridge.close(); } catch { /* already closed */ } }
       throw e;
     }
   }
@@ -140,8 +155,8 @@ interface Session {
   close(): Promise<void>;
 }
 
-async function openSession(config: Partial<QaConfig>): Promise<Session> {
-  const browserSession = await openBrowserSession(config);
+async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer } = {}): Promise<Session> {
+  const browserSession = await openBrowserSession(config, deps);
   const { cfg } = browserSession;
   // TODO: swap NanoRunnerPage for ExtensionNano in pure-extension mode.
   // NanoRunnerPage works in BOTH modes: the extension-launched Chrome still
@@ -170,7 +185,7 @@ async function openSession(config: Partial<QaConfig>): Promise<Session> {
 
 export async function qaRun(task: string, url: string, opts: QaRunOptions = {}): Promise<QaRunResult> {
   const progress = opts.onProgress ?? (() => {});
-  const session = await openSession(opts.config ?? {});
+  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge });
   const { cfg, browser, nano } = session;
 
   const adapters: ModelAdapter[] = [];
@@ -213,6 +228,8 @@ export interface QaReplayOptions {
   heal?: boolean;
   config?: Partial<QaConfig>;
   onProgress?: (line: string) => void;
+  /** Caller-owned bridge (extension mode) — see QaRunOptions.bridge. */
+  bridge?: BridgeServer;
 }
 
 export interface QaReplayResult extends Report {
@@ -225,7 +242,7 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   const script: QaScript = loadScript(nameOrPath);
   progress(`replaying "${script.name}" (${script.steps.length} steps, recorded ${script.createdAt}) — no planner, $0`);
 
-  const session = await openSession(opts.config ?? {});
+  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge });
   const artifacts = new ArtifactStore(session.cfg.artifactsDir);
 
   let report: QaReplayResult;

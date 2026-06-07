@@ -52,6 +52,149 @@ function emit(event, params) {
   send({ event, params });
 }
 
+// ---- ext→daemon requests (vibe: panel drives runs through here) -------------
+//
+// The panel (side panel) cannot talk to the daemon directly. It connects to the
+// SW over a chrome.runtime port; the SW forwards run/status calls to the daemon
+// as a NEW request frame { rid, method, params? } and matches the daemon's
+// { rid, result|error } response back to the awaiting promise.
+
+let ridCounter = 0;
+const pendingRequests = new Map(); // rid -> { resolve, reject, timer }
+const REQUEST_TIMEOUT_MS = 120_000;
+
+function sendRequest(method, params) {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      reject(new Error('daemon not running — start it with: qa daemon'));
+      return;
+    }
+    const rid = ++ridCounter;
+    const timer = setTimeout(() => {
+      if (pendingRequests.has(rid)) {
+        pendingRequests.delete(rid);
+        reject(new Error(`request ${method} timed out`));
+      }
+    }, REQUEST_TIMEOUT_MS);
+    pendingRequests.set(rid, { resolve, reject, timer });
+    try {
+      send({ rid, method, params: params || {} });
+    } catch (e) {
+      clearTimeout(timer);
+      pendingRequests.delete(rid);
+      reject(e);
+    }
+  });
+}
+
+function resolveRequest(msg) {
+  const entry = pendingRequests.get(msg.rid);
+  if (!entry) return;
+  pendingRequests.delete(msg.rid);
+  clearTimeout(entry.timer);
+  if (msg.error !== undefined && msg.error !== null) {
+    entry.reject(new Error(String(msg.error && msg.error.message ? msg.error.message : msg.error)));
+  } else {
+    entry.resolve(msg.result);
+  }
+}
+
+// ---- vibe panel ports ------------------------------------------------------
+//
+// The side panel opens a long-lived port named 'vibe-panel'. The SW relays
+// daemon vibe.* events to every connected panel port and answers the panel's
+// run/status/nano/bridge-status messages.
+
+const panelPorts = new Set();
+
+function broadcastToPanels(message) {
+  for (const port of panelPorts) {
+    try {
+      port.postMessage(message);
+    } catch {
+      panelPorts.delete(port); // port closed under us
+    }
+  }
+}
+
+/** Route a vibe.cursor event to the page's overlay content script. */
+function routeCursorToOverlay(params) {
+  if (!params || params.tabId === undefined) return;
+  try {
+    chrome.tabs.sendMessage(
+      params.tabId,
+      { target: 'qa-overlay', ...params },
+      () => { void chrome.runtime.lastError; }, // swallow — tab may lack the content script
+    );
+  } catch {
+    /* fire-and-forget */
+  }
+}
+
+/** Dispatch a daemon event frame { event, params }. */
+function handleBridgeEvent(event, params) {
+  if (event === 'vibe.cursor') {
+    routeCursorToOverlay(params);
+  }
+  if (typeof event === 'string' && event.startsWith('vibe.')) {
+    // strip the 'vibe.' prefix into a panel message kind: vibe.progress -> progress
+    const kind = event.slice('vibe.'.length);
+    broadcastToPanels({ kind, ...(params || {}) });
+  }
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'vibe-panel') return;
+  panelPorts.add(port);
+
+  port.onMessage.addListener(async (msg) => {
+    if (!msg || typeof msg.kind !== 'string') return;
+    try {
+      switch (msg.kind) {
+        case 'run': {
+          try {
+            const result = await sendRequest('vibe.run', { task: msg.task, url: msg.url });
+            port.postMessage({ kind: 'accepted', ...(result || {}) });
+          } catch (e) {
+            port.postMessage({ kind: 'error', message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'status': {
+          try {
+            const result = await sendRequest('vibe.status', {});
+            port.postMessage({ kind: 'status', busy: !!(result && result.busy) });
+          } catch (e) {
+            port.postMessage({ kind: 'status', busy: false, error: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'nano': {
+          try {
+            const availability = await nanoAvail();
+            port.postMessage({ kind: 'nano', availability });
+          } catch (e) {
+            port.postMessage({ kind: 'nano', availability: 'unavailable', error: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'bridge-status': {
+          port.postMessage({ kind: 'bridge-status', connected: !!(ws && ws.readyState === WebSocket.OPEN) });
+          break;
+        }
+        default:
+          break;
+      }
+    } catch {
+      /* never let a panel message crash the listener */
+    }
+  });
+
+  port.onDisconnect.addListener(() => {
+    panelPorts.delete(port);
+  });
+});
+
 // ---- method handlers -------------------------------------------------------
 
 async function attachDebugger(tabId) {
@@ -354,8 +497,21 @@ function connect() {
     } catch {
       return;
     }
-    if (msg && typeof msg.id === 'number' && typeof msg.method === 'string') {
+    if (!msg || typeof msg !== 'object') return;
+    // daemon→ext request: { id, method, params? }
+    if (typeof msg.id === 'number' && typeof msg.method === 'string') {
       handleRequest(msg);
+      return;
+    }
+    // daemon→ext response to a panel-driven request: { rid, result|error }
+    if (typeof msg.rid === 'number') {
+      resolveRequest(msg);
+      return;
+    }
+    // daemon→ext event: { event, params }
+    if (typeof msg.event === 'string') {
+      handleBridgeEvent(msg.event, msg.params);
+      return;
     }
   });
 
@@ -389,6 +545,17 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 self.addEventListener('activate', () => connect());
 chrome.runtime.onStartup.addListener(() => connect());
 chrome.runtime.onInstalled.addListener(() => connect());
+
+// ---- side panel: open on toolbar action click ------------------------------
+try {
+  if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+    chrome.sidePanel
+      .setPanelBehavior({ openPanelOnActionClick: true })
+      .catch((e) => log('setPanelBehavior failed', e));
+  }
+} catch (e) {
+  log('sidePanel.setPanelBehavior unavailable', e);
+}
 
 log('service worker booted', new Date().toISOString());
 connect();

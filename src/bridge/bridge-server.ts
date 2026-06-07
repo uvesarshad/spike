@@ -9,6 +9,12 @@
  *   daemon→ext request : { id: number, method: string, params?: object }
  *   ext→daemon response: { id: number, result?: unknown, error?: string }
  *   ext→daemon event   : { event: string, params: object }   (CDP events + lifecycle)
+ *   ext→daemon request : { rid: number, method: string, params?: object }  (vibe-mode UI → daemon)
+ *   daemon→ext response: { rid: number, result?: unknown, error?: string }
+ *
+ * `rid` keys the REVERSE direction (side panel asking the daemon to run QA);
+ * `id` stays daemon→ext. The two id-spaces never collide because they travel
+ * under different keys.
  *
  * Single-extension-client assumption: a second connection replaces the first
  * (the MV3 SW restarts and reconnects; we always talk to the latest socket).
@@ -30,6 +36,7 @@ export interface BridgeEvent {
 }
 
 type EventHandler = (evt: BridgeEvent) => void;
+type RequestHandler = (params: Record<string, unknown>) => Promise<unknown>;
 
 export class BridgeServer {
   private readonly wss: WebSocketServer;
@@ -37,6 +44,8 @@ export class BridgeServer {
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
   private readonly eventHandlers = new Set<EventHandler>();
+  /** ext→daemon request handlers, keyed by method (vibe-mode reverse RPC). */
+  private readonly requestHandlers = new Map<string, RequestHandler>();
   /** Resolvers waiting on the first (or next) extension connection. */
   private connectWaiters: Array<() => void> = [];
 
@@ -87,6 +96,26 @@ export class BridgeServer {
       } else {
         pending.resolve(obj.result);
       }
+      return;
+    }
+
+    // ext→daemon request (vibe-mode reverse RPC) → daemon→ext response
+    if (typeof obj.rid === 'number' && typeof obj.method === 'string') {
+      const rid = obj.rid;
+      const method = obj.method;
+      const params = (obj.params as Record<string, unknown>) ?? {};
+      const handler = this.requestHandlers.get(method);
+      if (!handler) {
+        this.respond(rid, undefined, `unknown method ${method}`);
+        return;
+      }
+      // Run async; a handler throw becomes an error response, never a crash.
+      void Promise.resolve()
+        .then(() => handler(params))
+        .then(
+          (result) => this.respond(rid, result, undefined),
+          (err) => this.respond(rid, undefined, err instanceof Error ? err.message : String(err)),
+        );
       return;
     }
 
@@ -146,6 +175,37 @@ export class BridgeServer {
     });
   }
 
+  /** Push a daemon→ext event (fire-and-forget; no response expected).
+   * Used for vibe-mode UI fan-out: progress lines, ghost-cursor moves, done. */
+  sendEvent(event: string, params: Record<string, unknown> = {}): void {
+    const ws = this.socket;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return; // no panel attached — fine
+    try {
+      ws.send(JSON.stringify({ event, params }));
+    } catch {
+      /* fire-and-forget */
+    }
+  }
+
+  /** Send a daemon→ext response to an ext→daemon request (keyed by `rid`). */
+  private respond(rid: number, result: unknown, error: string | undefined): void {
+    const ws = this.socket;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return; // socket gone; nothing to answer
+    const frame = error !== undefined ? { rid, error } : { rid, result };
+    try {
+      ws.send(JSON.stringify(frame));
+    } catch {
+      /* fire-and-forget */
+    }
+  }
+
+  /** Register an ext→daemon request handler for a method (vibe-mode reverse RPC).
+   * The handler's resolved value is sent back as `{rid, result}`; a throw becomes
+   * `{rid, error}`. Re-registering a method replaces the prior handler. */
+  onRequest(method: string, handler: RequestHandler): void {
+    this.requestHandlers.set(method, handler);
+  }
+
   /** Subscribe to ext→daemon events (CDP events + lifecycle). */
   onEvent(handler: EventHandler): void {
     this.eventHandlers.add(handler);
@@ -163,6 +223,7 @@ export class BridgeServer {
     }
     this.pending.clear();
     this.eventHandlers.clear();
+    this.requestHandlers.clear();
     if (this.socket) {
       try { this.socket.close(); } catch { /* already gone */ }
       this.socket = null;

@@ -17,7 +17,10 @@ npm install                            # root deps (TS product)
 npm run build                          # tsup → dist/ (cli.js, mcp-server.js)
 npm run typecheck                      # tsc --noEmit
 npm run test:e2e                       # e2e: qa_run vs the fixture app, both bug modes
-node dist/cli.js run "<task>" --url <url> [--json]   # one QA run
+node dist/cli.js run "<task>" --url <url> [--json] [--via cdp|extension] [--no-record]   # one QA run
+node dist/cli.js replay [name|--all] [--heal] [--via ...]   # deterministic $0 re-run of a recorded script
+node dist/cli.js daemon                # vibe-mode daemon: bridge + vibe.run service for the side panel
+node dist/cli.js fix <runId>           # print the paste-ready fix prompt for a past run
 node dist/cli.js mcp                   # start the MCP stdio server (register as command "qa", args ["mcp"])
 node dist/cli.js nano --check          # Gemini Nano availability (surfaces the 22GB storage gate)
 node dist/cli.js nano --download       # trigger the ~2GB on-device model download
@@ -47,6 +50,9 @@ One engine, two transports (MCP stdio + CLI), interface-driven so the extension 
 - `src/driver/` — a11y-tree-first loop: serialize tree (~800 tok) → planner picks ONE action (JSON schema) → execute via port → drain console/network per step. Vision (Nano) only on `assert_visual` + final confirmation. Step budget 12 → `uncertain`.
 - `src/capture/axtree.ts` — `Accessibility.getFullAXTree`, pruned to a compact indented text with per-snapshot stable ids (`n7 button "Place order"`) and an id→backendDOMNodeId map for the executor.
 - `src/report/` — `artifacts/<runId>/report.json` + screenshots. Slim contract first (`verdict, failing_step, console_error, evidence_paths` — what the calling LLM reads, ~2K tokens), full steps/model_trace after.
+- `src/recorder/` — passed runs → `generated-tests/<slug>.json` (role+name locators) + a Playwright `.spec.ts` twin; `qa replay` re-runs the JSON over CDP at $0 (Nano-only visuals), `--heal` re-engages the driver and re-emits.
+- `src/bridge/` + `extension/` — the MV3 extension transport: WS bridge (daemon↔SW, JSON-RPC both directions: `{id}` daemon→ext, `{rid}` ext→daemon, `{event}` fan-out), Proxy CDP shim over `chrome.debugger`, side panel (vibe UI), ghost-cursor overlay. Dev-loading on Chrome 137+ is pipe-only: `src/chrome/extensions.ts`.
+- `src/vibe/` — `vibe.run` service behind `qa daemon` + deterministic plain-English report and paste-ready fix-prompt synthesis.
 - `fixture/` — intentionally-buggy dogfood app; `--bug on` makes "Place order" throw (`order.total` undefined) + `/api/order` 500 → exercises `[PAGE-ERROR]`, `[NET-FAIL]`, and the Nano visual path at once.
 
 **Port allocation (fixed, distinct from spikes so a live spike Chrome never collides):**

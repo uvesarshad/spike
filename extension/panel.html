@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QA Subagent</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <header class="hdr">
+    <div class="hdr-top">
+      <span class="logo">QA Subagent</span>
+      <span id="bridgeDot" class="dot dot-off" title="Daemon connection"></span>
+    </div>
+    <div id="nanoLine" class="nano-line">On-device AI: checking…</div>
+  </header>
+
+  <main class="body">
+    <section class="inputs">
+      <label class="field-label" for="url">URL to test</label>
+      <input id="url" class="text-input" type="text" spellcheck="false"
+             placeholder="http://localhost:9401/login" />
+
+      <label class="field-label" for="task">What should I test?</label>
+      <textarea id="task" class="text-area" rows="3"
+                placeholder="e.g. Log in as test@test.com with password pw and complete checkout"></textarea>
+
+      <button id="runBtn" class="run-btn" type="button">Run test</button>
+    </section>
+
+    <section id="errorBanner" class="error-banner" hidden></section>
+
+    <section class="feed-wrap">
+      <div class="feed-title">Live progress</div>
+      <div id="feed" class="feed"></div>
+    </section>
+
+    <section id="resultCard" class="result-card" hidden>
+      <div id="verdictBadge" class="verdict-badge"></div>
+      <pre id="plainReport" class="plain-report"></pre>
+
+      <div id="fixSection" class="fix-section" hidden>
+        <div class="fix-head">
+          <span class="fix-title">Fix prompt</span>
+          <span class="fix-sub">paste this into Lovable / Cursor / Bolt</span>
+        </div>
+        <textarea id="fixPrompt" class="fix-prompt" readonly></textarea>
+        <button id="copyBtn" class="copy-btn" type="button">Copy</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="panel.js"></script>
+</body>
+</html>

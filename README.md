@@ -151,8 +151,10 @@ Conventions worth knowing: logpoint lines are located by content, never hardcode
 | 2026-06-07 | **Spike A**: Gemini Nano — schema-enforced JSON verdicts on screenshots, $0, ~5.5s warm; rung-1 Gemini CLI verdicts | ✅ PASS |
 | 2026-06-07 | **MVP vertical slice**: `qa_run` over MCP + CLI, driver loop, model ladder (rungs 0–2), evidence capture, report.json, fixture app — e2e 6/6, MCP smoke 4/4 | ✅ shipped |
 | 2026-06-07 | **Recorder**: passed run → JSON trace + Playwright `.spec.ts`; `qa replay` is deterministic, ~9s, $0 AI tokens; self-heals on UI drift and re-emits — e2e 12/12 | ✅ shipped |
+| 2026-06-07 | **Extension transport**: MV3 extension drives Chrome via `chrome.debugger` over a WS bridge; same 7/7 port contract as plain CDP; Nano through the extension's Prompt API; `--via extension` | ✅ shipped |
+| 2026-06-07 | **Vibe mode (core)**: side-panel chat (`qa daemon`), ghost-cursor overlay (glide/ripples/captions), plain-English reports + paste-ready fix prompts (`qa fix`) — headless e2e green | ✅ shipped |
 | next | Dogfood against a real app (MontrAI social module) | 🔜 |
-| then | **Vibe mode**: MV3 extension (`ExtensionBrowser`), side-panel chat, ghost-cursor overlay, fix-prompt synthesis, shareable replay clips | planned |
+| then | **Vibe mode (polish)**: shareable replay clips (MP4/GIF), guided Nano onboarding from the panel, run history | planned |
 | then | **Tier 4 guardrails**: local credential vault (model never sees secrets), read-only-by-default on third-party sites, audit log | planned |
 | then | Launch: OSS core + BYOK, token-cost benchmark vs Playwright MCP / Claude in Chrome | planned |
 | 2026-06-18 | External: Gemini CLI free tier moves to Antigravity CLI — rung 1 is a generic adapter, switch is a config change | tracked |

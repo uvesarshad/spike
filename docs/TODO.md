@@ -98,15 +98,19 @@
 - [ ] Engine: swap NanoRunnerPage → ExtensionNano in pure-extension mode (TODO comment sits at the seam in engine.ts; runner page still works today because the extension-launched Chrome exposes the CDP port)
 - [ ] Fresh-Chrome Nano availability: component re-validates (~60s 'downloading') after every Chrome start — engine should poll briefly instead of falling to rung 1 (v6 polls; engine doesn't yet)
 
-### Vibe UX
-- [ ] Side-panel chat: plain-English task in ("test my signup flow"), live step feed, plain-English report out
-- [ ] **Ghost cursor overlay**: animated cursor trails, click ripples, caption bar narrating each step, green/red step ticks
-- [ ] **Fix-prompt synthesis**: verdict + evidence → a ready-to-paste prompt for Lovable/Cursor/Bolt (repro steps, evidence timestamps, hypothesized root cause) — automate the "three-AI pipeline"
+### Vibe UX — core ✅ (2026-06-07)
+- [x] Side-panel chat (`extension/panel.{html,js,css}`): URL + plain-English task in, live progress feed, verdict card, copy-able fix prompt; SW relays panel⇄daemon over the bridge (reverse RPC `{rid,...}` frames); `qa daemon` hosts the service
+- [x] **Ghost cursor overlay** (`extension/overlay.js` + emits in ExtensionBrowser): indigo cursor glides to each click (450ms ease), click ripples, bottom caption pill narrating steps ("Clicking the "Sign in" button"), ✓/✗ ticks — driven by `vibe.cursor` events, pointer-events:none, zero page interference
+- [x] **Fix-prompt synthesis** (`src/vibe/fix-prompt.ts`): deterministic Report → paste-ready prompt (repro steps humanized via step targets, console_error verbatim, failed requests w/ status, evidence timestamps, heuristic root cause, "do not change unrelated files" guard); also `qa fix <runId>` for dev mode + `renderPlainReport` for the panel
+- [x] Onboarding-lite: panel shows bridge status dot + Nano availability line ("testing still works via cloud free tier")
 - [ ] **Replay clip export**: run → MP4/GIF (cursor trails + captions + verdict card, watermark, secrets auto-redacted)
-- [ ] Onboarding: Nano availability + 22GB storage gate surfaced in plain English; works-without-Nano fallback messaging
+- [ ] Onboarding full flow: guided Nano download from the panel (22GB gate explanation, progress)
+- [ ] Panel polish: step ticks in the feed, run history, cancel button
 
 ### Quality gate
-- [ ] e2e: full vibe flow against the fixture — type task in panel → watch run → fail report + fix prompt → paste prompt → re-run → green
+- [x] Headless e2e (`test/v9.vibe-flow.ts`): real daemon service + real extension SW; vibe.run accepted (concurrent refused), progress + ghost-cursor events flow, vibe.done carries fail verdict + plain report + paste-ready fix prompt on the bug-on fixture
+- [ ] Manual panel walkthrough per `docs/vibe-panel-manual-test.md` (panel DOM not covered headless)
+- [ ] Full loop incl. the fix: paste prompt into a coding agent → fix the fixture bug → re-run → green
 
 ---
 

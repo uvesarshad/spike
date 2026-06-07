@@ -19,6 +19,7 @@ import { snapshotAxTree } from '../capture/axtree.js';
 import { BridgeServer, DEFAULT_BRIDGE_PORT } from '../bridge/bridge-server.js';
 import { createCdpShim, type CdpShim } from '../bridge/cdp-shim.js';
 import type {
+  AxNode,
   AxSnapshot,
   BrowserPort,
   ConsoleEntry,
@@ -45,6 +46,8 @@ export class ExtensionBrowser implements BrowserPort {
   private capture: CaptureBuffers | null = null;
   /** planner nodeId ("n7") → backendDOMNodeId; refreshed by every axTree(). */
   private nodeMap = new Map<string, number>();
+  /** Last a11y snapshot — read by nodeLabel() for ghost-cursor captions. */
+  private lastSnapshot: AxSnapshot | null = null;
 
   constructor(private readonly opts: ExtensionBrowserOptions = {}) {}
 
@@ -96,6 +99,7 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async navigate(url: string): Promise<void> {
+    this.emitCursor({ kind: 'caption', caption: 'Opening ' + url });
     // The SW resolves on chrome.tabs.onUpdated status 'complete' for this tab.
     await this.b.call('ext.navigate', { tabId: this.tab, url }, 30_000);
     await sleep(300); // let first paint + late console output settle
@@ -109,7 +113,35 @@ export class ExtensionBrowser implements BrowserPort {
   async axTree(): Promise<AxSnapshot> {
     const { snapshot, nodeMap } = await snapshotAxTree(this.c);
     this.nodeMap = nodeMap;
+    this.lastSnapshot = snapshot;
     return snapshot;
+  }
+
+  /** Human-readable label for a nodeId, e.g. `the "Sign in" button`. */
+  private nodeLabel(nodeId: string): string {
+    const find = (node: AxNode | undefined): AxNode | undefined => {
+      if (!node) return undefined;
+      if (node.id === nodeId) return node;
+      for (const child of node.children ?? []) {
+        const hit = find(child);
+        if (hit) return hit;
+      }
+      return undefined;
+    };
+    const node = find(this.lastSnapshot?.root);
+    if (!node) return 'an element';
+    const role = node.role || 'element';
+    if (node.name) return `the ${JSON.stringify(node.name)} ${role}`;
+    return `a ${role}`;
+  }
+
+  /** Fire a vibe.cursor event; never let UI fan-out fail the action. */
+  private emitCursor(params: Record<string, unknown>): void {
+    try {
+      this.b.sendEvent('vibe.cursor', { tabId: this.tab, ...params });
+    } catch {
+      /* fire-and-forget — overlay is cosmetic */
+    }
   }
 
   private backendNodeId(nodeId: string): number {
@@ -131,15 +163,33 @@ export class ExtensionBrowser implements BrowserPort {
     const quad = model.content;
     const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
     const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
+    // Ghost cursor: glide to the target + caption BEFORE dispatching, so the
+    // viewer sees the cursor arrive; the sleep gives the CSS transition time.
+    this.emitCursor({ kind: 'move', x, y, caption: 'Clicking ' + this.nodeLabel(nodeId) });
+    await sleep(350);
     for (const type of ['mousePressed', 'mouseReleased'] as const) {
       await this.c.Input.dispatchMouseEvent({ type, x, y, button: 'left', clickCount: 1 });
     }
+    this.emitCursor({ kind: 'click', x, y }); // ripple at the click point
     await sleep(400); // allow handlers/navigation to kick off
   }
 
   async type(nodeId: string, text: string): Promise<void> {
     const backendNodeId = this.backendNodeId(nodeId);
     await this.c.Page.bringToFront().catch(() => {}); // see click()
+    await this.c.DOM.scrollIntoViewIfNeeded({ backendNodeId }).catch(() => {});
+    // Ghost cursor: move to the field + caption before inserting the text.
+    try {
+      const { model } = await this.c.DOM.getBoxModel({ backendNodeId });
+      const quad = model.content;
+      const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
+      const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
+      this.emitCursor({ kind: 'type', x, y, caption: 'Typing into ' + this.nodeLabel(nodeId) });
+      await sleep(350);
+    } catch {
+      // box model can fail (off-screen/detached) — caption-only fallback
+      this.emitCursor({ kind: 'caption', caption: 'Typing into ' + this.nodeLabel(nodeId) });
+    }
     await this.c.DOM.focus({ backendNodeId });
     await this.c.Input.insertText({ text });
     await sleep(150);

@@ -1,12 +1,17 @@
 /* `qa` CLI — thin wrapper over the engine; the MCP server shares the same core.
  * Subcommands grow with the milestones: run, mcp, nano, fixture. */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { Command } from 'commander';
 import { loadConfig } from './config.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { qaReplay, qaRun } from './engine.js';
-import { slimReport } from './report/report.js';
+import { slimReport, type Report } from './report/report.js';
 import { listScripts } from './recorder/script.js';
+import { BridgeServer } from './bridge/bridge-server.js';
+import { VibeService } from './vibe/service.js';
+import { buildFixPrompt } from './vibe/fix-prompt.js';
 import { startFixture } from '../fixture/server.js';
 
 const program = new Command();
@@ -82,6 +87,54 @@ program
       worst = Math.max(worst, report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
     }
     process.exit(worst);
+  });
+
+program
+  .command('daemon')
+  .description('start the vibe-mode daemon: a bridge the extension side panel connects to, driving QA runs from the GUI')
+  .option('--bridge-port <n>', 'WebSocket port the extension connects to', (v) => parseInt(v, 10))
+  .action((opts: { bridgePort?: number }) => {
+    const cfg = loadConfig();
+    const port = opts.bridgePort ?? cfg.bridgePort;
+    const bridge = new BridgeServer(port);
+    const vibe = new VibeService(bridge);
+    vibe.start();
+    console.log(`vibe daemon listening on ws://localhost:${port} — open the extension side panel`);
+    // stay alive; the bridge owns the WS server from here
+    return new Promise<void>(() => {});
+  });
+
+program
+  .command('fix')
+  .description('print the paste-ready fix prompt for a finished run (runId or path to report.json)')
+  .argument('<runIdOrPath>', 'a runId under artifacts/, or a path to a report.json')
+  .action((runIdOrPath: string) => {
+    const cfg = loadConfig();
+    const candidates = [
+      runIdOrPath,
+      path.join(cfg.artifactsDir, runIdOrPath, 'report.json'),
+      path.join(cfg.artifactsDir, runIdOrPath), // in case they passed artifacts/<runId>
+    ];
+    const found = candidates.find((p) => {
+      try { return fs.statSync(p).isFile(); } catch { return false; }
+    });
+    if (!found) {
+      console.error(`no report.json found for "${runIdOrPath}" (looked in artifacts/<runId>/report.json and as a path)`);
+      process.exit(2);
+    }
+    let report: Report;
+    try {
+      report = JSON.parse(fs.readFileSync(found, 'utf8')) as Report;
+    } catch (e) {
+      console.error(`could not parse ${found}: ${e instanceof Error ? e.message : e}`);
+      process.exit(2);
+    }
+    const prompt = buildFixPrompt(report);
+    if (!prompt) {
+      console.log(`run ${report.runId} passed (${report.verdict}) — no fix prompt needed.`);
+      return;
+    }
+    console.log(prompt);
   });
 
 program

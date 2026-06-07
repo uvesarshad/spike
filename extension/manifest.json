@@ -4,6 +4,15 @@
   "version": "0.1.0",
   "description": "Autonomous browser QA: a cheap-model ladder tests your app in your real Chrome and reports back.",
   "background": { "service_worker": "sw.js" },
-  "permissions": ["debugger", "tabs", "storage", "alarms", "offscreen"],
-  "host_permissions": ["<all_urls>"]
+  "permissions": ["debugger", "tabs", "storage", "alarms", "offscreen", "sidePanel"],
+  "host_permissions": ["<all_urls>"],
+  "action": { "default_title": "Open QA side panel" },
+  "side_panel": { "default_path": "panel.html" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["overlay.js"],
+      "run_at": "document_idle"
+    }
+  ]
 }
