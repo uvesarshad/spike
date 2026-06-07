@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "QA Spike - Gemini Nano Verdict",
+  "version": "0.1.0",
+  "description": "Spike A: on-device Gemini Nano gives a structured QA verdict on a page screenshot. $0, no API key.",
+  "action": { "default_title": "Open QA Spike panel" },
+  "background": { "service_worker": "sw.js" },
+  "permissions": ["tabs"],
+  "host_permissions": ["<all_urls>"]
+}

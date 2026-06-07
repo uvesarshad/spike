@@ -1,0 +1,8 @@
+{
+  "name": "cdp-logpoint-spike",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Spike B: inject console.logs into a running page via CDP logpoints - zero source edits.",
+  "scripts": { "spike": "node spike.js" },
+  "dependencies": { "chrome-remote-interface": "^0.33.2" }
+}

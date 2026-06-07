@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>QA Spike — Gemini Nano Verdict</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 32px auto; padding: 0 16px; color: #1a1a1f; }
+    h1 { font-size: 20px; }
+    .row { margin: 12px 0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    label { font-size: 13px; color: #555; min-width: 60px; }
+    input[type=text] { flex: 1; min-width: 280px; padding: 8px 10px; border: 1px solid #ccc; border-radius: 8px; font-size: 13px; }
+    button { padding: 8px 14px; border: none; border-radius: 8px; background: #18181c; color: #fff; font-size: 13px; cursor: pointer; }
+    button:disabled { opacity: .4; cursor: default; }
+    #status { font-size: 13px; padding: 8px 12px; border-radius: 8px; background: #f2f2f7; }
+    #progress { width: 100%; height: 8px; border-radius: 4px; }
+    pre { background: #0e0e12; color: #c9f7d3; padding: 14px; border-radius: 10px; font-size: 12px; white-space: pre-wrap; word-break: break-word; min-height: 60px; }
+    img#shot { max-width: 100%; border: 1px solid #ddd; border-radius: 10px; margin-top: 8px; }
+    .pass { color: #0a7a33; font-weight: 700; } .fail { color: #c2233a; font-weight: 700; } .uncertain { color: #a06b00; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>Spike A — Gemini Nano structured QA verdict (on-device, $0)</h1>
+
+  <div class="row">
+    <button id="btnAvail">1. Check availability</button>
+    <button id="btnDownload" disabled>2. Download model</button>
+    <span id="status">idle</span>
+  </div>
+  <progress id="progress" value="0" max="1" hidden></progress>
+
+  <div class="row">
+    <label>URL</label>
+    <input type="text" id="url" value="http://localhost:9002">
+  </div>
+  <div class="row">
+    <label>Task</label>
+    <input type="text" id="task" value="Does this page render correctly: a complete web app UI with visible navigation and content, no blank screen, no error messages, no obviously broken layout?">
+  </div>
+  <div class="row">
+    <button id="btnRun" disabled>3. Capture URL → Nano verdict</button>
+    <span id="timing"></span>
+  </div>
+
+  <pre id="out">—</pre>
+  <img id="shot" hidden>
+
+  <script src="panel.js"></script>
+</body>
+</html>

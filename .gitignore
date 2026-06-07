@@ -1,0 +1,10 @@
+node_modules/
+dist/
+artifacts/
+*.log
+*.tsbuildinfo
+
+# spike runtime debris (frozen reference code stays, its output doesn't)
+spikes/.chrome-profile/
+spikes/**/node_modules/
+spikes/**/shots/
