@@ -33,9 +33,22 @@ export class GoogleCliAdapter implements ModelAdapter {
   readonly name: string;
   readonly rung = 1 as const;
   private availableCache: boolean | null = null;
+  private workDirCache: string | null = null;
+  private callSeq = 0;
 
   constructor(private readonly opts: GoogleCliOptions) {
     this.name = `google-cli(${opts.bin})`;
+  }
+
+  /** One persistent work dir per adapter — the CLI runs with cwd here, and on
+   * Windows a dir that is (or recently was) a child process's cwd can't be
+   * removed (EPERM), so per-call temp dirs are a trap. The OS temp cleaner
+   * owns it eventually. */
+  private workDir(): string {
+    if (!this.workDirCache) {
+      this.workDirCache = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-cli-'));
+    }
+    return this.workDirCache;
   }
 
   async available(): Promise<boolean> {
@@ -53,27 +66,40 @@ export class GoogleCliAdapter implements ModelAdapter {
   }
 
   async generateJson(req: JsonRequest): Promise<unknown> {
-    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-cli-'));
+    const workDir = this.workDir();
+    let shotName: string | null = null;
     try {
       let headline = 'Follow the instructions provided on stdin.';
       if (req.imagePng) {
-        fs.writeFileSync(path.join(workDir, 'shot.png'), req.imagePng);
-        headline = `@shot.png ${headline}`;
+        shotName = `shot-${this.callSeq++}.png`;
+        fs.writeFileSync(path.join(workDir, shotName), req.imagePng);
+        headline = `@${shotName} ${headline}`;
       }
       const stdinText =
         `${req.prompt}\n\nRespond with ONLY a JSON object matching this JSON schema:\n` +
         JSON.stringify(req.schema);
       const stdout = await this.run(headline, stdinText, workDir);
+      // -o json wraps the model text in an envelope: { response: "...", stats: {...} }
+      try {
+        const envelope = JSON.parse(stdout.trim()) as { response?: string };
+        if (typeof envelope.response === 'string') return extractJson(envelope.response);
+      } catch {
+        /* not an envelope — older CLI or plain text mode */
+      }
       return extractJson(stdout);
     } finally {
-      fs.rmSync(workDir, { recursive: true, force: true });
+      if (shotName) {
+        try { fs.rmSync(path.join(workDir, shotName), { force: true }); } catch { /* best effort */ }
+      }
     }
   }
 
   private run(headline: string, stdinText: string, cwd: string): Promise<string> {
     // single command string (bin is typically a .cmd shim on Windows → shell);
-    // headline is OUR text, single-line, no quotes — safe to wrap in "
-    const command = `${this.opts.bin} -p "${headline}" -m ${this.opts.model}`;
+    // headline is OUR text, single-line, no quotes — safe to wrap in ".
+    // -e none: skip user extensions/MCP servers (halves startup, kills noise);
+    // -o json: structured envelope instead of scraping stdout
+    const command = `${this.opts.bin} -p "${headline}" -m ${this.opts.model} -e none -o json`;
     return new Promise((resolve, reject) => {
       const child = spawn(command, {
         shell: true,
