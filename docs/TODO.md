@@ -109,7 +109,7 @@
 
 ### Quality gate
 - [x] Headless e2e (`test/v9.vibe-flow.ts`): real daemon service + real extension SW; vibe.run accepted (concurrent refused), progress + ghost-cursor events flow, vibe.done carries fail verdict + plain report + paste-ready fix prompt on the bug-on fixture
-- [ ] Manual panel walkthrough per `docs/vibe-panel-manual-test.md` (panel DOM not covered headless)
+- [x] Manual panel walkthrough — done by the user 2026-06-07; feedback round (speed/cursor/glow/tab-attach/cards/green) implemented same day
 - [ ] Full loop incl. the fix: paste prompt into a coding agent → fix the fixture bug → re-run → green
 
 ---
