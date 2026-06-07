@@ -150,7 +150,7 @@ Conventions worth knowing: logpoint lines are located by content, never hardcode
 | 2026-06-06 | **Spike B**: CDP logpoints — instrumentation with zero source edits, live variable capture | ✅ PASS |
 | 2026-06-07 | **Spike A**: Gemini Nano — schema-enforced JSON verdicts on screenshots, $0, ~5.5s warm; rung-1 Gemini CLI verdicts | ✅ PASS |
 | 2026-06-07 | **MVP vertical slice**: `qa_run` over MCP + CLI, driver loop, model ladder (rungs 0–2), evidence capture, report.json, fixture app — e2e 6/6, MCP smoke 4/4 | ✅ shipped |
-| next | **Recorder**: passed run → Playwright script; replays are deterministic and cost $0 AI tokens; self-heals on UI change | 🔜 |
+| 2026-06-07 | **Recorder**: passed run → JSON trace + Playwright `.spec.ts`; `qa replay` is deterministic, ~9s, $0 AI tokens; self-heals on UI drift and re-emits — e2e 12/12 | ✅ shipped |
 | next | Dogfood against a real app (MontrAI social module) | 🔜 |
 | then | **Vibe mode**: MV3 extension (`ExtensionBrowser`), side-panel chat, ghost-cursor overlay, fix-prompt synthesis, shareable replay clips | planned |
 | then | **Tier 4 guardrails**: local credential vault (model never sees secrets), read-only-by-default on third-party sites, audit log | planned |

@@ -41,7 +41,10 @@ function page(title: string, body: string): string {
 ${NAV}<div class="wrap">${body}</div>${ERROR_LISTENER}</body></html>`;
 }
 
-function pages(bug: boolean): Record<string, string> {
+function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, string> {
+  // v2 simulates UI drift for self-heal testing: same flow, the checkout
+  // button is renamed — recorded scripts that click "Place order" must break
+  const placeOrderLabel = variant === 'v2' ? 'Confirm purchase' : 'Place order';
   return {
     '/login': page(
       'Sign in — Acme Shop',
@@ -108,7 +111,7 @@ function pages(bug: boolean): Record<string, string> {
       `<h2>Checkout</h2>
       <div class="card"><p id="summary">Loading order…</p><p id="charged"></p></div>
       <p id="api-error" class="inline-error"></p>
-      <button id="place-order">Place order</button>
+      <button id="place-order">${placeOrderLabel}</button>
       <script>
       const cart = JSON.parse(sessionStorage.getItem('cart') || '[]');
       const total = Number(sessionStorage.getItem('total') || '0');
@@ -149,8 +152,10 @@ export function stopFixture(server: http.Server): Promise<void> {
   return new Promise((resolve) => server.close(() => resolve()));
 }
 
-export function startFixture(port: number, bug: boolean): http.Server {
-  const routes = pages(bug);
+export type FixtureVariant = 'v1' | 'v2';
+
+export function startFixture(port: number, bug: boolean, variant: FixtureVariant = 'v1'): http.Server {
+  const routes = pages(bug, variant);
   const server = http.createServer((req, res) => {
     const url = req.url ?? '/';
     if (url === '/api/order' && req.method === 'POST') {

@@ -4,8 +4,9 @@
 import { Command } from 'commander';
 import { loadConfig } from './config.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
-import { qaRun } from './engine.js';
+import { qaReplay, qaRun } from './engine.js';
 import { slimReport } from './report/report.js';
+import { listScripts } from './recorder/script.js';
 import { startFixture } from '../fixture/server.js';
 
 const program = new Command();
@@ -17,10 +18,12 @@ program
   .argument('<task>', 'what to test, in plain English')
   .requiredOption('--url <url>', 'page to start on')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
+  .option('--no-record', 'do not record a passing run to generated-tests/')
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; json: boolean }) => {
+  .action(async (task: string, opts: { url: string; maxSteps?: number; record: boolean; json: boolean }) => {
     const report = await qaRun(task, opts.url, {
       maxSteps: opts.maxSteps,
+      record: opts.record,
       onProgress: opts.json ? undefined : (l) => console.log(l),
     });
     if (opts.json) {
@@ -50,6 +53,31 @@ program
   .description('print the resolved configuration')
   .action(() => {
     console.log(JSON.stringify(loadConfig(), null, 2));
+  });
+
+program
+  .command('replay')
+  .description('replay recorded scripts deterministically — no planner, $0; exit 0 pass / 1 fail / 2 uncertain')
+  .argument('[name]', 'script name (or path to a generated-tests/*.json)')
+  .option('--all', 'replay every script in generated-tests/ (the regression suite)', false)
+  .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
+  .option('--json', 'print slim JSON verdicts only', false)
+  .action(async (name: string | undefined, opts: { all: boolean; heal: boolean; json: boolean }) => {
+    const targets = opts.all ? listScripts() : name ? [name] : [];
+    if (targets.length === 0) {
+      console.error(opts.all ? 'no recorded scripts in generated-tests/' : 'give a script name or --all');
+      process.exit(2);
+    }
+    let worst = 0;
+    for (const t of targets) {
+      const report = await qaReplay(t, {
+        heal: opts.heal,
+        onProgress: opts.json ? undefined : (l) => console.log(l),
+      });
+      console.log(JSON.stringify({ script: t, healed: report.healed, ...slimReport(report) }, null, 2));
+      worst = Math.max(worst, report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
+    }
+    process.exit(worst);
   });
 
 program

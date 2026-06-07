@@ -2,7 +2,7 @@
 
 > Status legend: `[x]` done · `[ ]` not started · `[~]` partial/in progress
 > Source of truth for scope: [`browser-qa-subagent-product-doc.md`](browser-qa-subagent-product-doc.md) §6.
-> Last updated: 2026-06-07 (MVP shipped).
+> Last updated: 2026-06-07 (MVP + Recorder shipped).
 
 ---
 
@@ -66,16 +66,22 @@
 
 ---
 
-## Phase 2 — Recorder (AI once → deterministic forever) ⬜ not started
+## Phase 2 — Recorder (AI once → deterministic forever) ✅ complete (2026-06-07)
 
 > A passed run emits a Playwright script; re-runs are deterministic and cost $0 AI tokens. Script breaks (UI changed) → AI re-engages, self-heals, re-emits. Kills vibe-coder pain (a) "fix one thing, break another".
 
-- [ ] Step→Playwright codegen: map the passed run's StepRecords (click/type/navigate + assertions) to a `.spec.ts` with resilient selectors (role+name first, `data-qa-id` fallback)
-- [ ] Persist generated scripts to `generated-tests/<task-slug>.spec.ts` + metadata (source runId, URL, date)
-- [ ] `qa replay <script|task>` — run without any model; report in the same report.json shape
-- [ ] Self-heal: on replay failure, re-engage the driver loop from the failing step, re-emit the script, diff-report what changed
-- [ ] Suite mode: `qa replay --all` as the regression suite; nonzero exit on any fail
-- [ ] e2e: record on healthy fixture → replay passes at $0; break the fixture UI (rename a button) → self-heal re-emits
+- [x] Recording: passed runs distilled to `generated-tests/<task-slug>.json` with resilient role+name locators (driver records `target` per interaction; nodeIds never persisted) — `src/recorder/script.ts`
+- [x] Playwright codegen twin: `.spec.ts` emitted alongside (getByRole locators) as a PORTABLE artifact for the user's CI — we replay the JSON ourselves, no Playwright dependency
+- [x] `qa replay <name>` — deterministic re-run over CDP: zero planner calls, Nano-only visuals (skipped w/ warning if unavailable — replays never spend paid tokens), strict on runtime errors/5xx, same report.json shape — `src/recorder/replay.ts`
+- [x] Self-heal (`--heal`): failed replay re-engages the full driver on the original task, re-emits the script with `healedFrom` lineage (full re-run, not mid-flow resume — deviation from original sketch, simpler and proven)
+- [x] Suite mode: `qa replay --all` — worst verdict drives the exit code
+- [x] Fixture `v2` variant (renamed checkout button) to simulate UI drift
+- [x] e2e 12/12 (`test/e2e.recorder.ts`): record → $0 replay passes in ~9s (vs ~3min AI run) → bug-on replay fails w/ evidence → v2 drift fails → heal re-emits → healed script replays at $0
+
+### Recorder follow-ups (not blockers)
+- [ ] Duplicate role+name targets on one page need disambiguation (nth/ancestor scope) — fixture never hits this; real apps will
+- [ ] Diff-report on heal: summarize what changed between old and new script
+- [ ] `data-qa-id` stamping as a second locator strategy for name-less elements
 
 ## Phase 3 — Vibe mode (the GUI) ⬜ not started
 

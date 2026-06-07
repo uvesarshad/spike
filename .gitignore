@@ -2,6 +2,7 @@ node_modules/
 dist/
 qa.config.json
 artifacts/
+generated-tests/
 *.log
 *.tsbuildinfo
 

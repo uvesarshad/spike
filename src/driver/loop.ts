@@ -80,6 +80,12 @@ export async function runDriverLoop(
       network: [],
       ts: Date.now(),
     };
+    // remember WHAT the action touches (role+name) — this is what makes the
+    // run replayable later; nodeIds die with the snapshot
+    if ('nodeId' in action) {
+      const target = findNode(ax.root, action.nodeId);
+      if (target) record.target = { role: target.role, ...(target.name && { name: target.name }) };
+    }
     steps.push(record);
 
     // ---- execute ----

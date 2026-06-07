@@ -9,11 +9,19 @@ import type { ModelTraceEntry } from '../router/model-router.js';
 
 export type RunVerdict = 'pass' | 'fail' | 'uncertain';
 
+export interface StepTarget {
+  role: string;
+  name?: string;
+}
+
 export interface StepRecord {
   index: number;
   thought?: string;
   action: Action;
   description: string;
+  /** Role+name of the node the action touched — what makes a run replayable
+   * (nodeIds are per-snapshot and meaningless across runs). */
+  target?: StepTarget;
   ok: boolean;
   error?: string;
   console: ConsoleEntry[];
