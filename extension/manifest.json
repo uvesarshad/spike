@@ -4,6 +4,6 @@
   "version": "0.1.0",
   "description": "Autonomous browser QA: a cheap-model ladder tests your app in your real Chrome and reports back.",
   "background": { "service_worker": "sw.js" },
-  "permissions": ["debugger", "tabs", "storage", "alarms"],
+  "permissions": ["debugger", "tabs", "storage", "alarms", "offscreen"],
   "host_permissions": ["<all_urls>"]
 }

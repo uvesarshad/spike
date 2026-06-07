@@ -122,6 +122,10 @@ export class ExtensionBrowser implements BrowserPort {
 
   async click(nodeId: string): Promise<void> {
     const backendNodeId = this.backendNodeId(nodeId);
+    // chrome.debugger-dispatched input is silently dropped on a backgrounded
+    // tab (unlike raw CDP) — e.g. when the Nano runner tab opened after us.
+    // Foregrounding is also what the "watch the robot" UX wants.
+    await this.c.Page.bringToFront().catch(() => {});
     await this.c.DOM.scrollIntoViewIfNeeded({ backendNodeId }).catch(() => {});
     const { model } = await this.c.DOM.getBoxModel({ backendNodeId });
     const quad = model.content;
@@ -135,6 +139,7 @@ export class ExtensionBrowser implements BrowserPort {
 
   async type(nodeId: string, text: string): Promise<void> {
     const backendNodeId = this.backendNodeId(nodeId);
+    await this.c.Page.bringToFront().catch(() => {}); // see click()
     await this.c.DOM.focus({ backendNodeId });
     await this.c.Input.insertText({ text });
     await sleep(150);

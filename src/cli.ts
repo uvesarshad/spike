@@ -18,12 +18,14 @@ program
   .argument('<task>', 'what to test, in plain English')
   .requiredOption('--url <url>', 'page to start on')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
+  .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
   .option('--no-record', 'do not record a passing run to generated-tests/')
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; record: boolean; json: boolean }) => {
+  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension'; record: boolean; json: boolean }) => {
     const report = await qaRun(task, opts.url, {
       maxSteps: opts.maxSteps,
       record: opts.record,
+      ...(opts.via && { config: { via: opts.via } }),
       onProgress: opts.json ? undefined : (l) => console.log(l),
     });
     if (opts.json) {
@@ -61,8 +63,9 @@ program
   .argument('[name]', 'script name (or path to a generated-tests/*.json)')
   .option('--all', 'replay every script in generated-tests/ (the regression suite)', false)
   .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
+  .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
   .option('--json', 'print slim JSON verdicts only', false)
-  .action(async (name: string | undefined, opts: { all: boolean; heal: boolean; json: boolean }) => {
+  .action(async (name: string | undefined, opts: { all: boolean; heal: boolean; via?: 'cdp' | 'extension'; json: boolean }) => {
     const targets = opts.all ? listScripts() : name ? [name] : [];
     if (targets.length === 0) {
       console.error(opts.all ? 'no recorded scripts in generated-tests/' : 'give a script name or --all');
@@ -72,6 +75,7 @@ program
     for (const t of targets) {
       const report = await qaReplay(t, {
         heal: opts.heal,
+        ...(opts.via && { config: { via: opts.via } }),
         onProgress: opts.json ? undefined : (l) => console.log(l),
       });
       console.log(JSON.stringify({ script: t, healed: report.healed, ...slimReport(report) }, null, 2));

@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>qa-subagent nano offscreen</title>
+  </head>
+  <body>
+    <!-- Hidden offscreen document. Hosts the on-device Gemini Nano (Prompt API)
+         session for the extension. The MV3 service worker cannot reliably reach
+         the web-exposed LanguageModel API, so it relays nano.* calls here via
+         chrome.runtime messaging. See nano-offscreen.js. -->
+    <script src="nano-offscreen.js"></script>
+  </body>
+</html>

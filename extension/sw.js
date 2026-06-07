@@ -15,8 +15,11 @@
  *     chrome.alarms keepalive ping so it isn't evicted mid-run.
  */
 
-const BRIDGE_PORT = 9410;
-const BRIDGE_URL = `ws://localhost:${BRIDGE_PORT}/`;
+/* The daemon's bridge usually listens on 9410 (config default), but tests and
+ * multi-instance setups bind nearby ports — the reconnect loop scans this small
+ * candidate range round-robin, so no config has to reach the SW. */
+const BRIDGE_PORT_CANDIDATES = [9410, 9411, 9412, 9413];
+let bridgePortIdx = 0;
 const DEBUGGER_VERSION = '1.3';
 const NAVIGATE_TIMEOUT_MS = 30_000;
 
@@ -133,6 +136,128 @@ function sendCdp(tabId, method, params) {
   });
 }
 
+// ---- Gemini Nano (Prompt API) ----------------------------------------------
+//
+// The web-exposed LanguageModel API runs Gemini Nano on-device. It may or may
+// not be reachable from the MV3 service-worker global; if it is, we use it
+// directly (no offscreen document, lower latency). If it is NOT, we host the
+// session in an offscreen document (a real DOM document, which does qualify for
+// the gemini-nano gate) and relay over chrome.runtime messaging.
+//
+// Semantics (MODEL_OPTS, VERDICT_SCHEMA, prompt text, fresh-session-per-verdict,
+// warm-priming) mirror src/ports/runner-assets.ts and nano-offscreen.js exactly.
+
+const NANO_MODEL_OPTS = {
+  expectedInputs: [{ type: 'text', languages: ['en'] }, { type: 'image' }],
+  expectedOutputs: [{ type: 'text', languages: ['en'] }],
+};
+const NANO_VERDICT_SCHEMA = {
+  type: 'object',
+  required: ['verdict', 'summary', 'issues'],
+  additionalProperties: false,
+  properties: {
+    verdict: { type: 'string', enum: ['pass', 'fail', 'uncertain'] },
+    summary: { type: 'string' },
+    issues: { type: 'array', items: { type: 'string' } },
+  },
+};
+const OFFSCREEN_URL = 'nano-offscreen.html';
+
+let nanoWarmSession = null; // used only when LanguageModel lives in the SW
+let offscreenReady = null;
+
+/** Is the web-exposed Prompt API reachable from this service worker? */
+function nanoInSW() {
+  return typeof LanguageModel !== 'undefined';
+}
+
+/** Ensure the offscreen document (which hosts the Nano session) exists. */
+async function ensureOffscreen() {
+  if (offscreenReady) return offscreenReady;
+  offscreenReady = (async () => {
+    // hasDocument() is the modern probe; fall back to getContexts for older builds.
+    let has = false;
+    if (chrome.offscreen && chrome.offscreen.hasDocument) {
+      has = await chrome.offscreen.hasDocument();
+    } else if (chrome.runtime.getContexts) {
+      const ctx = await chrome.runtime.getContexts({
+        contextTypes: ['OFFSCREEN_DOCUMENT'],
+        documentUrls: [chrome.runtime.getURL(OFFSCREEN_URL)],
+      });
+      has = ctx.length > 0;
+    }
+    if (!has) {
+      await chrome.offscreen.createDocument({
+        url: OFFSCREEN_URL,
+        reasons: ['BLOBS'], // we fetch() a data-URL into a Blob for the image input
+        justification: 'Host the on-device Gemini Nano (Prompt API) session for QA verdicts.',
+      });
+    }
+  })();
+  try {
+    await offscreenReady;
+  } catch (e) {
+    offscreenReady = null; // allow a retry on next call
+    throw e;
+  }
+  return offscreenReady;
+}
+
+/** Send a nano op to the offscreen document and unwrap its response. */
+async function callOffscreen(op, args) {
+  await ensureOffscreen();
+  const resp = await chrome.runtime.sendMessage({ target: 'nano-offscreen', op, args });
+  if (!resp) throw new Error('no response from nano offscreen document');
+  if (!resp.ok) throw new Error(resp.error || 'nano offscreen error');
+  return resp.result;
+}
+
+async function nanoAvail() {
+  if (nanoInSW()) return LanguageModel.availability(NANO_MODEL_OPTS);
+  // If the offscreen path is unavailable too, that surfaces as 'api-missing'.
+  if (!chrome.offscreen) return 'api-missing';
+  return callOffscreen('avail');
+}
+
+async function nanoWarmup() {
+  if (nanoInSW()) {
+    if (!nanoWarmSession) {
+      nanoWarmSession = await LanguageModel.create(NANO_MODEL_OPTS);
+      await nanoWarmSession.prompt([{ role: 'user', content: [{ type: 'text', value: 'ok' }] }]);
+    }
+    return 'warm';
+  }
+  return callOffscreen('warmup');
+}
+
+async function nanoVerdict(dataUrl, task) {
+  if (nanoInSW()) {
+    const blob = await (await fetch(dataUrl)).blob();
+    const t0 = performance.now();
+    const session = await LanguageModel.create(NANO_MODEL_OPTS);
+    const raw = await session.prompt(
+      [{
+        role: 'user',
+        content: [
+          { type: 'text', value:
+            'You are a QA assistant inspecting a screenshot of a web page.\n' +
+            'Question: ' + task + '\n' +
+            'Judge strictly from what is visible. List concrete issues if any.' },
+          { type: 'image', value: blob },
+        ],
+      }],
+      { responseConstraint: NANO_VERDICT_SCHEMA },
+    );
+    const ms = Math.round(performance.now() - t0);
+    session.destroy();
+    let v;
+    try { v = JSON.parse(raw); }
+    catch { v = { verdict: 'uncertain', summary: 'model returned non-JSON', issues: [String(raw).slice(0, 300)] }; }
+    return { verdict: v, ms };
+  }
+  return callOffscreen('verdict', { dataUrl, task });
+}
+
 async function handleRequest(msg) {
   const { id, method, params = {} } = msg;
   try {
@@ -164,6 +289,18 @@ async function handleRequest(msg) {
         result = await sendCdp(params.tabId, params.method, params.params);
         break;
       }
+      case 'nano.avail': {
+        result = await nanoAvail();
+        break;
+      }
+      case 'nano.warmup': {
+        result = await nanoWarmup();
+        break;
+      }
+      case 'nano.verdict': {
+        result = await nanoVerdict(params.dataUrl, params.task);
+        break;
+      }
       default:
         throw new Error(`unknown method ${method}`);
     }
@@ -191,9 +328,11 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 function connect() {
   if (connecting || (ws && ws.readyState === WebSocket.OPEN)) return;
   connecting = true;
+  const url = `ws://localhost:${BRIDGE_PORT_CANDIDATES[bridgePortIdx]}/`;
+  bridgePortIdx = (bridgePortIdx + 1) % BRIDGE_PORT_CANDIDATES.length; // next attempt tries the next port
   let socket;
   try {
-    socket = new WebSocket(BRIDGE_URL);
+    socket = new WebSocket(url);
   } catch (e) {
     connecting = false;
     scheduleReconnect();
@@ -204,7 +343,7 @@ function connect() {
   socket.addEventListener('open', () => {
     connecting = false;
     reconnectDelay = 500;
-    log('connected to bridge', BRIDGE_URL);
+    log('connected to bridge', socket.url);
     emit('hello', { extension: chrome.runtime.id });
   });
 

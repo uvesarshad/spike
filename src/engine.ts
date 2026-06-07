@@ -11,9 +11,15 @@
  * tab survive across runs so the on-device model stays warm. Rung 0 is an
  * optimization, not a dependency: without Nano the router starts at rung 1. */
 
+import type { ChildProcess } from 'node:child_process';
 import { loadConfig, type QaConfig } from './config.js';
 import { CdpBrowser } from './ports/cdp-browser.js';
+import { ExtensionBrowser } from './ports/extension-browser.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
+import { BridgeServer } from './bridge/bridge-server.js';
+import { launchChromeWithExtension } from './chrome/extensions.js';
+import { cdpAlive } from './chrome/launch.js';
+import type { BrowserPort } from './ports/browser-port.js';
 import { ModelRouter } from './router/model-router.js';
 import type { ModelAdapter } from './router/adapter.js';
 import { NanoAdapter } from './router/adapters/nano.js';
@@ -40,33 +46,123 @@ export interface QaRunResult extends Report {
   recordedScript?: string;
 }
 
-interface Session {
+/** Browser-only session — the transport (CdpBrowser or ExtensionBrowser) plus
+ * whatever process/bridge it stood up. Nano is composed on top by openSession;
+ * kept out of this contract so a no-AI caller (tests) can drive the browser
+ * alone without touching the Nano profile. */
+export interface BrowserSession {
   cfg: QaConfig;
-  browser: CdpBrowser;
-  nano: NanoRunnerPage;
+  browser: BrowserPort;
+  /** Present only when this session SPAWNED a Chrome (extension mode, cold). */
+  chromeProcess?: ChildProcess;
   close(): Promise<void>;
 }
 
-async function openSession(config: Partial<QaConfig>): Promise<Session> {
+/**
+ * Open just the browser transport per cfg.via. Shared by qaRun/qaReplay (which
+ * compose Nano on top) and by no-AI tests (which drive the browser directly).
+ *
+ *  - 'cdp':       a daemon-launched CdpBrowser on cfg.cdpPort (today's behavior).
+ *  - 'extension': a BridgeServer on cfg.bridgePort + an ExtensionBrowser over it.
+ *                 Reuse-if-alive: if a Chrome already listens on cfg.cdpPort we
+ *                 assume the profile already has the extension dev-loaded (it
+ *                 persists in the profile) and just wait for the SW to connect;
+ *                 otherwise we spawn a fresh Chrome with the extension loaded.
+ */
+export async function openBrowserSession(config: Partial<QaConfig> = {}): Promise<BrowserSession> {
   const cfg = loadConfig(config);
-  const nano = new NanoRunnerPage({
-    cdpPort: cfg.cdpPort,
-    runnerPort: cfg.runnerPort,
-    profileDir: cfg.chromeProfile,
-  });
+
+  if (cfg.via === 'extension') {
+    const bridge = new BridgeServer(cfg.bridgePort);
+    let chromeProcess: ChildProcess | undefined;
+    try {
+      if (await cdpAlive(cfg.cdpPort)) {
+        // Chrome already up on this port — its persistent profile should carry
+        // the extension. Nothing to spawn; the SW reconnects to our bridge.
+      } else {
+        const { chrome } = await launchChromeWithExtension({
+          cdpPort: cfg.cdpPort,
+          extensionDir: cfg.extensionDir,
+          profileDir: cfg.chromeProfile,
+          headless: false,
+        });
+        chromeProcess = chrome;
+      }
+
+      const browser = new ExtensionBrowser({ bridge, connectTimeoutMs: 20_000 });
+      try {
+        await browser.launch(); // waits for the bridge connection, then creates the tab
+      } catch (e) {
+        throw new Error(
+          `extension transport failed to connect within ~20s: ${
+            e instanceof Error ? e.message : String(e)
+          }. A Chrome may be running on CDP port ${cfg.cdpPort} WITHOUT the QA extension loaded — ` +
+            `close that Chrome (or set QA_CDP_PORT to a free port) so a fresh Chrome with the extension can launch.`,
+        );
+      }
+
+      return {
+        cfg,
+        browser,
+        chromeProcess,
+        async close() {
+          await browser.close();
+          await bridge.close();
+          // Chrome stays warm (same as cdp mode); we never kill it here.
+        },
+      };
+    } catch (e) {
+      try { await bridge.close(); } catch { /* already closed */ }
+      throw e;
+    }
+  }
+
+  // 'cdp' — exactly today's behavior.
   const browser = new CdpBrowser({
     port: cfg.cdpPort,
     profileDir: cfg.chromeProfile,
     headless: false, // headed: Nano lives here, and this window is the future "watch the robot" show
   });
-  await nano.start();
   await browser.launch();
   return {
     cfg,
     browser,
+    async close() {
+      await browser.close(); // QA tab closes; Chrome stays warm
+    },
+  };
+}
+
+interface Session {
+  cfg: QaConfig;
+  browser: BrowserPort;
+  nano: NanoRunnerPage;
+  close(): Promise<void>;
+}
+
+async function openSession(config: Partial<QaConfig>): Promise<Session> {
+  const browserSession = await openBrowserSession(config);
+  const { cfg } = browserSession;
+  // TODO: swap NanoRunnerPage for ExtensionNano in pure-extension mode.
+  // NanoRunnerPage works in BOTH modes: the extension-launched Chrome still
+  // exposes cfg.cdpPort, so the runner page is driven the same way.
+  const nano = new NanoRunnerPage({
+    cdpPort: cfg.cdpPort,
+    runnerPort: cfg.runnerPort,
+    profileDir: cfg.chromeProfile,
+  });
+  try {
+    await nano.start();
+  } catch (e) {
+    await browserSession.close();
+    throw e;
+  }
+  return {
+    cfg,
+    browser: browserSession.browser,
     nano,
     async close() {
-      await browser.close(); // QA tab closes; Chrome + runner tab stay warm
+      await browserSession.close(); // QA tab closes; Chrome + runner tab stay warm
       await nano.close();
     },
   };

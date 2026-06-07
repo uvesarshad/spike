@@ -4,8 +4,22 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** Repo's extension/ dir, resolved relative to this source file (src/ → up → extension). */
+const DEFAULT_EXTENSION_DIR = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)), // .../src/
+  '..', // repo root
+  'extension',
+);
 
 export interface QaConfig {
+  /** Transport that drives Chrome: daemon-launched CDP, or the MV3 extension bridge. */
+  via: 'cdp' | 'extension';
+  /** WebSocket port the daemon↔extension bridge listens on (extension mode). */
+  bridgePort: number;
+  /** Unpacked extension dir dev-loaded in extension mode. */
+  extensionDir: string;
   /** CDP port for the daemon's Chrome. */
   cdpPort: number;
   /** Local HTTP port serving the Nano runner page. */
@@ -29,6 +43,9 @@ export interface QaConfig {
 }
 
 const DEFAULTS: QaConfig = {
+  via: 'cdp',
+  bridgePort: 9410,
+  extensionDir: DEFAULT_EXTENSION_DIR,
   cdpPort: 9322,
   runnerPort: 9400,
   fixturePort: 9401,
@@ -49,6 +66,9 @@ function fromFile(cwd: string): Partial<QaConfig> {
 function fromEnv(): Partial<QaConfig> {
   const e = process.env;
   const out: Partial<QaConfig> = {};
+  if (e.QA_VIA === 'cdp' || e.QA_VIA === 'extension') out.via = e.QA_VIA;
+  if (e.QA_BRIDGE_PORT) out.bridgePort = Number(e.QA_BRIDGE_PORT);
+  if (e.QA_EXTENSION_DIR) out.extensionDir = e.QA_EXTENSION_DIR;
   if (e.QA_CDP_PORT) out.cdpPort = Number(e.QA_CDP_PORT);
   if (e.QA_RUNNER_PORT) out.runnerPort = Number(e.QA_RUNNER_PORT);
   if (e.QA_FIXTURE_PORT) out.fixturePort = Number(e.QA_FIXTURE_PORT);

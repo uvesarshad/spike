@@ -93,8 +93,10 @@
 - [x] Daemon↔extension bridge (`src/bridge/bridge-server.ts`): WS on 9410, JSON-RPC request/response + CDP event forwarding; new SW connection supersedes the old
 - [x] Dev-loading post-Chrome-137 solved (`src/chrome/extensions.ts`): `Extensions.loadUnpacked` is **pipe-only** — launch with `--remote-debugging-pipe` (NUL-framed JSON-RPC on fd 3/4) + `--enable-unsafe-extension-debugging`, port stays live for the daemon; Web Store for users
 - [x] Port-contract suite (`test/port-contract.ts`): the m1 checks generalized over any BrowserPort — **CdpBrowser 7/7 AND ExtensionBrowser 7/7** (`test/v3.extension-port.ts`), logpoints with live values working through chrome.debugger
-- [ ] Nano via the extension's own Prompt API access (replaces the localhost runner page in this mode)
-- [ ] Engine wiring: `qa run --via extension` (bridge port into config.ts; engine picks the port implementation)
+- [x] Nano via the extension's own Prompt API (`src/ports/extension-nano.ts` + sw.js `nano.*` bridge methods; SW-first with automatic chrome.offscreen fallback) — v6: good→pass 5.1s / bad→fail 3.0s, $0, schema-enforced (`test/v6.extension-nano.ts`)
+- [x] Engine wiring: `qa run|replay --via extension` (config: via/bridgePort/extensionDir + QA_VIA env; engine `openBrowserSession` picks the transport, reuse-if-alive on the CDP port; SW scans bridge ports 9410-9413) — v5 4/4 no-AI + full AI capstone run
+- [ ] Engine: swap NanoRunnerPage → ExtensionNano in pure-extension mode (TODO comment sits at the seam in engine.ts; runner page still works today because the extension-launched Chrome exposes the CDP port)
+- [ ] Fresh-Chrome Nano availability: component re-validates (~60s 'downloading') after every Chrome start — engine should poll briefly instead of falling to rung 1 (v6 polls; engine doesn't yet)
 
 ### Vibe UX
 - [ ] Side-panel chat: plain-English task in ("test my signup flow"), live step feed, plain-English report out
