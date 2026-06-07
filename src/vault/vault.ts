@@ -9,14 +9,17 @@
  * deliberate for v1.
  *
  * KEYCHAIN-SWAP SEAM: all key access goes through the KeyProvider interface
- * below. The default FileKeyProvider reads/writes key.bin; an OS-keychain
- * backend (Windows DPAPI / macOS Keychain / libsecret) can later implement the
- * same { getKey(): Buffer } contract and be injected via the Vault constructor —
- * no change to the encryption path or the public API. */
+ * below. FileKeyProvider reads/writes key.bin; an OS-keychain backend (Windows
+ * DPAPI / macOS Keychain / libsecret) implements the same { getKey(): Buffer }
+ * contract and is injected via the Vault constructor — no change to the
+ * encryption path or the public API. The first such backend, DpapiKeyProvider
+ * (Windows DPAPI, no native deps), is now the DEFAULT on Windows — see the
+ * provider-selection rule in the Vault constructor. */
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { DpapiKeyProvider } from './dpapi-key-provider.js';
 
 const ALGO = 'aes-256-gcm';
 const KEY_BYTES = 32;
@@ -56,8 +59,26 @@ function defaultVaultDir(): string {
 export interface VaultOptions {
   /** Vault directory (default %LOCALAPPDATA%/qa-subagent-vault). */
   dir?: string;
-  /** Key backend — defaults to FileKeyProvider over <dir>/key.bin. */
+  /** Key backend — when omitted, selected by platform/migration rule (see the
+   * Vault constructor): DPAPI on Windows for new vaults, else FileKeyProvider. */
   keyProvider?: KeyProvider;
+}
+
+/** Pick the default key backend for a vault dir.
+ *
+ * MIGRATION RULE (back-compat is non-negotiable — existing secrets must stay
+ * readable):
+ *  - If a legacy <dir>/key.bin already exists, KEEP FileKeyProvider so secrets
+ *    encrypted under that key still decrypt. We never auto-migrate the key.
+ *  - Else on Windows (win32), use DpapiKeyProvider — the wrapped key (key.dpapi)
+ *    is bound to the Windows user account, a strict upgrade over a raw key.bin.
+ *  - Else (non-Windows, no key.bin), FileKeyProvider over key.bin (the
+ *    cross-platform fallback; DPAPI is Windows-only). */
+function defaultKeyProvider(dir: string): KeyProvider {
+  const legacyKeyBin = path.join(dir, 'key.bin');
+  if (fs.existsSync(legacyKeyBin)) return new FileKeyProvider(legacyKeyBin);
+  if (process.platform === 'win32') return new DpapiKeyProvider(dir);
+  return new FileKeyProvider(legacyKeyBin);
 }
 
 /** File-based AES-256-GCM secrets store. Sync fs throughout — the secret set is
@@ -70,7 +91,7 @@ export class Vault {
   constructor(opts: VaultOptions = {}) {
     this.dir = opts.dir ?? defaultVaultDir();
     this.secretsPath = path.join(this.dir, 'secrets.enc');
-    this.keyProvider = opts.keyProvider ?? new FileKeyProvider(path.join(this.dir, 'key.bin'));
+    this.keyProvider = opts.keyProvider ?? defaultKeyProvider(this.dir);
   }
 
   /** Decrypt the secrets map. {} when the file does not exist yet. */

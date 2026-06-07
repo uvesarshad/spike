@@ -64,5 +64,16 @@ export interface BrowserPort {
   /** Raw CDP-shaped client for extras outside this contract (clip recorder).
    * Optional: a future transport may not expose one. */
   cdpClient?(): unknown;
+  /** Stamp a stable `data-qa-id` attribute on the node behind `nodeId` (from the
+   * current snapshot's nodeMap) and return the id value, or null when it can't be
+   * stamped (node gone, no resolvable object). Lets the recorder give name-less
+   * interaction targets a fallback locator (#9). Optional: a transport may not
+   * implement it (the loop guards the call). */
+  stampQaId?(nodeId: string): Promise<string | null>;
+  /** Locate a node in the CURRENT page by a previously-stamped `data-qa-id` and
+   * return a nodeId usable with click()/type(), or null when not present (e.g.
+   * the attribute was lost across a reload). Implementations register the match
+   * into their own nodeMap so the returned id resolves. Optional. */
+  findByQaId?(qaId: string): Promise<string | null>;
   close(): Promise<void>;
 }

@@ -12,6 +12,7 @@
  *      unchanged. The engine never knows which transport it got.
  */
 
+import crypto from 'node:crypto';
 import { sleep } from '../chrome/launch.js';
 import { attachCapture, type CaptureBuffers } from '../capture/console-network.js';
 import { setLogpointByContent } from '../capture/logpoints.js';
@@ -39,6 +40,11 @@ export interface ExtensionBrowserOptions {
    * tab) instead of creating a fresh one — and close() leaves the tab open,
    * detaching only the debugger. Absent → current create/close behavior. */
   attachTabId?: number;
+  /** When set, bind every bridge call/event this instance makes to a SPECIFIC
+   * bridge client (one of several Chromes on a shared bridge). The cdp-shim
+   * event subscription is filtered to it too. Absent → default-client behavior
+   * (all current single-client tests unchanged). */
+  clientId?: number;
 }
 
 export class ExtensionBrowser implements BrowserPort {
@@ -61,6 +67,12 @@ export class ExtensionBrowser implements BrowserPort {
   private get b(): BridgeServer {
     if (!this.bridge) throw new Error('ExtensionBrowser: launch() first');
     return this.bridge;
+  }
+
+  /** Targeted-client opts for bridge call/sendEvent, or undefined when this
+   * instance is not pinned to a specific client (default-client behavior). */
+  private get target(): { clientId: number } | undefined {
+    return this.opts.clientId !== undefined ? { clientId: this.opts.clientId } : undefined;
   }
 
   private get c() {
@@ -97,19 +109,19 @@ export class ExtensionBrowser implements BrowserPort {
       // create one, and remember to leave it open in close().
       const { tabId } = await this.b.call<{ tabId: number }>('ext.attachTab', {
         tabId: this.opts.attachTabId,
-      });
+      }, 30_000, this.target);
       this.tabId = tabId;
       this.attachedExisting = true;
     } else {
       // SW creates the tab and attaches chrome.debugger (version 1.3) to it.
       const { tabId } = await this.b.call<{ tabId: number }>('ext.createTab', {
         url: this.opts.initialUrl ?? 'about:blank',
-      });
+      }, 30_000, this.target);
       this.tabId = tabId;
     }
 
     // Build the CDP shim bound to this tab; enable the same domains CdpBrowser does.
-    this.shim = createCdpShim(this.b, this.tab);
+    this.shim = createCdpShim(this.b, this.tab, { clientId: this.opts.clientId });
     await Promise.all([
       this.c.Page.enable(),
       this.c.Runtime.enable(),
@@ -124,12 +136,12 @@ export class ExtensionBrowser implements BrowserPort {
   async navigate(url: string): Promise<void> {
     this.emitCursor({ kind: 'caption', caption: 'Opening ' + url });
     // The SW resolves on chrome.tabs.onUpdated status 'complete' for this tab.
-    await this.b.call('ext.navigate', { tabId: this.tab, url }, 30_000);
+    await this.b.call('ext.navigate', { tabId: this.tab, url }, 30_000, this.target);
     await sleep(300); // let first paint + late console output settle
   }
 
   async url(): Promise<string> {
-    const { url } = await this.b.call<{ url: string }>('ext.url', { tabId: this.tab });
+    const { url } = await this.b.call<{ url: string }>('ext.url', { tabId: this.tab }, 30_000, this.target);
     return url;
   }
 
@@ -161,7 +173,7 @@ export class ExtensionBrowser implements BrowserPort {
   /** Fire a vibe.cursor event; never let UI fan-out fail the action. */
   private emitCursor(params: Record<string, unknown>): void {
     try {
-      this.b.sendEvent('vibe.cursor', { tabId: this.tab, ...params });
+      this.b.sendEvent('vibe.cursor', { tabId: this.tab, ...params }, this.target);
     } catch {
       /* fire-and-forget — overlay is cosmetic */
     }
@@ -302,12 +314,55 @@ export class ExtensionBrowser implements BrowserPort {
     return this.capture?.drainNetwork() ?? [];
   }
 
+  /** Stamp a stable data-qa-id on a (typically name-less) node — recorder
+   * fallback locator. Mirrors CdpBrowser.stampQaId over the bridge shim. */
+  async stampQaId(nodeId: string): Promise<string | null> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    let objectId: string | undefined;
+    try {
+      const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+      objectId = object.objectId;
+      if (!objectId) return null;
+      const id = `qa-${crypto.randomUUID().slice(0, 8)}`;
+      await this.c.Runtime.callFunctionOn({
+        objectId,
+        functionDeclaration: 'function (id) { this.setAttribute("data-qa-id", id); return id; }',
+        arguments: [{ value: id }],
+        returnByValue: true,
+      });
+      return id;
+    } catch {
+      return null;
+    } finally {
+      if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {});
+    }
+  }
+
+  /** Resolve a previously stamped data-qa-id to a clickable nodeId (registers a
+   * synthetic entry in the nodeMap). Mirrors CdpBrowser.findByQaId. */
+  async findByQaId(qaId: string): Promise<string | null> {
+    try {
+      const { root } = await this.c.DOM.getDocument({ depth: 0 });
+      const sel = `[data-qa-id="${qaId.replace(/"/g, '\\"')}"]`;
+      const { nodeId: domNodeId } = await this.c.DOM.querySelector({ nodeId: root.nodeId, selector: sel });
+      if (!domNodeId) return null;
+      const { node } = await this.c.DOM.describeNode({ nodeId: domNodeId });
+      const backendNodeId = node.backendNodeId;
+      if (backendNodeId === undefined) return null;
+      const synthetic = `qa:${qaId}`;
+      this.nodeMap.set(synthetic, backendNodeId);
+      return synthetic;
+    } catch {
+      return null;
+    }
+  }
+
   async close(): Promise<void> {
     if (this.tabId !== null && this.bridge) {
       // Attached-to-existing (vibe): keepTab → SW only detaches the debugger so the
       // user's tab stays open. Created-by-us (tests): remove the tab as before.
       try {
-        await this.b.call('ext.closeTab', { tabId: this.tabId, keepTab: this.attachedExisting }, 5_000);
+        await this.b.call('ext.closeTab', { tabId: this.tabId, keepTab: this.attachedExisting }, 5_000, this.target);
       } catch { /* tab/SW gone */ }
     }
     this.shim?.dispose();

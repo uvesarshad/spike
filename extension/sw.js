@@ -205,7 +205,11 @@ chrome.runtime.onConnect.addListener((port) => {
             // The panel targets the user's CURRENT tab (tabId/url from
             // chrome.tabs.query). Remember it so the overlay end signal lands there.
             if (msg.tabId !== undefined && msg.tabId !== null) lastRunTabId = msg.tabId;
-            const result = await sendRequest('vibe.run', { task: msg.task, tabId: msg.tabId, url: msg.url });
+            // allowHost (panel consent toggle) is optional — forward it only when
+            // present so old daemons / read-only runs are unaffected.
+            const runParams = { task: msg.task, tabId: msg.tabId, url: msg.url };
+            if (typeof msg.allowHost === 'string' && msg.allowHost) runParams.allowHost = msg.allowHost;
+            const result = await sendRequest('vibe.run', runParams);
             port.postMessage({ kind: 'accepted', ...(result || {}) });
           } catch (e) {
             port.postMessage({ kind: 'error', message: String(e && e.message ? e.message : e) });
@@ -231,6 +235,21 @@ chrome.runtime.onConnect.addListener((port) => {
           } catch (e) {
             // includes 'unknown method vibe.fix' from an old daemon
             port.postMessage({ kind: 'fix-done', ok: false, message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'clip': {
+          try {
+            // {name, mime, dataBase64} of the last saved replay clip.
+            const result = await sendRequest('vibe.clip', {});
+            port.postMessage({
+              kind: 'clip',
+              name: result && result.name,
+              mime: result && result.mime,
+              dataBase64: result && result.dataBase64,
+            });
+          } catch (e) {
+            port.postMessage({ kind: 'clip-error', message: String(e && e.message ? e.message : e) });
           }
           break;
         }

@@ -15,7 +15,7 @@
  */
 
 import type CDP from 'chrome-remote-interface';
-import type { BridgeServer, BridgeEvent } from './bridge-server.js';
+import type { BridgeServer, BridgeEvent, ClientCtx } from './bridge-server.js';
 
 type CdpCommand = (params?: Record<string, unknown>) => Promise<unknown>;
 type CdpEventSub = (handler: (params: Record<string, unknown>) => void) => void;
@@ -27,16 +27,33 @@ export interface CdpShim {
   dispose(): void;
 }
 
+export interface CdpShimOptions {
+  callTimeoutMs?: number;
+  /** When set, bind to a specific bridge client: all `cdp` commands target it
+   * AND inbound CDP events are filtered to it (multi-Chrome isolation). Absent →
+   * default-client behavior (events accepted from any client). */
+  clientId?: number;
+}
+
 /**
  * Build a Proxy that satisfies the subset of CDP.Client the capture/executor
- * code touches, routing everything to `bridge` for the given `tabId`.
+ * code touches, routing everything to `bridge` for the given `tabId`. When
+ * `opts.clientId` is set every call/event is scoped to that bridge client.
  */
-export function createCdpShim(bridge: BridgeServer, tabId: number, callTimeoutMs = 30_000): CdpShim {
+export function createCdpShim(
+  bridge: BridgeServer,
+  tabId: number,
+  opts: CdpShimOptions = {},
+): CdpShim {
+  const callTimeoutMs = opts.callTimeoutMs ?? 30_000;
+  const clientId = opts.clientId;
   // "Domain.eventName" → set of handlers registered for it
   const eventHandlers = new Map<string, Set<(params: Record<string, unknown>) => void>>();
 
-  const onBridgeEvent = (evt: BridgeEvent): void => {
+  const onBridgeEvent = (evt: BridgeEvent, ctx: ClientCtx): void => {
     if (evt.event !== 'cdp') return;
+    // bound to a client → only accept its events (multi-Chrome isolation)
+    if (clientId !== undefined && ctx.clientId !== clientId) return;
     const p = evt.params as { tabId?: number; method?: string; params?: Record<string, unknown> };
     if (p.tabId !== tabId || typeof p.method !== 'string') return;
     const handlers = eventHandlers.get(p.method);
@@ -61,11 +78,13 @@ export function createCdpShim(bridge: BridgeServer, tabId: number, callTimeoutMs
         // crI returns an unsubscribe function; mirror that for parity
         return () => set!.delete(arg as (params: Record<string, unknown>) => void);
       }
-      // command shape: params object (or none) → bridge `cdp` call
+      // command shape: params object (or none) → bridge `cdp` call, scoped to
+      // this shim's client when bound.
       return bridge.call(
         'cdp',
         { tabId, method: fullName, params: (arg as Record<string, unknown>) ?? {} },
         callTimeoutMs,
+        clientId !== undefined ? { clientId } : undefined,
       );
     }) as CdpMember;
     return member;

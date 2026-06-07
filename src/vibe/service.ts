@@ -11,6 +11,7 @@
  *   vibe.status {}          → {busy:boolean}
  *   vibe.fix    {}          → {accepted:true}      (then async vibe.fix-progress/-done events)
  *   vibe.cancel {}          → {cancelled:boolean}  (aborts the active run)
+ *   vibe.clip   {}          → {name, mime, dataBase64}  (last saved replay clip)
  *
  * Events emitted (via bridge.sendEvent):
  *   vibe.progress     {line}
@@ -51,32 +52,48 @@ export class VibeService {
   private fixing = false;
   /** Aborts the active qaRun (vibe.cancel). Null when no run is in flight. */
   private activeRun: AbortController | null = null;
+  /** Absolute path of the clip saved by the most recent run (replay.mp4|.webm).
+   * Null until a run produces one; vibe.clip serves it back to the panel. */
+  private lastClipPath: string | null = null;
 
   constructor(private readonly bridge: BridgeServer) {}
 
+  /** TEST SEAM ONLY: let v22.clip-share point lastClipPath at a temp file without
+   * spawning Chrome. Not used in production (real runs set it via stopAndSaveClip). */
+  noteClipForTest(p: string): void {
+    this.lastClipPath = p;
+  }
+
   start(): void {
     this.bridge.onRequest('vibe.status', async () => ({ busy: this.busy }));
-    this.bridge.onRequest('vibe.run', async (params) => {
+    this.bridge.onRequest('vibe.run', async (params, ctx) => {
       if (this.busy) throw new Error('a run is already in progress');
       const task = String((params as { task?: unknown }).task ?? '');
       const url = String((params as { url?: unknown }).url ?? '');
       // tabId (the panel's current tab) is optional — absent → create-a-tab path.
       const rawTabId = (params as { tabId?: unknown }).tabId;
       const tabId = typeof rawTabId === 'number' ? rawTabId : undefined;
+      // allowHost (the panel's consent toggle): when present, the user opted to
+      // let the agent click/type on this host → add it to allowedHosts for this
+      // run. Absent → the daemon's read-only guard applies on third-party hosts.
+      const rawAllowHost = (params as { allowHost?: unknown }).allowHost;
+      const allowHost = typeof rawAllowHost === 'string' && rawAllowHost.trim() ? rawAllowHost.trim() : undefined;
       if (!task || !url) throw new Error('vibe.run requires { task, url }');
       this.busy = true;
       // Fire-and-forget the actual run; the request returns immediately.
-      void this.execute(task, url, tabId);
+      // ctx.clientId binds the whole run (browser calls + UI events) to the
+      // Chrome whose panel asked — a second connected Chrome stays untouched.
+      void this.execute(task, url, tabId, allowHost, ctx?.clientId);
       return { accepted: true };
     });
 
     // vibe.fix — hand the last failed run's fix prompt to a CLI coding agent.
-    this.bridge.onRequest('vibe.fix', async () => {
+    this.bridge.onRequest('vibe.fix', async (_params, ctx) => {
       if (!this.lastFailedReport) throw new Error('vibe.fix: no failed run to fix yet');
       if (this.fixing) throw new Error('vibe.fix: a fix is already in progress');
       this.fixing = true;
       const report = this.lastFailedReport;
-      void this.dispatch(report);
+      void this.dispatch(report, ctx?.clientId);
       return { accepted: true };
     });
 
@@ -86,12 +103,29 @@ export class VibeService {
       this.activeRun.abort();
       return { cancelled: true };
     });
+
+    // vibe.clip — serve the LAST saved replay clip back to the panel so it can
+    // offer a download. Clips are a few MB; returning one base64 frame is fine.
+    this.bridge.onRequest('vibe.clip', async () => {
+      const p = this.lastClipPath;
+      if (!p) throw new Error('no clip from the last run');
+      let buf: Buffer;
+      try {
+        buf = fs.readFileSync(p);
+      } catch {
+        throw new Error('no clip from the last run');
+      }
+      const ext = path.extname(p).toLowerCase();
+      const mime = ext === '.mp4' ? 'video/mp4' : 'video/webm';
+      return { name: path.basename(p), mime, dataBase64: buf.toString('base64') };
+    });
   }
 
-  private async execute(task: string, url: string, tabId?: number): Promise<void> {
+  private async execute(task: string, url: string, tabId?: number, allowHost?: string, clientId?: number): Promise<void> {
     const controller = new AbortController();
     this.activeRun = controller;
-    const progress = (line: string) => this.bridge.sendEvent('vibe.progress', { line });
+    const target = clientId !== undefined ? { clientId } : undefined;
+    const progress = (line: string) => this.bridge.sendEvent('vibe.progress', { line }, target);
 
     // Replay recording brackets the run. Only attempt it on REAL panel runs
     // (tabId present): tabCapture needs the extension to have been invoked on a
@@ -100,7 +134,7 @@ export class VibeService {
     let recording = false;
     if (typeof tabId === 'number') {
       try {
-        const start = await this.bridge.call<RecStartResult>('rec.start', { tabId }, 20_000);
+        const start = await this.bridge.call<RecStartResult>('rec.start', { tabId }, 20_000, target);
         if (start && start.ok) {
           recording = true;
           progress('recording replay clip…');
@@ -116,13 +150,21 @@ export class VibeService {
       // The engine agent is adding QaRunOptions.signal; until that lands the
       // structural cast keeps this typechecking. TODO: drop the cast once
       // QaRunOptions.signal is declared.
+      // Consent: only when the panel passed allowHost do we widen allowedHosts.
+      // Unchecked → the default allowedHosts (localhost/127.0.0.1) stand, so the
+      // read-only guard applies on third-party hosts and the run ends with the
+      // guard message (which the panel surfaces).
+      const config = allowHost
+        ? { via: 'extension' as const, allowedHosts: [...loadConfig().allowedHosts, allowHost] }
+        : { via: 'extension' as const };
       const runOpts = {
         bridge: this.bridge,
         tabId,
-        config: { via: 'extension' as const },
+        clientId,
+        config,
         record: false,
         onProgress: progress,
-        onStep: (info) => this.bridge.sendEvent('vibe.step', info),
+        onStep: (info) => this.bridge.sendEvent('vibe.step', info as unknown as Record<string, unknown>, target),
         signal: controller.signal,
       } as QaRunOptions & { signal?: AbortSignal };
       const report = await qaRun(task, url, runOpts);
@@ -130,7 +172,7 @@ export class VibeService {
       // Stop recording and persist the webm (failure-tolerant — a missing clip
       // never changes the verdict). Keyed by the report's runId so it lands
       // alongside report.json + screenshots.
-      const clipPath = recording ? await this.stopAndSaveClip(report.runId, progress) : undefined;
+      const clipPath = recording ? await this.stopAndSaveClip(report.runId, progress, target) : undefined;
 
       // Stash a failure so the panel can offer "fix it"; clear on success.
       this.lastFailedReport = report.verdict === 'pass' ? null : report;
@@ -140,38 +182,47 @@ export class VibeService {
         fixPrompt: buildFixPrompt(report),
         durationMs: report.durationMs,
         ...(clipPath ? { clipPath } : {}),
-      });
+      }, target);
     } catch (e) {
       // A run failure must not leave a recorder running in the offscreen doc.
-      if (recording) { try { await this.bridge.call('rec.stop', {}, 25_000); } catch { /* best effort */ } }
+      if (recording) { try { await this.bridge.call('rec.stop', {}, 25_000, target); } catch { /* best effort */ } }
       this.bridge.sendEvent('vibe.error', {
         message: e instanceof Error ? e.message : String(e),
-      });
+      }, target);
     } finally {
       this.busy = false;
       this.activeRun = null;
     }
   }
 
-  /** Stop the extension recorder, decode the webm, write artifacts/<runId>/replay.webm.
+  /** Stop the extension recorder, decode the clip, write artifacts/<runId>/replay.<ext>.
+   * The extension reports the chosen mime (mp4 where the platform records H.264,
+   * else webm) → we pick the matching extension so the file previews correctly.
    * Returns the path on success, undefined otherwise. Never throws. */
-  private async stopAndSaveClip(runId: string, progress: (line: string) => void): Promise<string | undefined> {
+  private async stopAndSaveClip(runId: string, progress: (line: string) => void, target?: { clientId: number }): Promise<string | undefined> {
     try {
-      const stop = await this.bridge.call<RecStopResult>('rec.stop', {}, 30_000);
+      const stop = await this.bridge.call<RecStopResult>('rec.stop', {}, 30_000, target);
       if (!stop || !stop.ok || !stop.webmBase64) {
         progress(`clip unavailable: ${stop?.reason ?? 'recorder returned no data'}`);
         return undefined;
       }
       const buf = Buffer.from(stop.webmBase64, 'base64');
-      // sanity: webm/Matroska EBML magic 0x1A45DFA3
-      if (buf.length < 4 || !(buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3)) {
-        progress('clip unavailable: recorded bytes are not a valid webm');
+      const isMp4 = typeof stop.mime === 'string' && stop.mime.includes('mp4');
+      if (!isMp4) {
+        // sanity: webm/Matroska EBML magic 0x1A45DFA3 (only meaningful for webm)
+        if (buf.length < 4 || !(buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3)) {
+          progress('clip unavailable: recorded bytes are not a valid webm');
+          return undefined;
+        }
+      } else if (buf.length < 4) {
+        progress('clip unavailable: recorded mp4 is empty');
         return undefined;
       }
       const dir = path.join(loadConfig({}).artifactsDir, runId);
       fs.mkdirSync(dir, { recursive: true });
-      const clipPath = path.join(dir, 'replay.webm');
+      const clipPath = path.join(dir, isMp4 ? 'replay.mp4' : 'replay.webm');
       fs.writeFileSync(clipPath, buf);
+      this.lastClipPath = clipPath;
       progress(`replay clip: ${clipPath} (${Math.round(buf.length / 1024)} KB)`);
       return clipPath;
     } catch (e) {
@@ -180,17 +231,18 @@ export class VibeService {
     }
   }
 
-  private async dispatch(report: Report): Promise<void> {
+  private async dispatch(report: Report, clientId?: number): Promise<void> {
+    const target = clientId !== undefined ? { clientId } : undefined;
     try {
       const res = await dispatchFix(report, {
-        onProgress: (line) => this.bridge.sendEvent('vibe.fix-progress', { line }),
+        onProgress: (line) => this.bridge.sendEvent('vibe.fix-progress', { line }, target),
       });
-      this.bridge.sendEvent('vibe.fix-done', { ok: res.ok, agent: res.agent });
+      this.bridge.sendEvent('vibe.fix-done', { ok: res.ok, agent: res.agent }, target);
     } catch (e) {
       this.bridge.sendEvent('vibe.fix-done', {
         ok: false,
         message: e instanceof Error ? e.message : String(e),
-      });
+      }, target);
     } finally {
       this.fixing = false;
     }

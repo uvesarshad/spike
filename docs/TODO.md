@@ -128,6 +128,18 @@
 - [x] Panel: "🤖 Auto-fix with my coding agent" button on FAIL (vibe.fix → fix-progress/fix-done events)
 - [x] e2e with a REAL coding agent: `test/e2e.autofix-real.ts` (gated on QA_REAL_AGENT_E2E=1 — spends real tokens) + on-disk `test/fixtures/buggy-shop/`. PROVEN: red → real `claude -p` edits checkout.js (adds the missing `total`) → green, ~5.7min wall. Gotchas solved: serve the agent's temp copy, cache-bust scripts, deterministic sync throw
 
+## Phase 3.6 — Pre-launch hardening round (scoped 2026-06-07)
+
+> Items 5–11 from the remaining-work review — ALL SHIPPED 2026-06-07. Dogfood (MontrAI/other app) runs in parallel on the user's side.
+
+- [x] **#5 Fast planning when BYOK key present**: plan-step ladder puts rung 2 before rung 1 when a key is live (`preferFreePlanner: true` opts back to free-first); visual verdicts unchanged (Nano first). m4 8/8 held.
+- [x] **#6 Recorder `nth` auto-populate**: loop records the acted node's index among role+name duplicates (`rankByRoleName`, document order — same traversal as replay/codegen); flows into scripts automatically. v21.
+- [x] **#7 Clip share + MP4 attempt**: offscreen recorder tries `video/mp4` first (unsupported on this Chrome/Win build — measured matrix in code; lands on webm/vp9 here, mp4 where platforms allow), daemon saves the matching extension; panel "⬇ Download clip" button via `vibe.clip` base64 fetch → blob download. v22 9/9.
+- [x] **#8 DPAPI vault key backend**: `DpapiKeyProvider` (ProtectedData via PowerShell, base64-only across the shell, no native deps); DEFAULT on win32 for new vaults, legacy key.bin keeps FileKeyProvider (no silent re-key). v23 18/18.
+- [x] **#9 `data-qa-id` fallback locator**: both ports stamp name-less targets (`stampQaId`) + resolve them (`findByQaId` → synthetic nodeId); scripts carry qaId; replay falls back on ambiguous/drift/out-of-range; Playwright codegen emits the attribute locator. Best-effort across reloads (stamps die on navigation). v21 13/13.
+- [x] **#10 Interaction consent UX**: CLI repeatable `--allow-host` on run/replay (appends to allowedHosts); panel pre-run checkbox "Allow the agent to click & type on this site" (amber third-party note) → `allowHost` through vibe.run.
+- [x] **#11 Multi-Chrome bridge multiplexing**: BridgeServer tracks N clients (clientId per socket, origin-checked response routing, per-client pending cleanup); ExtensionBrowser/cdp-shim bind to a clientId; VibeService routes the whole run + all UI events back to the ASKING Chrome. v24 proof: two Chromes on ONE bridge port, tab created via A undrivable via B, A's run untouched by B. v24 9/9; v7/v3/v17 held.
+
 ## Phase 4 — Later (tracked, not scoped)
 
 - [x] Tier-4 guardrail core (2026-06-07): AES-256-GCM vault (`qa secret`, `{{secret:NAME}}` resolved at execute-time only — placeholders everywhere else: prompts/reports/scripts/audit), read-only-by-default outside allowedHosts, per-action audit.log. Still open: confirm-on-mutation UX, OS-keychain key backend, secret redaction in screenshots/clips

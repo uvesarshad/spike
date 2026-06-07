@@ -62,6 +62,12 @@
       <textarea id="task" class="text-area" rows="3"
                 placeholder="…or describe what to test"></textarea>
 
+      <label class="consent-row" for="consentToggle">
+        <input id="consentToggle" class="consent-check" type="checkbox" checked />
+        <span class="consent-text">Allow the agent to click &amp; type on this site</span>
+      </label>
+      <div id="consentNote" class="consent-note" hidden></div>
+
       <div class="run-row">
         <button id="runBtn" class="run-btn" type="button">Run test</button>
         <button id="stopBtn" class="stop-btn" type="button" hidden>Stop</button>
@@ -78,6 +84,8 @@
     <section id="resultCard" class="result-card" hidden>
       <div id="verdictBadge" class="verdict-badge"></div>
       <pre id="plainReport" class="plain-report"></pre>
+
+      <button id="clipBtn" class="clip-btn" type="button" hidden>⬇ Download clip</button>
 
       <div id="fixSection" class="fix-section" hidden>
         <button id="autoFixBtn" class="autofix-btn" type="button">🤖 Auto-fix with my coding agent</button>

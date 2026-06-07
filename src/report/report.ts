@@ -12,6 +12,16 @@ export type RunVerdict = 'pass' | 'fail' | 'uncertain';
 export interface StepTarget {
   role: string;
   name?: string;
+  /** 0-based index of this node among all snapshot nodes sharing its role+name,
+   * in document (recursive-children) order. Set by the driver loop ONLY when the
+   * snapshot held >1 such node — disambiguates duplicate locators on replay
+   * (#6). Absent → there was exactly one match. */
+  nth?: number;
+  /** Stable `data-qa-id` attribute stamped on a name-less interaction target so
+   * replay has a fallback locator when role+name is unusable (#9). Best-effort:
+   * stamped attributes don't survive a page reload, so replay treats it as a
+   * last resort behind role+name. */
+  qaId?: string;
 }
 
 export interface StepRecord {

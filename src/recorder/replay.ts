@@ -231,6 +231,10 @@ async function findByTarget(browser: BrowserPort, target: ScriptTarget): Promise
     if (matches.length > 0) {
       if (typeof nth === 'number') {
         if (nth < 0 || nth >= matches.length) {
+          // nth out of range can be UI drift (fewer matches than recorded) —
+          // try the qaId fallback before failing.
+          const viaQa = await tryQaIdFallback(browser, target);
+          if (viaQa) return viaQa;
           throw new Error(
             `locator out of range: nth=${nth} but only ${matches.length} × ${role} "${name ?? ''}" on the page`,
           );
@@ -238,15 +242,32 @@ async function findByTarget(browser: BrowserPort, target: ScriptTarget): Promise
         return matches[nth];
       }
       if (matches.length === 1) return matches[0];
+      // ambiguous role+name — a stamped data-qa-id (#9) resolves it uniquely.
+      const viaQa = await tryQaIdFallback(browser, target);
+      if (viaQa) return viaQa;
       throw new Error(
         `ambiguous locator: ${matches.length} × ${role} "${name ?? ''}" — re-record or refine (add nth)`,
       );
     }
     if (Date.now() > deadline) {
+      // zero role+name matches (UI drift) — last resort: the stamped data-qa-id.
+      const viaQa = await tryQaIdFallback(browser, target);
+      if (viaQa) return viaQa;
       throw new Error(`UI drift: no ${role} ${name ? `"${name}" ` : ''}on the page after ${FIND_TIMEOUT_MS}ms`);
     }
     await sleep(300);
   }
+}
+
+/** #9 fallback: when role+name resolution fails or is ambiguous, locate by the
+ * stamped `data-qa-id` (best-effort — the attribute is lost across reloads, so a
+ * miss returns null and the caller keeps its precise role+name error). Returns a
+ * minimal AxNode whose `id` is a port nodeId usable by click()/type(). */
+async function tryQaIdFallback(browser: BrowserPort, target: ScriptTarget): Promise<AxNode | null> {
+  if (!target.qaId || !browser.findByQaId) return null;
+  const nodeId = await browser.findByQaId(target.qaId).catch(() => null);
+  if (!nodeId) return null;
+  return { id: nodeId, role: target.role, name: target.name };
 }
 
 /** All nodes matching role+name, in document (pre-order) order. */

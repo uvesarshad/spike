@@ -7,9 +7,10 @@
  * 'vibe-panel'. The SW relays our run/status/nano/bridge-status requests to the
  * daemon and broadcasts the daemon's vibe.* events back to us.
  *
- *   panel -> SW : { kind:'run', task, tabId, url }
+ *   panel -> SW : { kind:'run', task, tabId, url, allowHost? }
  *                 { kind:'cancel' }
  *                 { kind:'fix' }
+ *                 { kind:'clip' }
  *                 { kind:'nano-download' }
  *                 { kind:'status' }
  *                 { kind:'nano' }
@@ -20,6 +21,8 @@
  *                 { kind:'fix-progress', line }    (relayed vibe.fix-progress)
  *                 { kind:'fix-done', ok, agent?, message? } (relayed vibe.fix-done)
  *                 { kind:'nano-progress', status } (download progress)
+ *                 { kind:'clip', name, mime, dataBase64 } (last replay clip)
+ *                 { kind:'clip-error', message }
  *                 { kind:'status', busy }
  *                 { kind:'nano', availability }
  *                 { kind:'bridge-status', connected }
@@ -74,6 +77,9 @@ const tabTitle = $('tabTitle');
 const tabHost = $('tabHost');
 const tabWarning = $('tabWarning');
 const stopBtn = $('stopBtn');
+const consentToggle = $('consentToggle');
+const consentNote = $('consentNote');
+const clipBtn = $('clipBtn');
 const nanoOnboard = $('nanoOnboard');
 const nanoDownloadBtn = $('nanoDownloadBtn');
 const nanoProgress = $('nanoProgress');
@@ -86,6 +92,7 @@ const historyList = $('historyList');
 
 let busy = false;
 let fixing = false;
+let fetchingClip = false;
 
 // the task + verdict of the most recent result (for history persistence)
 let lastResult = null; // { task, verdict, reason }
@@ -188,6 +195,12 @@ function onPortMessage(msg) {
       break;
     case 'nano-progress':
       renderNanoProgress(msg.status);
+      break;
+    case 'clip':
+      onClipReceived(msg);
+      break;
+    case 'clip-error':
+      onClipError(msg.message);
       break;
     default:
       break;
@@ -351,7 +364,33 @@ function renderTabCard() {
   }
 
   tabWarning.hidden = testable;
+  refreshConsent();
   refreshRunEnabled();
+}
+
+// ---- interaction consent ---------------------------------------------------
+function isLocalHost(host) {
+  return host === 'localhost' || host === '127.0.0.1' ||
+    host === '[::1]' || /^localhost:/.test(host) || /^127\.0\.0\.1:/.test(host);
+}
+
+/** Default-checked for every testable host; third-party (non-localhost) hosts
+ * keep the box checked but get an amber "interacts as you" note. */
+function refreshConsent() {
+  const testable = activeTab && isTestableUrl(activeTab.url);
+  if (!testable) {
+    consentNote.hidden = true;
+    return;
+  }
+  const host = hostOf(activeTab.url);
+  // default checked (set once per tab render; the user can still uncheck)
+  consentToggle.checked = true;
+  if (isLocalHost(host)) {
+    consentNote.hidden = true;
+  } else {
+    consentNote.hidden = false;
+    consentNote.textContent = 'third-party site — the agent will interact with it as you';
+  }
 }
 
 function refreshRunEnabled() {
@@ -544,6 +583,15 @@ function renderResult(params) {
   const reportText = params.plainReport || params.reason || '(no report)';
   plainReport.textContent = reportText;
 
+  // a saved replay clip (clipPath in the done payload) → offer a download
+  if (params.clipPath) {
+    clipBtn.hidden = false;
+    clipBtn.disabled = false;
+    clipBtn.textContent = '⬇ Download clip';
+  } else {
+    clipBtn.hidden = true;
+  }
+
   const fix = (params.fixPrompt || '').trim();
   if (fix) {
     fixPrompt.value = fix;
@@ -605,6 +653,54 @@ copyBtn.addEventListener('click', async () => {
     window.getSelection().removeAllRanges();
   }
 });
+
+// ---- download clip ---------------------------------------------------------
+clipBtn.addEventListener('click', () => {
+  if (fetchingClip) return;
+  fetchingClip = true;
+  clipBtn.disabled = true;
+  clipBtn.textContent = 'Preparing…';
+  postToSW({ kind: 'clip' });
+});
+
+function base64ToBlob(base64, mime) {
+  const binary = atob(base64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: mime || 'application/octet-stream' });
+}
+
+function onClipReceived(msg) {
+  fetchingClip = false;
+  clipBtn.disabled = false;
+  clipBtn.textContent = '⬇ Download clip';
+  if (!msg || !msg.dataBase64) {
+    onClipError('no clip data returned');
+    return;
+  }
+  try {
+    const blob = base64ToBlob(msg.dataBase64, msg.mime);
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    a.download = msg.name || 'replay.webm';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // revoke after the click has had a chance to start the download
+    setTimeout(() => { try { URL.revokeObjectURL(objUrl); } catch { /* noop */ } }, 4000);
+  } catch (e) {
+    onClipError(String(e && e.message ? e.message : e));
+  }
+}
+
+function onClipError(message) {
+  fetchingClip = false;
+  clipBtn.disabled = false;
+  clipBtn.textContent = '⬇ Download clip';
+  showError('Could not download the clip: ' + (message || 'unknown error'));
+}
 
 // ---- auto-fix --------------------------------------------------------------
 function resetFixUi() {
@@ -773,7 +869,14 @@ function startRun(task) {
   addProgressLine(`Asking the agent to test: ${activeTab.url}`);
   // optimistic; the SW confirms with 'accepted' or 'error'
   setBusy(true);
-  postToSW({ kind: 'run', task: t, tabId: activeTab.id, url: activeTab.url });
+  const runMsg = { kind: 'run', task: t, tabId: activeTab.id, url: activeTab.url };
+  // Consent: when the user allows interaction, pass the tab's host so the daemon
+  // adds it to allowedHosts. Unchecked → omit, and the read-only guard applies.
+  if (consentToggle.checked) {
+    const host = hostOf(activeTab.url);
+    if (host) runMsg.allowHost = host;
+  }
+  postToSW(runMsg);
 }
 
 runBtn.addEventListener('click', () => startRun(taskInput.value));

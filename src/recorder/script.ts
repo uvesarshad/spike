@@ -10,17 +10,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Report, StepTarget } from '../report/report.js';
 
-/** A script-step locator: role+name plus an optional `nth` disambiguator.
+/** A script-step locator: role+name plus optional `nth` / `qaId` disambiguators.
  *
  * `nth` (0-based) picks which of several role+name matches to act on when a page
- * has duplicates (two "Edit" buttons, three "Delete" links…). It is OPTIONAL:
- * scripts recorded today omit it (the StepRecord the loop emits doesn't yet say
- * which of N matches was used — see the COMPROMISE note in replay.ts), and
- * replay treats a missing `nth` as "there must be exactly one match". The field
- * is here so a future loop change can populate it without a schema/version bump. */
+ * has duplicates (two "Edit" buttons, three "Delete" links…). The driver loop
+ * now auto-populates it whenever the snapshot held >1 such match (#6), so
+ * recorded scripts disambiguate without manual editing; replay treats a missing
+ * `nth` as "there must be exactly one match".
+ *
+ * `qaId` is a stamped `data-qa-id` fallback locator for name-less targets (#9):
+ * scriptFromReport copies it through from the StepTarget verbatim. Both fields
+ * are inherited from StepTarget (re-declared here only for documentation). */
 export interface ScriptTarget extends StepTarget {
   /** 0-based index among role+name matches. Absent → exactly-one-match required. */
   nth?: number;
+  /** Stamped `data-qa-id` fallback for name-less targets (best-effort on replay). */
+  qaId?: string;
 }
 
 export type ScriptStep =
@@ -206,6 +211,11 @@ const ROLE_MAP: Record<string, string> = {
 };
 
 function locator(target: ScriptTarget): string {
+  // #9: a name-less target with a stamped data-qa-id codegens the attribute
+  // locator (resilient, no nth needed — the id is unique on the page).
+  if (!target.name && target.qaId) {
+    return `page.locator(${JSON.stringify(`[data-qa-id="${target.qaId}"]`)})`;
+  }
   const role = ROLE_MAP[target.role] ?? target.role;
   const base = target.name
     ? `page.getByRole('${role}', { name: ${JSON.stringify(target.name)} })`

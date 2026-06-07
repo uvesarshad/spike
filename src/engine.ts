@@ -53,6 +53,10 @@ export interface QaRunOptions {
   /** Vibe mode: attach to the user's CURRENT tab (panel-supplied) instead of
    * creating a fresh one. cdp mode ignores this. */
   tabId?: number;
+  /** Multi-Chrome bridge: bind this run to the specific bridge client that asked
+   * (the Chrome whose panel issued vibe.run), so a second connected Chrome can't
+   * have its tabs driven by this run. Absent → default (most-recent) client. */
+  clientId?: number;
   /** Cooperative cancellation, threaded into the driver loop: when aborted the
    * run ends 'uncertain' / 'cancelled by user'. (vibe.cancel depends on this.) */
   signal?: AbortSignal;
@@ -88,7 +92,7 @@ export interface BrowserSession {
  */
 export async function openBrowserSession(
   config: Partial<QaConfig> = {},
-  deps: { bridge?: BridgeServer; tabId?: number } = {},
+  deps: { bridge?: BridgeServer; tabId?: number; clientId?: number } = {},
 ): Promise<BrowserSession> {
   const cfg = loadConfig(config);
 
@@ -115,7 +119,7 @@ export async function openBrowserSession(
         chromeProcess = chrome;
       }
 
-      const browser = new ExtensionBrowser({ bridge, attachTabId: deps.tabId, connectTimeoutMs: 20_000 });
+      const browser = new ExtensionBrowser({ bridge, attachTabId: deps.tabId, clientId: deps.clientId, connectTimeoutMs: 20_000 });
       try {
         await browser.launch(); // waits for the bridge connection, then creates the tab
       } catch (e) {
@@ -168,7 +172,7 @@ interface Session {
   close(): Promise<void>;
 }
 
-async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer; tabId?: number } = {}): Promise<Session> {
+async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer; tabId?: number; clientId?: number } = {}): Promise<Session> {
   const browserSession = await openBrowserSession(config, deps);
   const { cfg } = browserSession;
   // Nano access depends on HOW Chrome got here:
@@ -228,7 +232,7 @@ async function pollNanoAvailable(
 
 export async function qaRun(task: string, url: string, opts: QaRunOptions = {}): Promise<QaRunResult> {
   const progress = opts.onProgress ?? (() => {});
-  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId });
+  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId });
   const { cfg, browser, nano } = session;
 
   const adapters: ModelAdapter[] = [];
@@ -244,7 +248,7 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
     new ByokGeminiAdapter({ apiKey: cfg.geminiApiKey, model: cfg.googleCliModel }),
     new OllamaAdapter(),
   );
-  const router = new ModelRouter(adapters);
+  const router = new ModelRouter(adapters, { preferFreePlanner: cfg.preferFreePlanner });
 
   const artifacts = new ArtifactStore(cfg.artifactsDir);
   progress(`run ${artifacts.runId}: "${task}" on ${url}`);

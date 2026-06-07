@@ -272,7 +272,23 @@ export async function runDriverLoop(
       // run replayable later; nodeIds die with the snapshot
       if ('nodeId' in action) {
         const t = findNode(ax.root, action.nodeId);
-        if (t) record.target = { role: t.role, ...(t.name && { name: t.name }) };
+        if (t) {
+          record.target = { role: t.role, ...(t.name && { name: t.name }) };
+          // #6: when the snapshot held >1 node sharing this role+name, record
+          // which one (0-based, document order) so replay/codegen can disambiguate.
+          const { count, index } = rankByRoleName(ax.root, t.role, t.name, action.nodeId);
+          if (count > 1 && index >= 0) record.target.nth = index;
+          // #9: a name-less interaction target has no resilient role+name locator
+          // — stamp a data-qa-id as a fallback (best-effort; lost on reload).
+          if (!t.name && (action.type === 'click' || action.type === 'type') && browser.stampQaId) {
+            try {
+              const qaId = await browser.stampQaId(action.nodeId);
+              if (qaId) record.target.qaId = qaId;
+            } catch {
+              /* best-effort: a stamp failure must not fail the step */
+            }
+          }
+        }
       }
       steps.push(record);
 
@@ -535,6 +551,29 @@ function findNode(root: AxNode, id: string): AxNode | undefined {
     if (hit) return hit;
   }
   return undefined;
+}
+
+/** Count nodes sharing `role`+`name` in document (pre-order, recursive-children)
+ * order — the SAME traversal replay's collectByRoleName / Playwright .nth() use —
+ * and report the 0-based index of the node with `targetId` among them. Returns
+ * `index = -1` if the target isn't found. Exported for unit testing (#6). */
+export function rankByRoleName(
+  root: AxNode,
+  role: string,
+  name: string | undefined,
+  targetId: string,
+): { count: number; index: number } {
+  let count = 0;
+  let index = -1;
+  const walk = (n: AxNode): void => {
+    if (n.role === role && n.name === name) {
+      if (n.id === targetId) index = count;
+      count++;
+    }
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+  return { count, index };
 }
 
 function findByRoleName(root: AxNode, role: string, name?: string): AxNode | undefined {

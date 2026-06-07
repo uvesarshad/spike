@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
-import { loadConfig } from './config.js';
+import { loadConfig, type QaConfig } from './config.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { qaReplay, qaRun } from './engine.js';
 import { slimReport, type Report } from './report/report.js';
@@ -19,6 +19,27 @@ import { startFixture } from '../fixture/server.js';
 const program = new Command();
 program.name('qa').description('Browser QA subagent — a cheap-model ladder tests your app in a real Chrome');
 
+/** Commander collector for the repeatable --allow-host flag. */
+function collectHost(value: string, previous: string[]): string[] {
+  return previous.concat(value);
+}
+
+/** Build the QaConfig override from the run/replay flags. Returns undefined when
+ * nothing was supplied (so callers can `...(config && { config })`).
+ *  - --via sets the transport.
+ *  - --allow-host appends to (does NOT replace) the configured allowedHosts, so
+ *    the localhost/127.0.0.1 defaults stay in place and the flag opens up extra
+ *    hosts for click/type just for this run. */
+function mergeConfig(
+  via: 'cdp' | 'extension' | undefined,
+  hosts: string[],
+): Partial<QaConfig> | undefined {
+  const config: Partial<QaConfig> = {};
+  if (via) config.via = via;
+  if (hosts.length) config.allowedHosts = [...loadConfig().allowedHosts, ...hosts];
+  return Object.keys(config).length ? config : undefined;
+}
+
 program
   .command('run')
   .description('run a QA task against a URL; exit 0 pass / 1 fail / 2 uncertain')
@@ -26,16 +47,18 @@ program
   .requiredOption('--url <url>', 'page to start on')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
   .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
+  .option('--allow-host <host>', 'permit clicks/typing on this host (repeatable; outside allowedHosts is read-only)', collectHost, [])
   .option('--no-record', 'do not record a passing run to generated-tests/')
   .option('--fix', 'on failure, hand the fix prompt to your coding agent (claude/codex/gemini) and re-test', false)
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension'; record: boolean; fix: boolean; maxFixAttempts?: number; json: boolean }) => {
+  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension'; allowHost: string[]; record: boolean; fix: boolean; maxFixAttempts?: number; json: boolean }) => {
     const onProgress = opts.json ? undefined : (l: string) => console.log(l);
+    const config = mergeConfig(opts.via, opts.allowHost);
     const qaRunOpts = {
       maxSteps: opts.maxSteps,
       record: opts.record,
-      ...(opts.via && { config: { via: opts.via } as const }),
+      ...(config && { config }),
       onProgress,
     };
     const report = opts.fix
@@ -78,18 +101,20 @@ program
   .option('--all', 'replay every script in generated-tests/ (the regression suite)', false)
   .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
   .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
+  .option('--allow-host <host>', 'permit clicks/typing on this host (repeatable; outside allowedHosts is read-only)', collectHost, [])
   .option('--json', 'print slim JSON verdicts only', false)
-  .action(async (name: string | undefined, opts: { all: boolean; heal: boolean; via?: 'cdp' | 'extension'; json: boolean }) => {
+  .action(async (name: string | undefined, opts: { all: boolean; heal: boolean; via?: 'cdp' | 'extension'; allowHost: string[]; json: boolean }) => {
     const targets = opts.all ? listScripts() : name ? [name] : [];
     if (targets.length === 0) {
       console.error(opts.all ? 'no recorded scripts in generated-tests/' : 'give a script name or --all');
       process.exit(2);
     }
+    const config = mergeConfig(opts.via, opts.allowHost);
     let worst = 0;
     for (const t of targets) {
       const report = await qaReplay(t, {
         heal: opts.heal,
-        ...(opts.via && { config: { via: opts.via } }),
+        ...(config && { config }),
         onProgress: opts.json ? undefined : (l) => console.log(l),
       });
       console.log(JSON.stringify({ script: t, healed: report.healed, ...slimReport(report) }, null, 2));

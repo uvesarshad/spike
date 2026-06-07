@@ -95,9 +95,25 @@ let recStream = null;
 let recChunks = [];
 let recError = null;
 
-/** Pick a supported webm mime type (vp9 preferred, vp8 fallback, bare webm). */
+/**
+ * Pick a supported recording mime type. We try H.264 MP4 FIRST so the saved clip
+ * is a `.mp4` that previews/shares everywhere (Slack/iMessage/Quicktime accept it
+ * directly; webm does not), then fall back to the always-supported webm codecs.
+ *
+ * Measured on THIS machine (Chrome 137, Windows 11) via MediaRecorder.isTypeSupported:
+ *   video/mp4;codecs=avc1.42E01E  → false
+ *   video/mp4                     → false
+ *   video/webm;codecs=vp9         → true
+ *   video/webm;codecs=vp8         → true
+ *   video/webm                    → true
+ * So MP4 recording is not available here and we land on webm/vp9 — but MP4 IS
+ * supported on some Chrome builds/platforms (notably macOS), so trying it first
+ * costs nothing and upgrades the artifact where the platform allows.
+ */
 function pickRecMime() {
   const candidates = [
+    'video/mp4;codecs=avc1.42E01E', // H.264 baseline — broadest MP4 playback
+    'video/mp4',
     'video/webm;codecs=vp9',
     'video/webm;codecs=vp8',
     'video/webm',

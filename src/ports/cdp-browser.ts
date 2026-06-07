@@ -2,6 +2,7 @@
  * spawns (or reuses) with --remote-debugging-port. Patterns lifted from the
  * spikes; capture uses native CDP domains (see capture/console-network.ts). */
 
+import crypto from 'node:crypto';
 import CDP from 'chrome-remote-interface';
 import { ensureChrome, sleep, type LaunchOptions } from '../chrome/launch.js';
 import { attachCapture, type CaptureBuffers } from '../capture/console-network.js';
@@ -182,6 +183,55 @@ export class CdpBrowser implements BrowserPort {
       await this.c.Input.dispatchKeyEvent({ type: 'keyUp', key: ch });
     }
     await sleep(100);
+  }
+
+  /** Stamp a generated `data-qa-id` on the node and return the id (#9). Resolves
+   * the snapshot backendNodeId → JS object, sets the attribute via
+   * callFunctionOn, releases the object. Returns null if the node can't be
+   * resolved. The id is short + random — stable for THIS page instance only
+   * (attributes don't survive reloads, which is the documented caveat). */
+  async stampQaId(nodeId: string): Promise<string | null> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    let objectId: string | undefined;
+    try {
+      const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+      objectId = object.objectId;
+      if (!objectId) return null;
+      const id = `qa-${crypto.randomUUID().slice(0, 8)}`;
+      await this.c.Runtime.callFunctionOn({
+        objectId,
+        functionDeclaration: 'function (id) { this.setAttribute("data-qa-id", id); return id; }',
+        arguments: [{ value: id }],
+        returnByValue: true,
+      });
+      return id;
+    } catch {
+      return null;
+    } finally {
+      if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {});
+    }
+  }
+
+  /** Find a node in the CURRENT page by stamped `data-qa-id` and return a nodeId
+   * usable with click()/type() (#9). Registers the match's backendNodeId into the
+   * live nodeMap under a synthetic `qa:<id>` key (so click(nodeId) resolves) and
+   * returns that key. Returns null when the attribute isn't present (e.g. lost on
+   * a reload) — replay then keeps its precise role+name errors. */
+  async findByQaId(qaId: string): Promise<string | null> {
+    try {
+      const { root } = await this.c.DOM.getDocument({ depth: 0 });
+      const sel = `[data-qa-id="${qaId.replace(/"/g, '\\"')}"]`;
+      const { nodeId: domNodeId } = await this.c.DOM.querySelector({ nodeId: root.nodeId, selector: sel });
+      if (!domNodeId) return null;
+      const { node } = await this.c.DOM.describeNode({ nodeId: domNodeId });
+      const backendNodeId = node.backendNodeId;
+      if (backendNodeId === undefined) return null;
+      const synthetic = `qa:${qaId}`;
+      this.nodeMap.set(synthetic, backendNodeId);
+      return synthetic;
+    } catch {
+      return null;
+    }
   }
 
   async screenshot(): Promise<Buffer> {

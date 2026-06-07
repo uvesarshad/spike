@@ -52,6 +52,11 @@ export interface QaConfig {
   allowedHosts: string[];
   /** Record a replay GIF (ghost cursor + captions are in-page, so they're in frame). */
   recordClip: boolean;
+  /** Keep the FREE rung-1 Google CLI as the first planner even when a BYOK key is
+   * present. Default false: providing a key IS the opt-in to spend it for ~3×
+   * faster planning (rung-2 HTTP beats the CLI cold-spawn). Set true to keep free
+   * quota first for plan-step. Visual verdicts are unaffected (Nano always first). */
+  preferFreePlanner: boolean;
 }
 
 const DEFAULTS: QaConfig = {
@@ -73,6 +78,7 @@ const DEFAULTS: QaConfig = {
   // one cdp-mode run showed an unexplained input interaction — see TODO.md.
   // Vibe-mode clips need a chrome.tabCapture recorder (planned).
   recordClip: false,
+  preferFreePlanner: false,
 };
 
 function fromFile(cwd: string): Partial<QaConfig> {
@@ -103,6 +109,7 @@ function fromEnv(): Partial<QaConfig> {
   if (e.QA_FIX_AGENT_CWD) out.fixAgentCwd = e.QA_FIX_AGENT_CWD;
   if (e.QA_ALLOWED_HOSTS) out.allowedHosts = e.QA_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
   if (e.QA_RECORD_CLIP) out.recordClip = e.QA_RECORD_CLIP !== '0' && e.QA_RECORD_CLIP !== 'false';
+  if (e.QA_PREFER_FREE_PLANNER) out.preferFreePlanner = e.QA_PREFER_FREE_PLANNER !== '0' && e.QA_PREFER_FREE_PLANNER !== 'false';
   return out;
 }
 

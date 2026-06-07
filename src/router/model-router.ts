@@ -19,17 +19,34 @@ export interface ModelTraceEntry {
   usage?: AdapterUsage;
 }
 
+export interface ModelRouterOptions {
+  /** Keep rung-1 (free Google CLI) first for plan-step even when a rung-2 BYOK
+   * adapter is available. Default false: a configured key IS the opt-in to spend
+   * it for ~3× faster planning, so the router orders rung 2 before rung 1 for
+   * plan-step ONLY. Visual verdicts are never reordered (rung 0 always first). */
+  preferFreePlanner?: boolean;
+}
+
 export class ModelRouter {
   readonly trace: ModelTraceEntry[] = [];
+  private readonly preferFreePlanner: boolean;
 
-  constructor(private readonly adapters: ModelAdapter[]) {
+  constructor(private readonly adapters: ModelAdapter[], opts?: ModelRouterOptions) {
     this.adapters = [...adapters].sort((a, b) => a.rung - b.rung);
+    this.preferFreePlanner = opts?.preferFreePlanner ?? false;
   }
 
   private async candidates(cap: Capability): Promise<ModelAdapter[]> {
     const out: ModelAdapter[] = [];
     for (const a of this.adapters) {
       if (a.supports(cap) && (await a.available())) out.push(a);
+    }
+    // plan-step fast path: when a rung-2 BYOK adapter is live and the user hasn't
+    // opted back into free quota, promote rung 2 ahead of rung 1 (HTTP beats the
+    // CLI cold-spawn ~3×). Stable within rung; rung 0 (never a planner) untouched;
+    // visual-verdict ladder is never reordered. Errors still fall down the rest.
+    if (cap === 'plan-step' && !this.preferFreePlanner && out.some((a) => a.rung === 2)) {
+      out.sort((a, b) => planRank(a.rung) - planRank(b.rung));
     }
     return out;
   }
@@ -130,4 +147,14 @@ export class ModelRouter {
     }
     throw new Error(`all planner adapters failed: ${lastError?.message}`);
   }
+}
+
+/** Planning sort key when BYOK-fast is active: rung 2 first, then 1, then 3,
+ * then everything else by ascending rung. (rung 0 never supports plan-step, so
+ * it won't appear here.) Keeps a stable, intentional plan ladder. */
+function planRank(rung: number): number {
+  if (rung === 2) return 0;
+  if (rung === 1) return 1;
+  if (rung === 3) return 2;
+  return 3 + rung;
 }
