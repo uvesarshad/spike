@@ -87,12 +87,14 @@
 
 > One-click Web Store install, chat side panel, watch-the-robot show, paste-ready fix prompt. The viral wedge.
 
-### Extension foundation
-- [ ] MV3 extension scaffold (grow from `spikes/extension/`): side panel, service worker, `chrome.debugger` permission flow
-- [ ] **`ExtensionBrowser`**: implement the existing `BrowserPort` stub via `chrome.debugger.sendCommand` (same CDP domains as `CdpBrowser`)
-- [ ] Daemon↔extension bridge (local WebSocket): qa_run requests in, step events out
+### Extension foundation — ✅ complete (2026-06-07)
+- [x] MV3 extension scaffold (`extension/`): service worker with reconnect loop + chrome.alarms keepalive, debugger/tabs/storage/alarms permissions
+- [x] **`ExtensionBrowser`**: real implementation — `ext.*` lifecycle via chrome.tabs, everything else via a Proxy **CDP shim** over `chrome.debugger.sendCommand`, so snapshotAxTree/attachCapture/setLogpointByContent run byte-identical to CdpBrowser (`src/ports/extension-browser.ts`, `src/bridge/cdp-shim.ts`)
+- [x] Daemon↔extension bridge (`src/bridge/bridge-server.ts`): WS on 9410, JSON-RPC request/response + CDP event forwarding; new SW connection supersedes the old
+- [x] Dev-loading post-Chrome-137 solved (`src/chrome/extensions.ts`): `Extensions.loadUnpacked` is **pipe-only** — launch with `--remote-debugging-pipe` (NUL-framed JSON-RPC on fd 3/4) + `--enable-unsafe-extension-debugging`, port stays live for the daemon; Web Store for users
+- [x] Port-contract suite (`test/port-contract.ts`): the m1 checks generalized over any BrowserPort — **CdpBrowser 7/7 AND ExtensionBrowser 7/7** (`test/v3.extension-port.ts`), logpoints with live values working through chrome.debugger
 - [ ] Nano via the extension's own Prompt API access (replaces the localhost runner page in this mode)
-- [ ] Dev-loading story post-Chrome-137 (`Extensions.loadUnpacked` over CDP for development; Web Store for users)
+- [ ] Engine wiring: `qa run --via extension` (bridge port into config.ts; engine picks the port implementation)
 
 ### Vibe UX
 - [ ] Side-panel chat: plain-English task in ("test my signup flow"), live step feed, plain-English report out
