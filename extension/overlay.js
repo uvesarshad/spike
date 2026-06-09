@@ -11,9 +11,9 @@
  *                on the target (x,y). Glides via CSS transition, "presses" on
  *                click, and spawns ripples.
  *   - caption  : a bottom-center pill narrating the current step.
- *   - badge    : a top-center "🤖 Agent is working — controls are disabled"
- *                dark pill.
- *   - glow     : a full-viewport green inset glow with a slow breathing pulse.
+ *   - badge    : a top-center "Agent is working — controls are disabled" dark
+ *                pill with a lime sparkles icon.
+ *   - glow     : a full-viewport lime inset glow with a slow breathing pulse.
  *
  * The agent-working chrome (badge + glow) appears on the FIRST overlay message
  * of a run and clears on { target:'qa-overlay', kind:'end' } (sent by the SW
@@ -60,6 +60,23 @@
   let safetyTimer = null;
   const SAFETY_MS = 3 * 60 * 1000;
 
+  // brand
+  const ACCENT = '#C4F82A';
+
+  // inline line-icons (stroke=currentColor; injected into in-page chrome since
+  // this content script can't reach the panel's icons.js).
+  const ICO = {
+    sparkles: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  };
+  function ico(name, size) {
+    const s = size || 16;
+    return '<svg width="' + s + '" height="' + s + '" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ' +
+      'style="display:block;flex:0 0 auto" aria-hidden="true">' + (ICO[name] || '') + '</svg>';
+  }
+
   function injectStyleOnce() {
     if (document.getElementById(STYLE_ID)) return;
     const style = document.createElement('style');
@@ -76,9 +93,9 @@
       '  100% { transform: scale(1); }',
       '}',
       '@keyframes __qa_breathe {',
-      '  0%   { box-shadow: inset 0 0 36px 6px rgba(34,197,94,0.28); }',
-      '  50%  { box-shadow: inset 0 0 48px 10px rgba(34,197,94,0.40); }',
-      '  100% { box-shadow: inset 0 0 36px 6px rgba(34,197,94,0.28); }',
+      '  0%   { box-shadow: inset 0 0 36px 6px rgba(196,248,42,0.24); }',
+      '  50%  { box-shadow: inset 0 0 52px 12px rgba(196,248,42,0.40); }',
+      '  100% { box-shadow: inset 0 0 36px 6px rgba(196,248,42,0.24); }',
       '}',
     ].join('\n');
     (document.head || document.documentElement).appendChild(style);
@@ -165,12 +182,17 @@
     if (!badgeEl) {
       badgeEl = document.createElement('div');
       badgeEl.id = BADGE_ID;
-      badgeEl.textContent = '🤖 Agent is working — controls are disabled';
+      badgeEl.innerHTML =
+        '<span style="display:inline-flex;color:' + ACCENT + '">' + ico('sparkles', 15) + '</span>' +
+        '<span>Agent is working — controls are disabled</span>';
       Object.assign(badgeEl.style, {
         position: 'fixed',
         top: '14px',
         left: '50%',
         transform: 'translateX(-50%)',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '8px',
         background: '#16161c',
         color: '#ffffff',
         font: '600 13px system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
@@ -201,7 +223,7 @@
         height: '100vh',
         pointerEvents: 'none',
         zIndex: '2147483646',
-        boxShadow: 'inset 0 0 48px 10px rgba(34,197,94,0.40)',
+        boxShadow: 'inset 0 0 52px 12px rgba(196,248,42,0.40)',
         animation: '__qa_breathe 2.6s ease-in-out infinite',
       });
       document.documentElement.appendChild(glowEl);
@@ -213,11 +235,16 @@
     if (!watermarkEl) {
       watermarkEl = document.createElement('div');
       watermarkEl.id = WATERMARK_ID;
-      watermarkEl.textContent = '⚡ QA Subagent';
+      watermarkEl.innerHTML =
+        '<span style="width:9px;height:9px;border-radius:3px;background:' + ACCENT + ';flex:0 0 auto"></span>' +
+        '<span>QA Subagent</span>';
       Object.assign(watermarkEl.style, {
         position: 'fixed',
         bottom: '10px',
         right: '12px',
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '6px',
         background: 'rgba(22,22,28,0.62)',
         color: 'rgba(255,255,255,0.92)',
         font: '600 11px system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
@@ -280,15 +307,11 @@
   function setCaption(text, ok) {
     if (!captionEl) return;
     captionEl.textContent = '';
-    if (ok === true) {
+    if (ok === true || ok === false) {
       const tick = document.createElement('span');
-      tick.textContent = '✓ ';
-      tick.style.color = '#34d399';
-      captionEl.appendChild(tick);
-    } else if (ok === false) {
-      const tick = document.createElement('span');
-      tick.textContent = '✗ ';
-      tick.style.color = '#f87171';
+      tick.innerHTML = ico(ok ? 'check' : 'x', 15);
+      tick.style.cssText = 'display:inline-flex;vertical-align:-3px;margin-right:6px;color:' +
+        (ok ? ACCENT : '#FF6B66');
       captionEl.appendChild(tick);
     }
     captionEl.appendChild(document.createTextNode(text || ''));

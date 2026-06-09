@@ -44,14 +44,16 @@
 
 // ---- step kinds ------------------------------------------------------------
 const STEP_KINDS = ['plan', 'click', 'type', 'navigate', 'assert', 'wait', 'finish'];
+// step kind → icon name (see icons.js); identity mapping, kept explicit so an
+// unknown kind falls back to a neutral dot.
 const STEP_ICON = {
-  plan: '🧠',
-  click: '🖱️',
-  type: '⌨️',
-  navigate: '🧭',
-  assert: '👁️',
-  wait: '⏳',
-  finish: '🏁',
+  plan: 'plan',
+  click: 'click',
+  type: 'type',
+  navigate: 'navigate',
+  assert: 'assert',
+  wait: 'wait',
+  finish: 'finish',
 };
 
 // ---- elements --------------------------------------------------------------
@@ -225,7 +227,7 @@ function setNano(availability) {
   switch (a) {
     case 'available':
     case 'readily':
-      text = 'On-device AI: ready ✅';
+      text = 'On-device AI: ready';
       // a completed download leaves the progress visible until flip; clear it
       hideNanoProgress();
       break;
@@ -250,6 +252,11 @@ function setNano(availability) {
       break;
   }
   nanoLine.textContent = text;
+  // ready state gets a lime check icon trailing the label
+  if (a === 'available' || a === 'readily') {
+    const ok = qaIconNode('check');
+    if (ok) { ok.classList.add('nano-ok-ico'); nanoLine.append(' ', ok); }
+  }
 
   nanoOnboard.hidden = !showOnboard;
   nanoDownloadBtn.hidden = !showDownloadBtn;
@@ -341,7 +348,7 @@ function renderTabCard() {
   if (!activeTab) {
     tabTitle.textContent = 'No active tab';
     tabHost.textContent = '';
-    tabFavicon.textContent = '🌐';
+    tabFavicon.innerHTML = qaIcon('globe');
     return;
   }
   tabTitle.textContent = activeTab.title || activeTab.url || 'Untitled tab';
@@ -357,10 +364,10 @@ function renderTabCard() {
     const img = document.createElement('img');
     img.src = fav;
     img.alt = '';
-    img.addEventListener('error', () => { tabFavicon.textContent = '🌐'; });
+    img.addEventListener('error', () => { tabFavicon.innerHTML = qaIcon('globe'); });
     tabFavicon.appendChild(img);
   } else {
-    tabFavicon.textContent = '🌐';
+    tabFavicon.innerHTML = qaIcon('globe');
   }
 
   tabWarning.hidden = testable;
@@ -446,7 +453,9 @@ function addFixLine(line) {
   ts.className = 'feed-ts';
   ts.textContent = new Date().toLocaleTimeString();
   el.appendChild(ts);
-  el.appendChild(document.createTextNode('🛠️ ' + String(line)));
+  const wr = qaIconNode('wrench');
+  if (wr) { wr.classList.add('fix-line-ico'); el.appendChild(wr); }
+  el.appendChild(document.createTextNode(' ' + String(line)));
   feed.appendChild(el);
   feed.scrollTop = feed.scrollHeight;
 }
@@ -479,7 +488,7 @@ function addStepRow(stepKind, msg) {
 
   const icon = document.createElement('span');
   icon.className = 'step-icon';
-  icon.textContent = STEP_ICON[stepKind] || '•';
+  icon.innerHTML = qaIcon(STEP_ICON[stepKind] || 'dot');
   row.appendChild(icon);
 
   const textEl = document.createElement('span');
@@ -501,10 +510,10 @@ function addStepRow(stepKind, msg) {
   const state = document.createElement('span');
   if (msg.ok === true) {
     state.className = 'step-state ok';
-    state.textContent = '✓';
+    state.innerHTML = qaIcon('check');
   } else if (msg.ok === false) {
     state.className = 'step-state bad';
-    state.textContent = '✗';
+    state.innerHTML = qaIcon('x');
   } else if (busy) {
     state.className = 'step-spinner';
   } else {
@@ -545,8 +554,8 @@ function finalizePendingStep(ok) {
   if (think) think.remove();
   const spinner = row.querySelector('.step-spinner');
   if (spinner) {
-    if (ok === true) { spinner.className = 'step-state ok'; spinner.textContent = '✓'; }
-    else if (ok === false) { spinner.className = 'step-state bad'; spinner.textContent = '✗'; }
+    if (ok === true) { spinner.className = 'step-state ok'; spinner.innerHTML = qaIcon('check'); }
+    else if (ok === false) { spinner.className = 'step-state bad'; spinner.innerHTML = qaIcon('x'); }
     else { spinner.className = 'step-state'; spinner.textContent = ''; }
   }
 }
@@ -569,16 +578,18 @@ function hideError() {
 function renderResult(params) {
   const verdict = String(params.verdict || 'uncertain').toLowerCase();
   verdictBadge.className = 'verdict-badge';
+  let vIcon, vLabel;
   if (verdict === 'pass') {
     verdictBadge.classList.add('verdict-pass');
-    verdictBadge.textContent = '✅ PASS';
+    vIcon = 'pass'; vLabel = 'PASS';
   } else if (verdict === 'fail') {
     verdictBadge.classList.add('verdict-fail');
-    verdictBadge.textContent = '❌ FAIL';
+    vIcon = 'fail'; vLabel = 'FAIL';
   } else {
     verdictBadge.classList.add('verdict-uncertain');
-    verdictBadge.textContent = '🤔 UNCERTAIN';
+    vIcon = 'uncertain'; vLabel = 'UNCERTAIN';
   }
+  verdictBadge.innerHTML = qaIcon(vIcon) + '<span>' + vLabel + '</span>';
 
   const reportText = params.plainReport || params.reason || '(no report)';
   plainReport.textContent = reportText;
@@ -587,7 +598,7 @@ function renderResult(params) {
   if (params.clipPath) {
     clipBtn.hidden = false;
     clipBtn.disabled = false;
-    clipBtn.textContent = '⬇ Download clip';
+    clipBtn.innerHTML = qaIcon('download') + '<span>Download clip</span>';
   } else {
     clipBtn.hidden = true;
   }
@@ -630,7 +641,7 @@ function resetCopyBtn() {
 }
 function flashCopied() {
   copyBtn.classList.add('copied');
-  copyBtn.textContent = 'Copied ✓';
+  copyBtn.innerHTML = qaIcon('check') + '<span>Copied</span>';
   if (copyTimer) clearTimeout(copyTimer);
   copyTimer = setTimeout(resetCopyBtn, 2000);
 }
@@ -674,7 +685,7 @@ function base64ToBlob(base64, mime) {
 function onClipReceived(msg) {
   fetchingClip = false;
   clipBtn.disabled = false;
-  clipBtn.textContent = '⬇ Download clip';
+  clipBtn.innerHTML = qaIcon('download') + '<span>Download clip</span>';
   if (!msg || !msg.dataBase64) {
     onClipError('no clip data returned');
     return;
@@ -698,7 +709,7 @@ function onClipReceived(msg) {
 function onClipError(message) {
   fetchingClip = false;
   clipBtn.disabled = false;
-  clipBtn.textContent = '⬇ Download clip';
+  clipBtn.innerHTML = qaIcon('download') + '<span>Download clip</span>';
   showError('Could not download the clip: ' + (message || 'unknown error'));
 }
 
@@ -707,7 +718,7 @@ function resetFixUi() {
   fixing = false;
   autoFixBtn.hidden = false;
   autoFixBtn.disabled = false;
-  autoFixBtn.textContent = '🤖 Auto-fix with my coding agent';
+  autoFixBtn.innerHTML = qaIcon('sparkles') + '<span>Auto-fix with my coding agent</span>';
   fixStatus.hidden = true;
   fixStatus.textContent = '';
   fixNote.hidden = true;
@@ -746,7 +757,7 @@ function onFixDone(msg) {
   } else {
     // failure → error banner with the message; re-enable the button to retry
     autoFixBtn.disabled = false;
-    autoFixBtn.textContent = '🤖 Auto-fix with my coding agent';
+    autoFixBtn.innerHTML = qaIcon('sparkles') + '<span>Auto-fix with my coding agent</span>';
     fixStatus.hidden = true;
     const m = (msg && msg.message) ? String(msg.message) : 'Auto-fix failed.';
     showError(m);
@@ -766,11 +777,11 @@ function relativeTime(ts) {
   return `${days}d ago`;
 }
 
-function verdictEmoji(verdict) {
+function verdictIconName(verdict) {
   switch (String(verdict || '').toLowerCase()) {
-    case 'pass': return '✅';
-    case 'fail': return '❌';
-    default: return '🤔';
+    case 'pass': return 'pass';
+    case 'fail': return 'fail';
+    default: return 'uncertain';
   }
 }
 
@@ -818,8 +829,8 @@ function renderHistory(list) {
     row.className = 'history-item';
 
     const emoji = document.createElement('span');
-    emoji.className = 'history-emoji';
-    emoji.textContent = verdictEmoji(item.verdict);
+    emoji.className = 'history-emoji ' + verdictIconName(item.verdict);
+    emoji.innerHTML = qaIcon(verdictIconName(item.verdict));
     row.appendChild(emoji);
 
     const task = document.createElement('span');
