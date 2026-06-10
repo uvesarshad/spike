@@ -28,6 +28,10 @@ import { NanoAdapter } from './router/adapters/nano.js';
 import { GoogleCliAdapter } from './router/adapters/google-cli.js';
 import { ByokGeminiAdapter } from './router/adapters/byok-gemini.js';
 import { OllamaAdapter } from './router/adapters/ollama.js';
+import { AnthropicAdapter } from './router/adapters/anthropic.js';
+import { OpenAiCompatibleAdapter } from './router/adapters/openai-compatible.js';
+import { CliPlannerAdapter } from './router/adapters/cli-planner.js';
+import { defaultModelFor, type PlannerMode, type ProviderId } from './vibe/settings.js';
 import { ArtifactStore } from './report/artifacts.js';
 import { runDriverLoop } from './driver/loop.js';
 import { Vault } from './vault/vault.js';
@@ -230,11 +234,55 @@ async function pollNanoAvailable(
   return a;
 }
 
+/**
+ * Build the full fallback ladder (everything EXCEPT rung-0 Nano, which the caller
+ * prepends only when it's available) and figure out which adapter to PIN to the
+ * front — the user's chosen "browsing control AI" (cfg.planner).
+ *
+ * Every provider/mode is constructed exactly once, keyed `provider:mode`. The
+ * chosen slot gets cfg.planner.model (or the per-provider default); other slots
+ * get their defaults. Unconfigured adapters (no key / missing CLI) report
+ * available()===false and the router simply skips them, so the ladder is always
+ * complete and fallback Just Works regardless of the selection. API keys come
+ * from the Vault (anthropic/openai/openrouter) with an env fallback; Gemini also
+ * honors the legacy cfg.geminiApiKey.
+ */
+function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; pinnedName?: string } {
+  const sel = cfg.planner;
+  // the chosen slot uses the user's model (when set); every other slot its default.
+  const modelFor = (provider: ProviderId, mode: PlannerMode, fallback: string): string =>
+    sel.provider === provider && sel.mode === mode && sel.model ? sel.model : fallback;
+
+  const geminiKey = vault.get('gemini') ?? cfg.geminiApiKey;
+  const anthropicKey = vault.get('anthropic') ?? process.env.ANTHROPIC_API_KEY;
+  const openaiKey = vault.get('openai') ?? process.env.OPENAI_API_KEY;
+  const openrouterKey = vault.get('openrouter') ?? process.env.OPENROUTER_API_KEY;
+
+  const byKey = new Map<string, ModelAdapter>();
+  byKey.set('gemini:cli', new GoogleCliAdapter({ bin: cfg.googleCliBin, model: modelFor('gemini', 'cli', cfg.googleCliModel), env: cfg.googleCliEnv }));
+  byKey.set('gemini:api', new ByokGeminiAdapter({ apiKey: geminiKey, model: modelFor('gemini', 'api', cfg.googleCliModel) }));
+  byKey.set('claude:api', new AnthropicAdapter({ apiKey: anthropicKey, model: modelFor('claude', 'api', defaultModelFor('claude', 'api')) }));
+  byKey.set('claude:cli', new CliPlannerAdapter({ bin: 'claude', model: modelFor('claude', 'cli', defaultModelFor('claude', 'cli')) }));
+  byKey.set('gpt:api', new OpenAiCompatibleAdapter({ apiKey: openaiKey, baseUrl: 'https://api.openai.com/v1', label: 'gpt', model: modelFor('gpt', 'api', defaultModelFor('gpt', 'api')) }));
+  // codex uses its own configured model when none is given (default is blank)
+  const codexModel = modelFor('gpt', 'cli', defaultModelFor('gpt', 'cli'));
+  byKey.set('gpt:cli', new CliPlannerAdapter({ bin: 'codex', model: codexModel || undefined }));
+  byKey.set('openrouter:api', new OpenAiCompatibleAdapter({ apiKey: openrouterKey, baseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter', 'api', defaultModelFor('openrouter', 'api')) }));
+  byKey.set('ollama:api', new OllamaAdapter({ model: modelFor('ollama', 'api', 'llama3.2-vision') }));
+
+  // Pinned name: Nano (handled by the caller) pins to its own name — harmless,
+  // since Nano never plans and already leads the visual ladder. Otherwise the
+  // chosen provider:mode adapter's name.
+  const pinnedName = sel.provider === 'nano' ? 'nano' : byKey.get(`${sel.provider}:${sel.mode}`)?.name;
+  return { adapters: [...byKey.values()], pinnedName };
+}
+
 export async function qaRun(task: string, url: string, opts: QaRunOptions = {}): Promise<QaRunResult> {
   const progress = opts.onProgress ?? (() => {});
   const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId });
   const { cfg, browser, nano } = session;
 
+  const vault = new Vault();
   const adapters: ModelAdapter[] = [];
   if ((await pollNanoAvailable(nano, progress)) === 'available') {
     progress('rung 0: Gemini Nano available — warming up');
@@ -243,12 +291,11 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
   } else {
     progress('rung 0: Gemini Nano not available — ladder starts at rung 1 (run `qa nano --download` to enable $0 visual checks)');
   }
-  adapters.push(
-    new GoogleCliAdapter({ bin: cfg.googleCliBin, model: cfg.googleCliModel, env: cfg.googleCliEnv }),
-    new ByokGeminiAdapter({ apiKey: cfg.geminiApiKey, model: cfg.googleCliModel }),
-    new OllamaAdapter(),
-  );
-  const router = new ModelRouter(adapters, { preferFreePlanner: cfg.preferFreePlanner });
+  // The rest of the ladder + the user's pinned "browsing control AI" (cfg.planner).
+  const { adapters: ladder, pinnedName } = buildLadder(cfg, vault);
+  adapters.push(...ladder);
+  if (pinnedName && pinnedName !== 'nano') progress(`browsing-control AI: ${pinnedName} (leads the planner ladder; fallback intact)`);
+  const router = new ModelRouter(adapters, { preferFreePlanner: cfg.preferFreePlanner, pinnedAdapter: pinnedName });
 
   const artifacts = new ArtifactStore(cfg.artifactsDir);
   progress(`run ${artifacts.runId}: "${task}" on ${url}`);
@@ -280,7 +327,7 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
       maxSteps: opts.maxSteps ?? cfg.maxSteps,
       onStep: opts.onStep,
       allowedHosts: cfg.allowedHosts,
-      vault: new Vault(),
+      vault,
       signal: opts.signal,
     });
     if (clip) {

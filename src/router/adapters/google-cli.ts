@@ -21,6 +21,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson } from '../adapter.js';
+import { isSafeModelId } from '../../vibe/settings.js';
 
 /** The per-model token block in the -o json envelope:
  * stats.models[<model>].tokens = { input, prompt, candidates, total, cached, thoughts }. */
@@ -137,6 +138,12 @@ export class GoogleCliAdapter implements ModelAdapter {
   }
 
   private run(headline: string, stdinText: string, cwd: string): Promise<string> {
+    // SECURITY: -m ${model} is interpolated into a shell command. The model comes
+    // from config today (not the bridge), but validate at the sink so a future
+    // bridge-settable Gemini model can never inject shell metacharacters.
+    if (this.opts.model && !isSafeModelId(this.opts.model)) {
+      throw new Error(`google-cli: refusing to run with unsafe model id ${JSON.stringify(this.opts.model)}`);
+    }
     // single command string (bin is typically a .cmd shim on Windows → shell);
     // headline is OUR text, single-line, no quotes — safe to wrap in ".
     // -e none: skip user extensions/MCP servers (halves startup, kills noise);

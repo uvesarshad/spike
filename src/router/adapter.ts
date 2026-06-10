@@ -35,6 +35,15 @@ export interface ModelAdapter {
   lastUsage?: AdapterUsage;
 }
 
+/** Append a "respond with ONLY this JSON shape" instruction to a prompt. The
+ * driver's schemas use constructs (minItems, type-discriminated optional props)
+ * that providers' strict JSON modes reject, so adapters steer with the schema
+ * in-prompt and parse the reply with extractJson — the same recipe google-cli
+ * proved on this repo. */
+export function withSchemaInstruction(prompt: string, schema: object): string {
+  return `${prompt}\n\nRespond with ONLY a JSON object matching this JSON schema:\n${JSON.stringify(schema)}`;
+}
+
 /** Pull the first JSON object out of model output that may have prose around it. */
 export function extractJson(text: string): unknown {
   const direct = text.trim();

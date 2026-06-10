@@ -14,7 +14,43 @@ import { VibeService } from './vibe/service.js';
 import { buildFixPrompt } from './vibe/fix-prompt.js';
 import { dispatchFix, runWithAutoFix } from './vibe/auto-fix.js';
 import { Vault } from './vault/vault.js';
+import { SettingsStore, defaultModelFor, type ProviderId, type PlannerMode, type DebugMode, type DebugAgent, type QaSettings, type PlannerSelection } from './vibe/settings.js';
 import { startFixture } from '../fixture/server.js';
+
+const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter'];
+const PLANNER_MODES: PlannerMode[] = ['api', 'cli'];
+const DEBUG_MODES: DebugMode[] = ['prompt', 'auto'];
+const DEBUG_AGENTS: DebugAgent[] = ['auto', 'claude', 'codex', 'gemini'];
+
+/** Provider → encrypted-vault secret name for its API key. */
+const VAULT_KEY_NAMES: Partial<Record<ProviderId, string>> = {
+  gemini: 'gemini',
+  claude: 'anthropic',
+  gpt: 'openai',
+  openrouter: 'openrouter',
+};
+
+/** Render the settings (planner + debug + which API keys are configured) as a
+ * readable block. Shared by `config show` and `config set`. Never prints key values. */
+function printSettings(s: QaSettings): void {
+  const { provider, mode, model } = s.planner;
+  const modelLine = model && model.length ? model : `(default: ${defaultModelFor(provider, mode) || 'none'})`;
+  const vault = new Vault();
+  console.log('Browsing-control AI (planner):');
+  console.log(`  provider:   ${provider}`);
+  console.log(`  mode:       ${mode}`);
+  console.log(`  model:      ${modelLine}`);
+  console.log('Debugging:');
+  console.log(`  debugMode:  ${s.debugMode}`);
+  console.log(`  debugAgent: ${s.debugAgent}`);
+  console.log('API keys (in encrypted vault):');
+  for (const p of PROVIDERS) {
+    const name = VAULT_KEY_NAMES[p];
+    if (!name) continue;
+    const status = vault.get(name) !== undefined ? 'set' : 'not set';
+    console.log(`  ${p} (${name}): ${status}`);
+  }
+}
 
 const program = new Command();
 program.name('qa').description('Browser QA subagent — a cheap-model ladder tests your app in a real Chrome');
@@ -89,9 +125,64 @@ program
 
 program
   .command('config')
-  .description('print the resolved configuration')
-  .action(() => {
-    console.log(JSON.stringify(loadConfig(), null, 2));
+  .description('view or change the browsing-control AI + debugging settings (shared with the extension panel)')
+  .argument('<action>', 'show | set')
+  .option('--provider <p>', 'nano|gemini|claude|gpt|ollama|openrouter')
+  .option('--mode <m>', 'api|cli')
+  .option('--model <m>', 'model id (blank = provider default)')
+  .option('--debug-mode <d>', 'prompt|auto')
+  .option('--debug-agent <a>', 'auto|claude|codex|gemini')
+  .action((action: string, opts: { provider?: string; mode?: string; model?: string; debugMode?: string; debugAgent?: string }) => {
+    const store = new SettingsStore();
+    if (action === 'show') {
+      printSettings(store.read());
+      return;
+    }
+    if (action !== 'set') {
+      console.error('usage: qa config <show|set>');
+      process.exit(2);
+    }
+    // action === 'set'
+    const patch: Partial<QaSettings> = {};
+    const planner: Partial<PlannerSelection> = {};
+    if (opts.provider !== undefined) {
+      if (!PROVIDERS.includes(opts.provider as ProviderId)) {
+        console.error(`invalid --provider "${opts.provider}" — choose one of: ${PROVIDERS.join(', ')}`);
+        process.exit(2);
+      }
+      planner.provider = opts.provider as ProviderId;
+    }
+    if (opts.mode !== undefined) {
+      if (!PLANNER_MODES.includes(opts.mode as PlannerMode)) {
+        console.error(`invalid --mode "${opts.mode}" — choose one of: ${PLANNER_MODES.join(', ')}`);
+        process.exit(2);
+      }
+      planner.mode = opts.mode as PlannerMode;
+    }
+    if (opts.model !== undefined) {
+      // blank model is allowed — it means "use the provider/mode default"
+      planner.model = opts.model;
+    }
+    if (opts.debugMode !== undefined) {
+      if (!DEBUG_MODES.includes(opts.debugMode as DebugMode)) {
+        console.error(`invalid --debug-mode "${opts.debugMode}" — choose one of: ${DEBUG_MODES.join(', ')}`);
+        process.exit(2);
+      }
+      patch.debugMode = opts.debugMode as DebugMode;
+    }
+    if (opts.debugAgent !== undefined) {
+      if (!DEBUG_AGENTS.includes(opts.debugAgent as DebugAgent)) {
+        console.error(`invalid --debug-agent "${opts.debugAgent}" — choose one of: ${DEBUG_AGENTS.join(', ')}`);
+        process.exit(2);
+      }
+      patch.debugAgent = opts.debugAgent as DebugAgent;
+    }
+    if (Object.keys(planner).length) patch.planner = planner as PlannerSelection;
+    if (Object.keys(patch).length === 0) {
+      console.error('nothing to set — pass at least one of: --provider --mode --model --debug-mode --debug-agent');
+      process.exit(2);
+    }
+    printSettings(store.write(patch));
   });
 
 program

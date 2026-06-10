@@ -38,6 +38,43 @@ import { loadConfig } from '../config.js';
 import { slimReport, type Report } from '../report/report.js';
 import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
 import { dispatchFix } from './auto-fix.js';
+import {
+  SettingsStore,
+  defaultModelFor,
+  isSafeModelId,
+  type ProviderId,
+  type QaSettings,
+} from './settings.js';
+import { Vault } from '../vault/vault.js';
+
+/* The provider→vault-name CONTRACT. The vault key NAME differs from the
+ * provider id for historical reasons (the router/adapters look these up by
+ * their own names): gemini→"gemini", claude→"anthropic", gpt→"openai",
+ * openrouter→"openrouter". nano (on-device) and ollama (local) need no key, so
+ * they are absent here — vibe.key.* throws for them. NEVER expose key VALUES
+ * over the bridge; only presence (hasKey) is ever reported. */
+const VAULT_KEY_FOR: Partial<Record<ProviderId, string>> = {
+  gemini: 'gemini',
+  claude: 'anthropic',
+  gpt: 'openai',
+  openrouter: 'openrouter',
+};
+
+/** Which transports each provider supports — panel-facing metadata, not the
+ * PlannerMode union (nano's 'ondevice' isn't a PlannerMode), so this is a plain
+ * string list: nano is on-device only; ollama is a local API; the hosted models
+ * offer both a key'd API and a CLI binary. */
+const PROVIDER_MODES: Record<ProviderId, string[]> = {
+  nano: ['ondevice'],
+  gemini: ['api', 'cli'],
+  claude: ['api', 'cli'],
+  gpt: ['api', 'cli'],
+  ollama: ['api'],
+  openrouter: ['api'],
+};
+
+/** The provider list the panel renders, in ladder order. */
+const PROVIDER_ORDER: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter'];
 
 /** Shape of the extension's rec.start / rec.stop bridge responses. */
 interface RecStartResult { ok: boolean; reason?: string; mime?: string }
@@ -118,6 +155,87 @@ export class VibeService {
       const ext = path.extname(p).toLowerCase();
       const mime = ext === '.mp4' ? 'video/mp4' : 'video/webm';
       return { name: path.basename(p), mime, dataBase64: buf.toString('base64') };
+    });
+
+    // vibe.config.get — the panel's settings screen reads the user's current
+    // non-secret picks (planner / debug mode / debug agent) plus, per provider,
+    // the transports it supports, the default models, and WHETHER a key is on
+    // file. Key VALUES never cross the bridge — only presence (hasKey).
+    this.bridge.onRequest('vibe.config.get', async () => {
+      const settings = new SettingsStore().read();
+      const vault = new Vault();
+      const providers = PROVIDER_ORDER.map((id) => {
+        const vaultName = VAULT_KEY_FOR[id];
+        const needsKey = Boolean(vaultName);
+        // hasKey: a stored vault entry counts; for gemini an env GEMINI_API_KEY
+        // also counts (the CLI/adapter honors it without us storing anything).
+        let hasKey = false;
+        if (needsKey) {
+          hasKey = Boolean(vault.get(vaultName!));
+          if (id === 'gemini' && process.env.GEMINI_API_KEY) hasKey = true;
+        }
+        return {
+          id,
+          modes: PROVIDER_MODES[id],
+          apiModelDefault: defaultModelFor(id, 'api'),
+          cliModelDefault: defaultModelFor(id, 'cli'),
+          needsKey,
+          hasKey,
+        };
+      });
+      return {
+        planner: settings.planner,
+        debugMode: settings.debugMode,
+        debugAgent: settings.debugAgent,
+        providers,
+      };
+    });
+
+    // vibe.config.set — persist the panel's picks. Loose validation: we forward
+    // only the three known fields (unknown keys ignored) to SettingsStore.write,
+    // which merges over the current settings and returns the full result.
+    this.bridge.onRequest('vibe.config.set', async (params) => {
+      const p = (params ?? {}) as Partial<QaSettings>;
+      const patch: Partial<QaSettings> = {};
+      if (p.planner !== undefined) {
+        // SECURITY: planner.model is later interpolated into a CLI command for
+        // claude/codex CLI mode. This handler is reachable by any localhost
+        // WebSocket client, so reject a tainted model id here rather than persist
+        // it. (Empty model = "use the default" and is fine.)
+        const model = (p.planner as { model?: unknown }).model;
+        if (typeof model === 'string' && model && !isSafeModelId(model)) {
+          throw new Error('vibe.config.set: invalid model id (letters, digits and . _ - : / + only)');
+        }
+        patch.planner = p.planner;
+      }
+      if (p.debugMode !== undefined) patch.debugMode = p.debugMode;
+      if (p.debugAgent !== undefined) patch.debugAgent = p.debugAgent;
+      return new SettingsStore().write(patch);
+    });
+
+    // vibe.key.set — store an API key in the encrypted Vault under the CONTRACT
+    // name for that provider. Only key-bearing providers are allowed; nano and
+    // ollama (and anything unknown) throw. The key is never echoed back.
+    this.bridge.onRequest('vibe.key.set', async (params) => {
+      const p = (params ?? {}) as { provider?: unknown; key?: unknown };
+      const provider = String(p.provider ?? '') as ProviderId;
+      const vaultName = VAULT_KEY_FOR[provider];
+      if (!vaultName) throw new Error(`vibe.key.set: provider ${String(p.provider)} takes no key`);
+      const key = typeof p.key === 'string' ? p.key : '';
+      if (!key) throw new Error(`vibe.key.set: a non-empty { key } is required for provider ${provider}`);
+      new Vault().set(vaultName, String(key));
+      return { ok: true, provider };
+    });
+
+    // vibe.key.clear — delete the stored key for a provider. Returns whether a
+    // key was actually present (cleared:false means there was nothing to clear).
+    this.bridge.onRequest('vibe.key.clear', async (params) => {
+      const p = (params ?? {}) as { provider?: unknown };
+      const provider = String(p.provider ?? '') as ProviderId;
+      const vaultName = VAULT_KEY_FOR[provider];
+      if (!vaultName) throw new Error(`vibe.key.clear: provider ${String(p.provider)} takes no key`);
+      const cleared = new Vault().delete(vaultName);
+      return { ok: true, provider, cleared };
     });
   }
 

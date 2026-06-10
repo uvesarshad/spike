@@ -31,17 +31,27 @@ export class OllamaAdapter implements ModelAdapter {
     this.name = `ollama(${this.model})`;
   }
 
+  /** Cached availability: the router calls available() on every adapter for EVERY
+   * plan-step and visual-verdict, and Ollama is always in the ladder, so an
+   * uncached 300ms probe-per-step is pure waste when nothing's listening (the
+   * common case). Cache the result (hit OR miss) for a short window. */
+  private availableCache: { value: boolean; at: number } | null = null;
+  private static readonly AVAIL_TTL_MS = 30_000;
+
   /** Fast probe: GET /api/tags with a 300ms timeout → true on 200. Nothing
    * listening (the common case on a dev box) fails fast, no error to the caller. */
   async available(): Promise<boolean> {
+    const cached = this.availableCache;
+    if (cached && Date.now() - cached.at < OllamaAdapter.AVAIL_TTL_MS) return cached.value;
+    let value = false;
     try {
-      const res = await fetch(`${this.baseUrl}/api/tags`, {
-        signal: AbortSignal.timeout(300),
-      });
-      return res.ok;
+      const res = await fetch(`${this.baseUrl}/api/tags`, { signal: AbortSignal.timeout(300) });
+      value = res.ok;
     } catch {
-      return false;
+      value = false;
     }
+    this.availableCache = { value, at: Date.now() };
+    return value;
   }
 
   supports(_cap: Capability): boolean {

@@ -92,9 +92,30 @@ const historySection = $('historySection');
 const historyToggle = $('historyToggle');
 const historyList = $('historyList');
 
+// settings
+const settingsBtn = $('settingsBtn');
+const settingsModal = $('settingsModal');
+const settingsClose = $('settingsClose');
+const settingsCloseBtn = $('settingsCloseBtn');
+const settingsSave = $('settingsSave');
+const setProvider = $('setProvider');
+const setModeRow = $('setModeRow');
+const setModel = $('setModel');
+const setKeyRow = $('setKeyRow');
+const setKey = $('setKey');
+const setKeySave = $('setKeySave');
+const setKeyStatus = $('setKeyStatus');
+const setDebugAgentRow = $('setDebugAgentRow');
+const setDebugAgent = $('setDebugAgent');
+
 let busy = false;
 let fixing = false;
 let fetchingClip = false;
+
+// settings: the last config returned by the daemon, and the current debug mode
+// (gates the auto-fix button — only shown when the user opted into auto-fix).
+let currentConfig = null;
+let debugMode = 'prompt';
 
 // the task + verdict of the most recent result (for history persistence)
 let lastResult = null; // { task, verdict, reason }
@@ -203,6 +224,14 @@ function onPortMessage(msg) {
       break;
     case 'clip-error':
       onClipError(msg.message);
+      break;
+    case 'config':
+      currentConfig = msg;
+      if (typeof msg.debugMode === 'string') debugMode = msg.debugMode;
+      renderSettings(msg);
+      break;
+    case 'key-saved':
+      onKeySaved(msg);
       break;
     default:
       break;
@@ -608,9 +637,10 @@ function renderResult(params) {
     fixPrompt.value = fix;
     fixSection.hidden = false;
     resetCopyBtn();
-    // auto-fix is only meaningful on a non-pass verdict that produced a fix prompt
+    // auto-fix is only meaningful on a non-pass verdict that produced a fix
+    // prompt AND the user opted into auto-fix in Settings (else paste-a-prompt).
     resetFixUi();
-    autoFixBtn.hidden = (verdict === 'pass');
+    autoFixBtn.hidden = (verdict === 'pass') || debugMode !== 'auto';
   } else {
     fixSection.hidden = true;
   }
@@ -765,6 +795,175 @@ function onFixDone(msg) {
   }
 }
 
+// ---- settings --------------------------------------------------------------
+//
+// The Settings modal lets the user pick the browsing-control AI (provider + API/
+// CLI mode + model + API key) and a debugging mode (paste-a-prompt vs auto-fix +
+// which coding agent). State lives on the daemon; we fetch it with config-get,
+// save with config-set, and manage keys with set-key/clear-key. The SW replies
+// with a fresh { kind:'config', ... } we render here.
+
+/** The provider currently selected in the form. */
+function selectedProvider() {
+  return setProvider.value;
+}
+
+/** The provider descriptor (from config.providers) for the selected provider. */
+function providerInfo(id) {
+  const list = (currentConfig && Array.isArray(currentConfig.providers)) ? currentConfig.providers : [];
+  return list.find((p) => p && p.id === id) || null;
+}
+
+/** The mode (api/cli/ondevice) currently chosen in the form, clamped to what
+ * the selected provider supports. */
+function selectedMode() {
+  const info = providerInfo(selectedProvider());
+  const modes = (info && Array.isArray(info.modes)) ? info.modes : [];
+  if (modes.length === 0) return 'api';
+  const checked = settingsModal.querySelector('input[name="setMode"]:checked');
+  const want = checked ? checked.value : null;
+  if (want && modes.includes(want)) return want;
+  // single-mode providers (nano=ondevice, ollama/openrouter=api) → that mode
+  return modes[0];
+}
+
+/** The debug mode currently chosen in the form. */
+function selectedDebugMode() {
+  const checked = settingsModal.querySelector('input[name="setDebugMode"]:checked');
+  return checked ? checked.value : 'prompt';
+}
+
+/** Placeholder/default model for the selected provider+mode. */
+function defaultModelFor(info, mode) {
+  if (!info) return 'default model';
+  if (mode === 'cli') return info.cliModelDefault || 'default model';
+  return info.apiModelDefault || 'default model';
+}
+
+/** Show/hide the mode radios, key row and agent select per the current form
+ * selection. Called on open and whenever provider/mode/debug-mode change. */
+function refreshSettingsVisibility() {
+  const provider = selectedProvider();
+  const info = providerInfo(provider);
+  const modes = (info && Array.isArray(info.modes)) ? info.modes : [];
+
+  // mode radios: hide entirely for single-mode providers (nano, ollama, openrouter)
+  const hasApi = modes.includes('api');
+  const hasCli = modes.includes('cli');
+  const showModes = hasApi && hasCli;
+  setModeRow.hidden = !showModes;
+  setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
+    if (el.value === 'api') el.disabled = !hasApi;
+    if (el.value === 'cli') el.disabled = !hasCli;
+  });
+
+  const mode = selectedMode();
+
+  // key row: only when the provider needs a key AND we're in API mode
+  const needsKey = !!(info && info.needsKey);
+  const showKey = needsKey && mode === 'api';
+  setKeyRow.hidden = !showKey;
+
+  // model placeholder reflects the default for the current provider+mode
+  setModel.placeholder = defaultModelFor(info, mode);
+
+  // key status from providers[].hasKey
+  if (showKey) {
+    setKeyStatus.classList.remove('err');
+    setKeyStatus.textContent = (info && info.hasKey) ? 'saved ✓' : '';
+  }
+
+  // agent select only when auto-fix is chosen
+  setDebugAgentRow.hidden = selectedDebugMode() !== 'auto';
+}
+
+/** Populate the whole form from a daemon config payload. */
+function renderSettings(cfg) {
+  if (!cfg) return;
+  const planner = cfg.planner || {};
+
+  // provider select
+  if (planner.provider) setProvider.value = planner.provider;
+
+  // mode radios (respect the saved mode; visibility handled below)
+  const wantMode = planner.mode || 'api';
+  setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
+    el.checked = (el.value === wantMode);
+  });
+
+  // model value
+  setModel.value = planner.model || '';
+
+  // debug mode radios
+  const wantDebug = cfg.debugMode || 'prompt';
+  settingsModal.querySelectorAll('input[name="setDebugMode"]').forEach((el) => {
+    el.checked = (el.value === wantDebug);
+  });
+
+  // debug agent
+  if (cfg.debugAgent) setDebugAgent.value = cfg.debugAgent;
+
+  refreshSettingsVisibility();
+}
+
+function onKeySaved(msg) {
+  if (!msg) return;
+  if (msg.ok) {
+    setKeyStatus.classList.remove('err');
+    setKeyStatus.textContent = msg.cleared ? '' : 'saved ✓';
+    setKey.value = '';
+    // reflect hasKey locally so a re-render keeps the status accurate
+    const info = providerInfo(msg.provider);
+    if (info) info.hasKey = !msg.cleared;
+  } else {
+    setKeyStatus.classList.add('err');
+    setKeyStatus.textContent = msg.message ? ('error: ' + msg.message) : 'could not save key';
+  }
+}
+
+function openSettings() {
+  settingsModal.hidden = false;
+  postToSW({ kind: 'config-get' });
+}
+
+function closeSettings() {
+  settingsModal.hidden = true;
+}
+
+settingsBtn.addEventListener('click', openSettings);
+settingsClose.addEventListener('click', closeSettings);
+settingsCloseBtn.addEventListener('click', closeSettings);
+
+setProvider.addEventListener('change', refreshSettingsVisibility);
+setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
+  el.addEventListener('change', refreshSettingsVisibility);
+});
+settingsModal.querySelectorAll('input[name="setDebugMode"]').forEach((el) => {
+  el.addEventListener('change', refreshSettingsVisibility);
+});
+
+setKeySave.addEventListener('click', () => {
+  const key = setKey.value.trim();
+  if (!key) return;
+  setKeyStatus.classList.remove('err');
+  setKeyStatus.textContent = 'saving…';
+  postToSW({ kind: 'set-key', provider: selectedProvider(), key });
+});
+
+settingsSave.addEventListener('click', () => {
+  postToSW({
+    kind: 'config-set',
+    planner: {
+      provider: selectedProvider(),
+      mode: selectedMode(),
+      model: setModel.value.trim(),
+    },
+    debugMode: selectedDebugMode(),
+    debugAgent: setDebugAgent.value,
+  });
+  closeSettings();
+});
+
 // ---- run history (chrome.storage.local) ------------------------------------
 function relativeTime(ts) {
   const diff = Date.now() - ts;
@@ -906,6 +1105,8 @@ function requestInitialState() {
   postToSW({ kind: 'bridge-status' });
   postToSW({ kind: 'nano' });
   postToSW({ kind: 'status' });
+  // fetch the planner/debug config so debugMode is known before the first result
+  postToSW({ kind: 'config-get' });
 }
 
 loadActiveTab();

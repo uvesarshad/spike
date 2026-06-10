@@ -279,6 +279,44 @@ chrome.runtime.onConnect.addListener((port) => {
           port.postMessage({ kind: 'bridge-status', connected: !!(ws && ws.readyState === WebSocket.OPEN) });
           break;
         }
+        case 'config-get': {
+          try {
+            const r = await sendRequest('vibe.config.get', {});
+            port.postMessage({ kind: 'config', ...(r || {}) });
+          } catch (e) {
+            port.postMessage({ kind: 'error', message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'config-set': {
+          try {
+            await sendRequest('vibe.config.set', msg);
+            // re-fetch the full config so providers/hasKey/defaults refresh
+            const full = await sendRequest('vibe.config.get', {});
+            port.postMessage({ kind: 'config', ...(full || {}) });
+          } catch (e) {
+            port.postMessage({ kind: 'error', message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'set-key': {
+          try {
+            await sendRequest('vibe.key.set', { provider: msg.provider, key: msg.key });
+            port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: true });
+          } catch (e) {
+            port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: false, message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'clear-key': {
+          try {
+            await sendRequest('vibe.key.clear', { provider: msg.provider });
+            port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: true, cleared: true });
+          } catch (e) {
+            port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: false, message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
         default:
           break;
       }

@@ -123,13 +123,27 @@ export async function dispatchFix(report: Report, opts: DispatchOptions = {}): P
   const cfg = loadConfig(opts.config ?? {});
   const onProgress = opts.onProgress ?? (() => {});
 
+  // Agent resolution precedence (most specific wins):
+  //   1. cfg.fixAgentBin — an explicit override (bin + optional args); always wins.
+  //   2. cfg.debugAgent — a SPECIFIC agent the user chose in the panel
+  //      ('claude'|'codex'|'gemini'). We pick that CANDIDATES entry directly and
+  //      skip PATH detection (if they picked it, run it — let spawn surface a
+  //      not-installed error rather than silently falling through to another agent).
+  //   3. 'auto' (or no match) — detectFixAgent() probes PATH in claude→codex→gemini order.
   let bin: string;
   let argTemplate: string[];
+  const chosen = cfg.debugAgent && cfg.debugAgent !== 'auto'
+    ? CANDIDATES.find((c) => c.bin === cfg.debugAgent)
+    : undefined;
   if (cfg.fixAgentBin) {
     bin = cfg.fixAgentBin;
     // An override may carry its own args; if it omits PROMPT_TOKEN we still need
     // SOMEWHERE to put the prompt — default to a single PROMPT_TOKEN-bearing arg.
     argTemplate = cfg.fixAgentArgs && cfg.fixAgentArgs.length ? cfg.fixAgentArgs : [PROMPT_TOKEN];
+  } else if (chosen) {
+    // User pinned a specific agent — use its bin+args, no PATH detection.
+    bin = chosen.bin;
+    argTemplate = chosen.args;
   } else {
     const detected = await detectFixAgent();
     if (!detected) {

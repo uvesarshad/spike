@@ -5,6 +5,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  SettingsStore,
+  type DebugAgent,
+  type DebugMode,
+  type PlannerSelection,
+  type ProviderId,
+  type PlannerMode,
+} from './vibe/settings.js';
 
 /** Repo's extension/ dir, resolved relative to this source file (src/ → up → extension). */
 const DEFAULT_EXTENSION_DIR = path.resolve(
@@ -57,6 +65,14 @@ export interface QaConfig {
    * faster planning (rung-2 HTTP beats the CLI cold-spawn). Set true to keep free
    * quota first for plan-step. Visual verdicts are unaffected (Nano always first). */
   preferFreePlanner: boolean;
+  /** The user's chosen "browsing control AI" — pinned to the FRONT of the planner
+   * ladder (fallback still applies). From SettingsStore (panel/CLI). */
+  planner: PlannerSelection;
+  /** Debugging UX: 'prompt' = surface a paste-ready fix prompt; 'auto' = hand it
+   * to a coding agent headlessly. */
+  debugMode: DebugMode;
+  /** Which coding agent runs the automated fix ('auto' = detect on PATH). */
+  debugAgent: DebugAgent;
 }
 
 const DEFAULTS: QaConfig = {
@@ -79,7 +95,14 @@ const DEFAULTS: QaConfig = {
   // Vibe-mode clips need a chrome.tabCapture recorder (planned).
   recordClip: false,
   preferFreePlanner: false,
+  planner: { provider: 'gemini', mode: 'cli' },
+  debugMode: 'prompt',
+  debugAgent: 'auto',
 };
+
+/** Valid enum values for env-override parsing (silently ignore garbage). */
+const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter'];
+const DEBUG_AGENTS: DebugAgent[] = ['auto', 'claude', 'codex', 'gemini'];
 
 function fromFile(cwd: string): Partial<QaConfig> {
   const p = path.join(cwd, 'qa.config.json');
@@ -110,9 +133,41 @@ function fromEnv(): Partial<QaConfig> {
   if (e.QA_ALLOWED_HOSTS) out.allowedHosts = e.QA_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
   if (e.QA_RECORD_CLIP) out.recordClip = e.QA_RECORD_CLIP !== '0' && e.QA_RECORD_CLIP !== 'false';
   if (e.QA_PREFER_FREE_PLANNER) out.preferFreePlanner = e.QA_PREFER_FREE_PLANNER !== '0' && e.QA_PREFER_FREE_PLANNER !== 'false';
+  // planner selection — env wins over the SettingsStore (power-users / tests).
+  const planner: Partial<PlannerSelection> = {};
+  if (e.QA_PLANNER_PROVIDER && PROVIDERS.includes(e.QA_PLANNER_PROVIDER as ProviderId)) planner.provider = e.QA_PLANNER_PROVIDER as ProviderId;
+  if (e.QA_PLANNER_MODE === 'api' || e.QA_PLANNER_MODE === 'cli') planner.mode = e.QA_PLANNER_MODE as PlannerMode;
+  if (e.QA_PLANNER_MODEL) planner.model = e.QA_PLANNER_MODEL;
+  if (Object.keys(planner).length) out.planner = planner as PlannerSelection;
+  if (e.QA_DEBUG_MODE === 'prompt' || e.QA_DEBUG_MODE === 'auto') out.debugMode = e.QA_DEBUG_MODE;
+  if (e.QA_DEBUG_AGENT && DEBUG_AGENTS.includes(e.QA_DEBUG_AGENT as DebugAgent)) out.debugAgent = e.QA_DEBUG_AGENT as DebugAgent;
   return out;
 }
 
+/** The user's panel/CLI picks (planner + debug prefs). Folded in below env. */
+function fromSettings(): Partial<QaConfig> {
+  try {
+    const s = new SettingsStore().read();
+    return { planner: s.planner, debugMode: s.debugMode, debugAgent: s.debugAgent };
+  } catch {
+    return {};
+  }
+}
+
 export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd()): QaConfig {
-  return { ...DEFAULTS, ...fromFile(cwd), ...fromEnv(), ...overrides };
+  // precedence (low → high): defaults < qa.config.json < SettingsStore < env < overrides.
+  // planner env may be a PARTIAL selection — merge it onto whatever's beneath so a
+  // lone QA_PLANNER_MODEL doesn't wipe provider/mode.
+  const fileCfg = fromFile(cwd);
+  const settingsCfg = fromSettings();
+  const envCfg = fromEnv();
+  const merged: QaConfig = { ...DEFAULTS, ...fileCfg, ...settingsCfg, ...envCfg, ...overrides };
+  merged.planner = {
+    ...DEFAULTS.planner,
+    ...(fileCfg.planner ?? {}),
+    ...(settingsCfg.planner ?? {}),
+    ...(envCfg.planner ?? {}),
+    ...(overrides.planner ?? {}),
+  };
+  return merged;
 }

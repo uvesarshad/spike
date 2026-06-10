@@ -25,21 +25,38 @@ export interface ModelRouterOptions {
    * it for ~3× faster planning, so the router orders rung 2 before rung 1 for
    * plan-step ONLY. Visual verdicts are never reordered (rung 0 always first). */
   preferFreePlanner?: boolean;
+  /** The user's chosen "browsing control AI" — the adapter NAME to pin to the
+   * front of the ladder (fallback still applies behind it). Overrides the rung
+   * ordering AND preferFreePlanner for plan-step. For visual-verdict, rung-0 Nano
+   * still leads (it's $0/on-device), then the pinned adapter, then the rest. */
+  pinnedAdapter?: string;
 }
 
 export class ModelRouter {
   readonly trace: ModelTraceEntry[] = [];
   private readonly preferFreePlanner: boolean;
+  private readonly pinnedAdapter?: string;
 
   constructor(private readonly adapters: ModelAdapter[], opts?: ModelRouterOptions) {
     this.adapters = [...adapters].sort((a, b) => a.rung - b.rung);
     this.preferFreePlanner = opts?.preferFreePlanner ?? false;
+    this.pinnedAdapter = opts?.pinnedAdapter;
   }
 
   private async candidates(cap: Capability): Promise<ModelAdapter[]> {
-    const out: ModelAdapter[] = [];
-    for (const a of this.adapters) {
-      if (a.supports(cap) && (await a.available())) out.push(a);
+    // Probe availability in PARALLEL (the ladder is ~9 adapters; serial awaits —
+    // some spawning a CLI or doing a localhost fetch — needlessly stack up). Order
+    // is preserved from this.adapters (already rung-sorted); a throwing available()
+    // counts as unavailable rather than failing the whole step.
+    const supported = this.adapters.filter((a) => a.supports(cap));
+    const ready = await Promise.all(supported.map((a) => a.available().catch(() => false)));
+    const out = supported.filter((_, i) => ready[i]);
+    // Pinned adapter (the user's chosen browsing-control AI): lead the ladder with
+    // it, keeping the rest in rung order behind. For visual-verdict, rung-0 Nano
+    // stays absolute-first ($0/on-device); the pin slots in right after it.
+    if (this.pinnedAdapter && out.some((a) => a.name === this.pinnedAdapter)) {
+      out.sort((a, b) => this.pinRank(a, cap) - this.pinRank(b, cap));
+      return out;
     }
     // plan-step fast path: when a rung-2 BYOK adapter is live and the user hasn't
     // opted back into free quota, promote rung 2 ahead of rung 1 (HTTP beats the
@@ -49,6 +66,14 @@ export class ModelRouter {
       out.sort((a, b) => planRank(a.rung) - planRank(b.rung));
     }
     return out;
+  }
+
+  /** Sort key when a pin is active: lower comes first. Nano keeps the visual lead;
+   * the pinned adapter leads otherwise; everyone else stays in rung order behind. */
+  private pinRank(a: ModelAdapter, cap: Capability): number {
+    if (cap === 'visual-verdict' && a.rung === 0) return -2; // Nano: $0 visual, always first
+    if (a.name === this.pinnedAdapter) return -1;
+    return a.rung;
   }
 
   /** Visual assertion: rung 0 first; an `uncertain` verdict escalates to the next rung. */
