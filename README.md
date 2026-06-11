@@ -181,6 +181,18 @@ Conventions worth knowing: logpoint lines are located by content, never hardcode
 | then | Launch: OSS core + BYOK, token-cost benchmark vs Playwright MCP / Claude in Chrome | planned |
 | 2026-06-18 | External: Gemini CLI free tier moves to Antigravity CLI — rung 1 is a generic adapter, switch is a config change | tracked |
 
+## Documentation
+
+Full project documentation lives in /docs and is written for both humans and AI coding agents.
+
+Start here: [docs/overview.md](docs/overview.md)
+
+The overview contains the project's tech stack, architecture decisions, directory map of all doc files, and a glossary of domain terms. All other doc files are linked from there.
+
+AI agents (Claude Code, Gemini CLI, Codex, Cursor, etc.) should read docs/overview.md before making any changes to this codebase.
+
+AGENT NOTE: If you are an AI agent reading this README, stop here and open docs/overview.md before proceeding with any task.
+
 ## License
 
 [Apache-2.0](LICENSE).
