@@ -187,6 +187,19 @@ export class GoogleCliAdapter implements ModelAdapter {
             new Error(`${this.opts.bin} exit 55 — untrusted workspace; GEMINI_CLI_TRUST_WORKSPACE=true should be set (adapter bug?)`),
           );
         }
+        // The Gemini CLI free tier (Gemini Code Assist for individuals) ended on
+        // 2026-06-18: this client now hard-fails auth with IneligibleTierError /
+        // UNSUPPORTED_CLIENT. Detect it and tell the user how to recover instead of
+        // surfacing a raw stack trace (the router still escalates to the next rung).
+        if (/IneligibleTier|UNSUPPORTED_CLIENT|no longer supported|Antigravity/i.test(stderr)) {
+          return reject(
+            new Error(
+              `${this.opts.bin}: the Gemini CLI free tier (Gemini Code Assist for individuals) has ended — this client is no longer supported. ` +
+                `Switch the planner to a BYOK key (e.g. \`qa config set --provider glm\` then \`qa secret set glm <key>\`; gemini/claude/openai also work), ` +
+                `use the \`claude\` or \`codex\` CLI, or point googleCliBin at the Antigravity CLI once installed.`,
+            ),
+          );
+        }
         reject(new Error(`${this.opts.bin} exit ${code}: ${stderr.slice(0, 400)}`));
       });
     });

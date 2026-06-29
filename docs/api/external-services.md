@@ -30,7 +30,7 @@ Credentials: none for free quota (uses Google account OAuth managed by the gemin
 Env injection: cfg.googleCliEnv (default { NODE_OPTIONS: '--use-system-ca' }) is injected into every child process. This is required on machines with AVG or Zscaler TLS interception.
 Rate limit: free quota limits apply per Google account. Errors surface as CLI non-zero exits; the adapter escalates.
 Fallback: on any non-zero exit or JSON parse failure, escalates to rung 2.
-AGENT NOTE: After 2026-06-18, the Google CLI free tier moves to the Antigravity CLI. cfg.googleCliBin is the sole source of truth for the binary name — never hardcode 'gemini'. The adapter is a generic Google CLI wrapper; only the binary name needs changing in qa.config.json.
+AGENT NOTE: The 2026-06-18 transition HAS HAPPENED — the free Gemini CLI tier (Gemini Code Assist for individuals) is dead. `gemini -p` now fails auth with IneligibleTierError / UNSUPPORTED_CLIENT (verified 2026-06-29). google-cli.ts detects this and throws a recovery hint; the router escalates to the next rung. Recover by using a BYOK key (GLM/gemini/claude/openai), the claude/codex CLI (rung 1), or pointing cfg.googleCliBin at the Antigravity CLI once installed. cfg.googleCliBin is the sole source of truth for the binary name — never hardcode 'gemini'.
 AGENT NOTE: Exit code 41 means OAuth/TLS failure. The adapter logs a hint about NODE_OPTIONS=--use-system-ca and escalates.
 
 ## Claude CLI / CliPlannerAdapter (Rung 1)

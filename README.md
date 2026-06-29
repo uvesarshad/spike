@@ -59,7 +59,7 @@ Key design decisions:
   | Rung | Model | Cost | Role |
   |---|---|---|---|
   | 0 | **Gemini Nano** (Chrome Prompt API) | $0, on-device | visual verdicts on screenshots |
-  | 1 | **Google CLI free quota** (Gemini Flash) | $0 | step planning, multi-step reasoning |
+  | 1 | **CLI planner** (`claude` / `codex` / Antigravity) | account quota | step planning, multi-step reasoning |
   | 2 | **BYOK** (Gemini, Anthropic, OpenAI, OpenRouter, **GLM/z.ai** — `glm-5.2`) | your key | heavy runs, lower latency |
   | 3 | **Ollama local** | $0, private | privacy floor (interface stub today) |
 
@@ -75,7 +75,7 @@ Key design decisions:
 | Build | **tsup** (esbuild) | instant ESM builds, `dist/cli.js` + `dist/mcp-server.js` |
 | Browser control | **Chrome DevTools Protocol** via [`chrome-remote-interface`](https://github.com/cyrus-and/chrome-remote-interface) | navigate/click/type/screenshot/a11y-tree/logpoints/console/network — everything DevTools can do |
 | On-device AI | **Gemini Nano** via Chrome's **Prompt API** (`LanguageModel`, Chrome 138+, multimodal in 148) | $0 schema-enforced JSON verdicts on screenshots, fully offline |
-| Planner | **Gemini Flash** via the `gemini` CLI headless mode (`-p`, `-o json`) | free quota (model-agnostic adapter — binary name is config, ready for the Antigravity CLI transition) |
+| Planner | a cheap model via **BYOK** (Gemini/Anthropic/OpenAI/OpenRouter/**GLM**) or a **CLI** (`claude`/`codex`/Antigravity) | model-agnostic adapter; binary/key from config. (The free Gemini CLI tier ended 2026-06-18.) |
 | BYOK | **Gemini API** (`generateContent` + `responseSchema`) | the adapter seam any provider can implement |
 | Agent transport | **MCP** ([`@modelcontextprotocol/sdk`](https://github.com/modelcontextprotocol/typescript-sdk), stdio) + a thin **commander** CLI | one core, two front doors |
 | Validation | **zod** | planner output is validated, invalid JSON gets one retry with the error attached |
@@ -130,7 +130,7 @@ Until then, use the local checkout (`npm install && npm run build`, then `node d
 
 The extension uses the `debugger` permission to drive the page over CDP; Chrome shows a banner while a debug session is attached.
 
-Prerequisites: Node 20+, desktop Chrome 138+ (148+ for multimodal Nano), and for rung 1 a logged-in [`gemini` CLI](https://geminicli.com). Without Nano the ladder starts at rung 1; without the CLI, set `GEMINI_API_KEY` (rung 2). Configuration via `qa.config.json` / env (`QA_CDP_PORT`, `QA_CHROME_PROFILE`, `QA_GOOGLE_CLI_BIN`…) — see `src/config.ts`.
+Prerequisites: Node 20+, desktop Chrome 138+ (148+ for multimodal Nano), and a planner. **Note:** the free Gemini CLI tier (Gemini Code Assist for individuals) ended 2026-06-18 — `gemini -p` now returns `IneligibleTierError`, so the default rung-1 planner no longer works for individuals. Use a BYOK key instead (`GEMINI_API_KEY`, or `qa config set --provider glm` + `qa secret set glm <key>`, or Anthropic/OpenAI), or the `claude`/`codex` CLI as the rung-1 planner. Without Nano the ladder starts at rung 1. Configuration via `qa.config.json` / env (`QA_CDP_PORT`, `QA_CHROME_PROFILE`, `QA_GOOGLE_CLI_BIN`…) — see `src/config.ts`.
 
 Using a specific BYOK provider (rung 2) — e.g. **GLM-5.2 (z.ai)**:
 
