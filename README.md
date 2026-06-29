@@ -60,7 +60,7 @@ Key design decisions:
   |---|---|---|---|
   | 0 | **Gemini Nano** (Chrome Prompt API) | $0, on-device | visual verdicts on screenshots |
   | 1 | **Google CLI free quota** (Gemini Flash) | $0 | step planning, multi-step reasoning |
-  | 2 | **BYOK** (Gemini API key; OpenRouter et al. drop in) | your key | heavy runs, lower latency |
+  | 2 | **BYOK** (Gemini, Anthropic, OpenAI, OpenRouter, **GLM/z.ai** — `glm-5.2`) | your key | heavy runs, lower latency |
   | 3 | **Ollama local** | $0, private | privacy floor (interface stub today) |
 
 - **CDP logpoints** (the spike-B trick): when diagnosing, the daemon can inject `console.log`s at any file:line of a *running* page with **zero source edits** — `Debugger.setBreakpointByUrl` with a condition that logs and returns `false`. No dirty diffs, no cleanup, works on sites you don't own.
@@ -131,6 +131,16 @@ Until then, use the local checkout (`npm install && npm run build`, then `node d
 The extension uses the `debugger` permission to drive the page over CDP; Chrome shows a banner while a debug session is attached.
 
 Prerequisites: Node 20+, desktop Chrome 138+ (148+ for multimodal Nano), and for rung 1 a logged-in [`gemini` CLI](https://geminicli.com). Without Nano the ladder starts at rung 1; without the CLI, set `GEMINI_API_KEY` (rung 2). Configuration via `qa.config.json` / env (`QA_CDP_PORT`, `QA_CHROME_PROFILE`, `QA_GOOGLE_CLI_BIN`…) — see `src/config.ts`.
+
+Using a specific BYOK provider (rung 2) — e.g. **GLM-5.2 (z.ai)**:
+
+```powershell
+node dist/cli.js secret set glm <your-z.ai-key>   # or: $env:GLM_API_KEY="…"
+node dist/cli.js config set --provider glm         # pin GLM as the browsing-control AI
+# GLM_BASE_URL overrides the endpoint (Coding Plan / mainland host); GLM_THINKING=enabled turns reasoning on
+```
+
+GLM-5.2 is text-only, so it does the planning while Gemini Nano (or another vision rung) still handles visual checks.
 
 ## Project structure
 

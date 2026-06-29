@@ -3,7 +3,7 @@
 > Scope: ModelRouter, ModelAdapter interface, and all rung adapters in src/router/.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-06-11
+> Last updated: 2026-06-20
 
 ## Overview
 
@@ -58,7 +58,13 @@ Calls the Anthropic API using the Vault 'anthropic' key or ANTHROPIC_API_KEY env
 
 ## Rung 2 — OpenAiCompatibleAdapter (src/router/adapters/openai-compatible.ts)
 
-OpenAI-compatible REST adapter. Used for both 'gpt:api' (baseUrl: https://api.openai.com/v1) and 'openrouter:api' (baseUrl: https://openrouter.ai/api/v1). Rung 2. Supports plan-step. Keys from Vault or env (OPENAI_API_KEY, OPENROUTER_API_KEY).
+OpenAI-compatible REST adapter. Used for 'gpt:api' (baseUrl: https://api.openai.com/v1), 'openrouter:api' (baseUrl: https://openrouter.ai/api/v1), and 'glm:api' (baseUrl: https://api.z.ai/api/paas/v4). Rung 2. Supports plan-step. Keys from Vault or env (OPENAI_API_KEY, OPENROUTER_API_KEY, GLM_API_KEY).
+
+AGENT NOTE: The adapter has three optional knobs for non-default providers. supportsVision (default true) — set false for a text-only model so supports('visual-verdict') returns false and the router never routes a screenshot to a model that can't see it (and no image is attached even if one is passed). jsonMode (default true) — sends response_format:{type:'json_object'}; disable for a provider that rejects the field. extraBody — merged into the chat-completions body for provider-specific fields.
+
+## Rung 2 — GLM / z.ai (OpenAiCompatibleAdapter, label 'glm')
+
+GLM-5.2 from z.ai, wired in buildLadder() as 'glm:api'. Rung 2. Text-only reasoning model: constructed with supportsVision:false (supports plan-step only — Nano/Gemini keep the visual-verdict ladder) and extraBody { thinking: { type: 'disabled' } } so the planner stays fast and cheap. Default model glm-5.2. Key from Vault 'glm' or GLM_API_KEY / ZAI_API_KEY env. Endpoint defaults to https://api.z.ai/api/paas/v4 and is overridable via GLM_BASE_URL (e.g. the GLM Coding Plan endpoint or the mainland BigModel host). To use GLM as the browsing-control AI: `qa config set --provider glm` (then store the key with `qa secret set glm <key>` or via the panel).
 
 ## Rung 3 — OllamaAdapter (src/router/adapters/ollama.ts)
 
@@ -68,7 +74,7 @@ Calls a local Ollama instance (localhost:11434). Rung 3. Supports plan-step and 
 
 For plan-step: [pinned adapter if set] → [rung 2 BYOK if preferFreePlanner=false] → [rung 1 CLI adapters] → [rung 3 Ollama]. Rung 0 (Nano) never plans.
 
-For visual-verdict: [rung 0 Nano] → [pinned adapter if set and not Nano] → [remaining by ascending rung].
+For visual-verdict: [rung 0 Nano] → [pinned adapter if set and not Nano] → [remaining by ascending rung]. Text-only adapters (e.g. GLM, supportsVision:false) declare no visual-verdict support and never appear on this ladder.
 
 ## PlannerSelection and SettingsStore
 

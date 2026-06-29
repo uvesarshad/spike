@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /** Providers the user can pick as the browsing-control AI. */
-export type ProviderId = 'nano' | 'gemini' | 'claude' | 'gpt' | 'ollama' | 'openrouter';
+export type ProviderId = 'nano' | 'gemini' | 'claude' | 'gpt' | 'ollama' | 'openrouter' | 'glm';
 /** How that provider is reached: hosted API key, or a local CLI binary. */
 export type PlannerMode = 'api' | 'cli';
 /** Paste-a-prompt vs hand the fix to a coding agent headlessly. */
@@ -47,6 +47,7 @@ const DEFAULT_MODELS: Record<string, string> = {
   'gpt:cli': '', // codex uses its own configured model
   'ollama:api': 'llama3.2-vision',
   'openrouter:api': 'anthropic/claude-3.5-haiku',
+  'glm:api': 'glm-5.2', // z.ai GLM-5.2 (text-only reasoning model; planner-only)
 };
 
 export function defaultModelFor(provider: ProviderId, mode: PlannerMode): string {

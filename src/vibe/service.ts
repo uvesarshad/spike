@@ -58,6 +58,7 @@ const VAULT_KEY_FOR: Partial<Record<ProviderId, string>> = {
   claude: 'anthropic',
   gpt: 'openai',
   openrouter: 'openrouter',
+  glm: 'glm',
 };
 
 /** Which transports each provider supports — panel-facing metadata, not the
@@ -71,10 +72,11 @@ const PROVIDER_MODES: Record<ProviderId, string[]> = {
   gpt: ['api', 'cli'],
   ollama: ['api'],
   openrouter: ['api'],
+  glm: ['api'], // z.ai hosted key'd API only (no first-party CLI)
 };
 
 /** The provider list the panel renders, in ladder order. */
-const PROVIDER_ORDER: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter'];
+const PROVIDER_ORDER: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter', 'glm'];
 
 /** Shape of the extension's rec.start / rec.stop bridge responses. */
 interface RecStartResult { ok: boolean; reason?: string; mime?: string }

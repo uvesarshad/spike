@@ -25,7 +25,7 @@ AGENT NOTE: API keys are never stored in SettingsStore. A user who accidentally 
 
 ## Vault (src/vault/vault.ts)
 
-Stores: API keys for external model services (keys: 'gemini', 'anthropic', 'openai', 'openrouter', plus arbitrary named secrets like {{secret:MY_PASSWORD}}).
+Stores: API keys for external model services (keys: 'gemini', 'anthropic', 'openai', 'openrouter', 'glm', plus arbitrary named secrets like {{secret:MY_PASSWORD}}).
 
 File location: %LOCALAPPDATA%\qa-subagent\vault.bin (Windows DPAPI encrypted) or a plaintext fallback on non-Windows platforms (noted in the file header).
 

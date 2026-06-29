@@ -17,7 +17,7 @@ import { Vault } from './vault/vault.js';
 import { SettingsStore, defaultModelFor, type ProviderId, type PlannerMode, type DebugMode, type DebugAgent, type QaSettings, type PlannerSelection } from './vibe/settings.js';
 import { startFixture } from '../fixture/server.js';
 
-const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter'];
+const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter', 'glm'];
 const PLANNER_MODES: PlannerMode[] = ['api', 'cli'];
 const DEBUG_MODES: DebugMode[] = ['prompt', 'auto'];
 const DEBUG_AGENTS: DebugAgent[] = ['auto', 'claude', 'codex', 'gemini'];
@@ -28,6 +28,7 @@ const VAULT_KEY_NAMES: Partial<Record<ProviderId, string>> = {
   claude: 'anthropic',
   gpt: 'openai',
   openrouter: 'openrouter',
+  glm: 'glm',
 };
 
 /** Render the settings (planner + debug + which API keys are configured) as a
@@ -127,7 +128,7 @@ program
   .command('config')
   .description('view or change the browsing-control AI + debugging settings (shared with the extension panel)')
   .argument('<action>', 'show | set')
-  .option('--provider <p>', 'nano|gemini|claude|gpt|ollama|openrouter')
+  .option('--provider <p>', 'nano|gemini|claude|gpt|ollama|openrouter|glm')
   .option('--mode <m>', 'api|cli')
   .option('--model <m>', 'model id (blank = provider default)')
   .option('--debug-mode <d>', 'prompt|auto')

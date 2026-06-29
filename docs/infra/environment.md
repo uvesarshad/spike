@@ -3,7 +3,7 @@
 > Scope: Every environment variable and qa.config.json key; purpose, default, and which module consumes each.
 > Rendering context: Server-side (Node.js daemon / CLI)
 > Project tier: 3
-> Last updated: 2026-06-11
+> Last updated: 2026-06-20
 
 ## Overview
 
@@ -52,6 +52,15 @@ Consumed by: src/router/adapters/openai-compatible.ts (label: 'gpt').
 OPENROUTER_API_KEY — String. OpenRouter API key (rung 2). Absent → rung 2 OpenRouter unavailable. Vault key 'openrouter' takes precedence.
 Consumed by: src/router/adapters/openai-compatible.ts (label: 'openrouter').
 
+GLM_API_KEY — String. z.ai GLM API key (rung 2). Absent → rung 2 GLM unavailable. Vault key 'glm' takes precedence. ZAI_API_KEY is accepted as an alias.
+Consumed by: src/router/adapters/openai-compatible.ts (label: 'glm') via engine.ts buildLadder.
+
+GLM_BASE_URL — String. Override the z.ai endpoint. Default: https://api.z.ai/api/paas/v4. Use for the GLM Coding Plan endpoint or the mainland BigModel host (https://open.bigmodel.cn/api/paas/v4).
+Consumed by: engine.ts buildLadder.
+
+GLM_THINKING — String. 'enabled' turns on GLM-5.2 reasoning (sharper plans, slower/costlier); any other value (default 'disabled') keeps the planner fast and cheap.
+Consumed by: engine.ts buildLadder (passed as extraBody.thinking.type to the GLM adapter).
+
 QA_GOOGLE_CLI_BIN — String. Name of the Google CLI binary on PATH. Default: 'gemini'.
 Consumed by: src/router/adapters/google-cli.ts.
 AGENT NOTE: After 2026-06-18, the Gemini free-tier CLI is replaced by the Antigravity CLI. Change this env var (or the qa.config.json key googleCliBin) rather than modifying source code.
@@ -59,7 +68,7 @@ AGENT NOTE: After 2026-06-18, the Gemini free-tier CLI is replaced by the Antigr
 QA_GOOGLE_CLI_MODEL — String. Model id passed to the Google CLI. Default: 'gemini-3-flash-preview'.
 Consumed by: src/router/adapters/google-cli.ts.
 
-QA_PLANNER_PROVIDER — String. Pin the planner provider: 'nano' | 'gemini' | 'claude' | 'gpt' | 'ollama' | 'openrouter'. Overrides SettingsStore.planner.provider.
+QA_PLANNER_PROVIDER — String. Pin the planner provider: 'nano' | 'gemini' | 'claude' | 'gpt' | 'ollama' | 'openrouter' | 'glm'. Overrides SettingsStore.planner.provider.
 Consumed by: src/config.ts (fromEnv).
 
 QA_PLANNER_MODE — String. 'api' or 'cli'. Overrides SettingsStore.planner.mode.

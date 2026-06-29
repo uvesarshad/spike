@@ -1,10 +1,15 @@
-/* OpenAI-compatible chat-completions adapter (BYOK). One class, two providers:
- *  - GPT:        baseUrl https://api.openai.com/v1   (default gpt-4o-mini)
+/* OpenAI-compatible chat-completions adapter (BYOK). One class, several providers:
+ *  - GPT:        baseUrl https://api.openai.com/v1    (default gpt-4o-mini)
  *  - OpenRouter: baseUrl https://openrouter.ai/api/v1 (default anthropic/claude-3.5-haiku)
- * Both speak /chat/completions with an image as an image_url data-URL and
- * response_format json_object to force syntactically-valid JSON; the schema is
- * still steered in-prompt and the reply parsed with extractJson (json_object
- * guarantees JSON, not our shape). Unavailable (cleanly) when no key is set. */
+ *  - GLM (z.ai): baseUrl https://api.z.ai/api/paas/v4 (default glm-5.2, text-only)
+ * All speak /chat/completions with response_format json_object to force
+ * syntactically-valid JSON; the schema is still steered in-prompt and the reply
+ * parsed with extractJson (json_object guarantees JSON, not our shape). A vision
+ * model also takes an image as an image_url data-URL; a text-only model
+ * (supportsVision:false, e.g. GLM-5.2) declares no visual-verdict support and
+ * never attaches an image. extraBody passes provider-specific top-level fields
+ * (e.g. GLM's thinking:{type:'disabled'} to keep the planner fast/cheap).
+ * Unavailable (cleanly) when no key is set. */
 
 import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson, withSchemaInstruction } from '../adapter.js';
@@ -12,12 +17,23 @@ import { extractJson, withSchemaInstruction } from '../adapter.js';
 export interface OpenAiCompatibleOptions {
   apiKey?: string;
   model: string;
-  /** API base, e.g. https://api.openai.com/v1 or https://openrouter.ai/api/v1 . */
+  /** API base, e.g. https://api.openai.com/v1 or https://api.z.ai/api/paas/v4 . */
   baseUrl: string;
-  /** Short provider label used in the adapter name + error messages ('gpt', 'openrouter'). */
+  /** Short provider label used in the adapter name + error messages ('gpt', 'openrouter', 'glm'). */
   label: string;
   /** Extra headers (OpenRouter likes HTTP-Referer / X-Title; optional). */
   extraHeaders?: Record<string, string>;
+  /** Does this model accept image input? Default true (gpt-4o-mini and most
+   * OpenRouter vision models). Set false for a text-only model (e.g. GLM-5.2):
+   * the adapter then supports plan-step only and never sends an image, so the
+   * router won't route a visual verdict to a model that can't see. */
+  supportsVision?: boolean;
+  /** Send response_format:{type:'json_object'}? Default true. A provider that
+   * rejects the field can disable it and rely on in-prompt schema steering. */
+  jsonMode?: boolean;
+  /** Extra top-level body fields merged into the chat-completions request
+   * (e.g. { thinking: { type: 'disabled' } } for GLM reasoning models). */
+  extraBody?: Record<string, unknown>;
   timeoutMs?: number;
 }
 
@@ -25,17 +41,20 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
   readonly name: string;
   readonly rung = 2 as const;
   lastUsage?: AdapterUsage;
+  private readonly supportsVision: boolean;
 
   constructor(private readonly opts: OpenAiCompatibleOptions) {
     this.name = `${opts.label}(${opts.model})`;
+    this.supportsVision = opts.supportsVision ?? true;
   }
 
   async available(): Promise<boolean> {
     return Boolean(this.opts.apiKey);
   }
 
-  supports(_cap: Capability): boolean {
-    return true; // mini-class vision models plan and judge screenshots
+  supports(cap: Capability): boolean {
+    // Text-only models plan from the a11y tree but can't judge a screenshot.
+    return cap === 'visual-verdict' ? this.supportsVision : true;
   }
 
   async generateJson(req: JsonRequest): Promise<unknown> {
@@ -44,7 +63,7 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
     const userContent: object[] = [
       { type: 'text', text: withSchemaInstruction(req.prompt, req.schema) },
     ];
-    if (req.imagePng) {
+    if (req.imagePng && this.supportsVision) {
       userContent.push({
         type: 'image_url',
         image_url: { url: `data:image/png;base64,${req.imagePng.toString('base64')}` },
@@ -61,7 +80,8 @@ export class OpenAiCompatibleAdapter implements ModelAdapter {
       body: JSON.stringify({
         model: this.opts.model,
         messages: [{ role: 'user', content: userContent }],
-        response_format: { type: 'json_object' },
+        ...((this.opts.jsonMode ?? true) ? { response_format: { type: 'json_object' } } : {}),
+        ...(this.opts.extraBody ?? {}),
       }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 120_000),
     });

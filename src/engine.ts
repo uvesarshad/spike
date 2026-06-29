@@ -257,6 +257,13 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; p
   const anthropicKey = vault.get('anthropic') ?? process.env.ANTHROPIC_API_KEY;
   const openaiKey = vault.get('openai') ?? process.env.OPENAI_API_KEY;
   const openrouterKey = vault.get('openrouter') ?? process.env.OPENROUTER_API_KEY;
+  // GLM (z.ai): vault key 'glm' or GLM_API_KEY / ZAI_API_KEY env. GLM_BASE_URL
+  // overrides the endpoint for the GLM Coding Plan or the mainland BigModel host.
+  // GLM_THINKING=enabled turns reasoning on (slower/costlier, sharper plans);
+  // default 'disabled' keeps the planner fast and cheap — the ladder's whole point.
+  const glmKey = vault.get('glm') ?? process.env.GLM_API_KEY ?? process.env.ZAI_API_KEY;
+  const glmBaseUrl = process.env.GLM_BASE_URL ?? 'https://api.z.ai/api/paas/v4';
+  const glmThinking = process.env.GLM_THINKING === 'enabled' ? 'enabled' : 'disabled';
 
   const byKey = new Map<string, ModelAdapter>();
   byKey.set('gemini:cli', new GoogleCliAdapter({ bin: cfg.googleCliBin, model: modelFor('gemini', 'cli', cfg.googleCliModel), env: cfg.googleCliEnv }));
@@ -268,6 +275,10 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; p
   const codexModel = modelFor('gpt', 'cli', defaultModelFor('gpt', 'cli'));
   byKey.set('gpt:cli', new CliPlannerAdapter({ bin: 'codex', model: codexModel || undefined }));
   byKey.set('openrouter:api', new OpenAiCompatibleAdapter({ apiKey: openrouterKey, baseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter', 'api', defaultModelFor('openrouter', 'api')) }));
+  // GLM-5.2 is a text-only reasoning model: supportsVision:false → it joins the
+  // plan-step ladder only (Nano/Gemini still own visual verdicts). thinking is
+  // disabled by default (GLM_THINKING=enabled to flip) so the planner stays fast.
+  byKey.set('glm:api', new OpenAiCompatibleAdapter({ apiKey: glmKey, baseUrl: glmBaseUrl, label: 'glm', model: modelFor('glm', 'api', defaultModelFor('glm', 'api')), supportsVision: false, extraBody: { thinking: { type: glmThinking } } }));
   byKey.set('ollama:api', new OllamaAdapter({ model: modelFor('ollama', 'api', 'llama3.2-vision') }));
 
   // Pinned name: Nano (handled by the caller) pins to its own name — harmless,

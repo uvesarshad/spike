@@ -101,7 +101,7 @@ const DEFAULTS: QaConfig = {
 };
 
 /** Valid enum values for env-override parsing (silently ignore garbage). */
-const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter'];
+const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter', 'glm'];
 const DEBUG_AGENTS: DebugAgent[] = ['auto', 'claude', 'codex', 'gemini'];
 
 function fromFile(cwd: string): Partial<QaConfig> {

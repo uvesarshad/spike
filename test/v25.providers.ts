@@ -138,6 +138,40 @@ async function withMockFetch(body: unknown, fn: () => Promise<void>): Promise<Fe
   check('openai-compat: records token usage', adapter.lastUsage?.totalTokens === 8);
 }
 
+{
+  // GLM (z.ai) — a text-only OpenAI-compatible model: supportsVision:false means
+  // it plans but never judges screenshots, sends NO image even when one is passed,
+  // and merges extraBody (thinking disabled) into the chat-completions body.
+  const adapter = new OpenAiCompatibleAdapter({
+    apiKey: 'glm-test',
+    model: 'glm-5.2',
+    baseUrl: 'https://api.z.ai/api/paas/v4',
+    label: 'glm',
+    supportsVision: false,
+    extraBody: { thinking: { type: 'disabled' } },
+  });
+  check('glm: supports plan-step', adapter.supports('plan-step'));
+  check('glm: does NOT support visual-verdict (text-only)', !adapter.supports('visual-verdict'));
+  let result: unknown;
+  const call = await withMockFetch(
+    { choices: [{ message: { content: JSON.stringify(okPlan) } }], usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } },
+    async () => {
+      // pass an image: a text-only adapter must drop it rather than send it.
+      result = await adapter.generateJson({ prompt: 'plan', schema: { type: 'object' }, imagePng: png });
+    },
+  );
+  const sentBody = JSON.parse(String(call.init.body)) as {
+    model: string;
+    thinking?: { type: string };
+    messages: { content: { type: string }[] }[];
+  };
+  check('glm: posts to z.ai /chat/completions', call.url === 'https://api.z.ai/api/paas/v4/chat/completions');
+  check('glm: uses the glm-5.2 model id', sentBody.model === 'glm-5.2');
+  check('glm: sends NO image block (text-only)', !sentBody.messages[0].content.some((b) => b.type === 'image_url'));
+  check('glm: merges extraBody (thinking disabled)', sentBody.thinking?.type === 'disabled');
+  check('glm: parses the plan JSON', Array.isArray((result as { actions?: unknown[] }).actions));
+}
+
 /* ---------- part 3: model-id sanitization (command-injection guard) ---------- */
 
 {

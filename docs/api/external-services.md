@@ -3,11 +3,11 @@
 > Scope: Every external model API and service — credentials, rate limits, fallback behavior.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-06-11
+> Last updated: 2026-06-20
 
 ## Overview
 
-The model ladder contacts up to six external services. All are optional — a run degrades gracefully when any rung is unavailable. Credentials come from the Vault first, then environment variables. No service is required to start the daemon; the only hard dependency is a working Chrome on cfg.cdpPort.
+The model ladder contacts up to seven external services. All are optional — a run degrades gracefully when any rung is unavailable. Credentials come from the Vault first, then environment variables. No service is required to start the daemon; the only hard dependency is a working Chrome on cfg.cdpPort.
 
 AGENT OWNER: src/router/adapters/
 
@@ -77,6 +77,18 @@ Credentials: Vault key 'openrouter' or OPENROUTER_API_KEY env var.
 Default model: anthropic/claude-3.5-haiku.
 Rate limit: governed by the API key's quota and OpenRouter per-model limits.
 Fallback: escalates on error.
+
+## GLM / z.ai (Rung 2)
+
+What it does: plan-step only (GLM-5.2 is text-only — it does not judge screenshots).
+Module: src/router/adapters/openai-compatible.ts (label: 'glm', supportsVision: false), wired in engine.ts buildLadder as 'glm:api'.
+Endpoint: https://api.z.ai/api/paas/v4/chat/completions (OpenAI-compatible). Override with GLM_BASE_URL for the GLM Coding Plan endpoint or the mainland BigModel host (https://open.bigmodel.cn/api/paas/v4).
+Credentials: Vault key 'glm' or GLM_API_KEY (ZAI_API_KEY also accepted) env var. Bearer-token auth.
+Default model: glm-5.2. Override via planner selection (QA_PLANNER_MODEL / panel) — e.g. a cheaper GLM tier.
+Request shaping: thinking is disabled by default ({ thinking: { type: 'disabled' } }) so the planner stays fast/cheap (set GLM_THINKING=enabled to turn reasoning on); response_format json_object is requested and the schema steered in-prompt.
+Dependencies: none new — the adapter uses Node's built-in fetch, like the other rung-2 HTTP adapters (no z.ai SDK).
+Rate limit / pricing: governed by the z.ai API key's plan (see https://docs.z.ai/guides/llm/glm-5.2 and z.ai pricing).
+Fallback: escalates on error; unavailable (clean skip) when no key is configured.
 
 ## Codex CLI / CliPlannerAdapter (Rung 1)
 
