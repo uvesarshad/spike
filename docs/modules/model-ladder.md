@@ -78,7 +78,7 @@ For visual-verdict: [rung 0 Nano] → [pinned adapter if set and not Nano] → [
 
 ## PlannerSelection and SettingsStore
 
-The user's chosen "browsing control AI" is stored as PlannerSelection (provider, mode, optional model) in SettingsStore (src/vibe/settings.ts). buildLadder() in engine.ts pins the corresponding adapter to the front. The default is { provider: 'gemini', mode: 'cli' } — Google CLI free quota. The side panel's vibe.config.set message and QA_PLANNER_* env vars both override this.
+The user's chosen "browsing control AI" is stored as PlannerSelection (provider, mode, optional model) in SettingsStore (src/vibe/settings.ts). buildLadder() in engine.ts pins the corresponding adapter to the front. The default is { provider: 'claude', mode: 'cli' } — the claude CLI (the former gemini:cli free-quota default died on 2026-06-18). The side panel's vibe.config.set message and QA_PLANNER_* env vars both override this.
 
 AGENT SEE: docs/state/server-state.md — SettingsStore persistence path
 

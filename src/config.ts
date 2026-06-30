@@ -95,7 +95,8 @@ const DEFAULTS: QaConfig = {
   // Vibe-mode clips need a chrome.tabCapture recorder (planned).
   recordClip: false,
   preferFreePlanner: false,
-  planner: { provider: 'gemini', mode: 'cli' },
+  // claude CLI by default — the former gemini:cli free tier is dead (see settings.ts).
+  planner: { provider: 'claude', mode: 'cli' },
   debugMode: 'prompt',
   debugAgent: 'auto',
 };

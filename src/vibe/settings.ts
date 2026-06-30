@@ -31,7 +31,11 @@ export interface QaSettings {
 }
 
 export const DEFAULT_SETTINGS: QaSettings = {
-  planner: { provider: 'gemini', mode: 'cli' },
+  // Default planner: claude CLI. The old default (gemini:cli, free Gemini quota)
+  // died on 2026-06-18 (IneligibleTierError), so it's a broken out-of-box choice.
+  // claude CLI needs no API key and is near-ubiquitous in this tool's audience;
+  // if it's absent the router falls through the ladder to codex/BYOK/Ollama.
+  planner: { provider: 'claude', mode: 'cli' },
   debugMode: 'prompt',
   debugAgent: 'auto',
 };
