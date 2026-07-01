@@ -15,6 +15,7 @@ import { DEFAULT_SETTINGS, defaultModelFor, isSafeModelId } from './settings-dat
 import type {
   ProviderId,
   PlannerMode,
+  ModelRole,
   DebugMode,
   DebugAgent,
   PlannerSelection,
@@ -22,7 +23,7 @@ import type {
 } from './settings-data.js';
 
 export { DEFAULT_SETTINGS, defaultModelFor, isSafeModelId };
-export type { ProviderId, PlannerMode, DebugMode, DebugAgent, PlannerSelection, QaSettings };
+export type { ProviderId, PlannerMode, ModelRole, DebugMode, DebugAgent, PlannerSelection, QaSettings };
 
 function defaultSettingsPath(): string {
   const base = process.env.LOCALAPPDATA ?? process.env.HOME ?? '.';
@@ -36,7 +37,10 @@ export class SettingsStore {
     this.file = file ?? defaultSettingsPath();
   }
 
-  /** Current settings, defaults filled in for anything missing/corrupt. */
+  /** Current settings, defaults filled in for anything missing/corrupt. Spreading
+   * DEFAULT_SETTINGS UNDER the stored config is the migration path: a config
+   * written before the planner/navigator split (no `navigator` key) inherits the
+   * default navigator (Nano) rather than coming back undefined. */
   read(): QaSettings {
     let parsed: Partial<QaSettings> = {};
     try {
@@ -45,19 +49,23 @@ export class SettingsStore {
       /* corrupt file → fall back to defaults */
     }
     return {
+      ...DEFAULT_SETTINGS,
+      ...parsed,
+      // planner + navigator are nested objects — merge them rather than clobber.
       planner: { ...DEFAULT_SETTINGS.planner, ...(parsed.planner ?? {}) },
-      debugMode: parsed.debugMode ?? DEFAULT_SETTINGS.debugMode,
-      debugAgent: parsed.debugAgent ?? DEFAULT_SETTINGS.debugAgent,
+      navigator: { ...DEFAULT_SETTINGS.navigator, ...(parsed.navigator ?? {}) },
     };
   }
 
   /** Merge a partial patch over the current settings and persist; returns the result. */
   write(patch: Partial<QaSettings>): QaSettings {
+    const current = this.read();
     const next: QaSettings = {
-      ...this.read(),
+      ...current,
       ...patch,
-      // planner is a nested object — merge it rather than clobber
-      planner: { ...this.read().planner, ...(patch.planner ?? {}) },
+      // planner + navigator are nested objects — merge them rather than clobber.
+      planner: { ...current.planner, ...(patch.planner ?? {}) },
+      navigator: { ...current.navigator, ...(patch.navigator ?? {}) },
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     fs.writeFileSync(this.file, JSON.stringify(next, null, 2));

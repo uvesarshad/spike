@@ -20,27 +20,55 @@ export interface ModelTraceEntry {
 }
 
 export interface ModelRouterOptions {
-  /** Keep rung-1 (free Google CLI) first for plan-step even when a rung-2 BYOK
+  /** Keep rung-1 (free Google CLI) first for planning even when a rung-2 BYOK
    * adapter is available. Default false: a configured key IS the opt-in to spend
    * it for ~3× faster planning, so the router orders rung 2 before rung 1 for
-   * plan-step ONLY. Visual verdicts are never reordered (rung 0 always first). */
+   * BOTH planner roles (plan-step AND plan-goals). Visual verdicts are never
+   * reordered (rung 0 always first). Ignored for a role once that role is pinned. */
   preferFreePlanner?: boolean;
-  /** The user's chosen "browsing control AI" — the adapter NAME to pin to the
-   * front of the ladder (fallback still applies behind it). Overrides the rung
-   * ordering AND preferFreePlanner for plan-step. For visual-verdict, rung-0 Nano
-   * still leads (it's $0/on-device), then the pinned adapter, then the rest. */
+  /** Back-compat single pin: the adapter NAME used for BOTH planner roles when
+   * the role-specific pins below are absent. Overrides the rung ordering AND
+   * preferFreePlanner for plan-step/plan-goals. For visual-verdict, rung-0 Nano
+   * still leads (it's $0/on-device), then this pin, then the rest. */
   pinnedAdapter?: string;
+  /** NAVIGATOR pin — the adapter NAME leading the ladder for plan-step (the cheap
+   * per-step call). Falls back to pinnedAdapter when unset. */
+  navigatorAdapter?: string;
+  /** BRAIN pin — the adapter NAME leading the ladder for plan-goals (the rare
+   * smart planning/re-plan call). Falls back to pinnedAdapter when unset. */
+  plannerAdapter?: string;
 }
 
 export class ModelRouter {
   readonly trace: ModelTraceEntry[] = [];
   private readonly preferFreePlanner: boolean;
   private readonly pinnedAdapter?: string;
+  private readonly navigatorAdapter?: string;
+  private readonly plannerAdapter?: string;
 
   constructor(private readonly adapters: ModelAdapter[], opts?: ModelRouterOptions) {
     this.adapters = [...adapters].sort((a, b) => a.rung - b.rung);
     this.preferFreePlanner = opts?.preferFreePlanner ?? false;
     this.pinnedAdapter = opts?.pinnedAdapter;
+    this.navigatorAdapter = opts?.navigatorAdapter;
+    this.plannerAdapter = opts?.plannerAdapter;
+  }
+
+  /** True when at least one adapter can serve `cap` right now (availability-probed
+   * in parallel). The driver uses this to detect whether a BRAIN (plan-goals) is
+   * configured at all — if not, it runs navigator-only with a single implicit goal
+   * instead of failing the run. */
+  async hasCapability(cap: Capability): Promise<boolean> {
+    return (await this.candidates(cap)).length > 0;
+  }
+
+  /** Which pin leads the ladder for a role. plan-step → navigator, plan-goals →
+   * planner, each falling back to the back-compat pinnedAdapter; visual-verdict
+   * keeps pinnedAdapter behind the always-first rung-0 Nano. */
+  private effectivePin(cap: Capability): string | undefined {
+    if (cap === 'plan-step') return this.navigatorAdapter ?? this.pinnedAdapter;
+    if (cap === 'plan-goals') return this.plannerAdapter ?? this.pinnedAdapter;
+    return this.pinnedAdapter;
   }
 
   private async candidates(cap: Capability): Promise<ModelAdapter[]> {
@@ -51,28 +79,35 @@ export class ModelRouter {
     const supported = this.adapters.filter((a) => a.supports(cap));
     const ready = await Promise.all(supported.map((a) => a.available().catch(() => false)));
     const out = supported.filter((_, i) => ready[i]);
-    // Pinned adapter (the user's chosen browsing-control AI): lead the ladder with
-    // it, keeping the rest in rung order behind. For visual-verdict, rung-0 Nano
-    // stays absolute-first ($0/on-device); the pin slots in right after it.
-    if (this.pinnedAdapter && out.some((a) => a.name === this.pinnedAdapter)) {
-      out.sort((a, b) => this.pinRank(a, cap) - this.pinRank(b, cap));
+    // Role pin (the user's chosen navigator/brain, or the back-compat single pin):
+    // lead the ladder with it, keeping the rest in rung order behind. For
+    // visual-verdict, rung-0 Nano stays absolute-first ($0/on-device); the pin
+    // slots in right after it.
+    const pin = this.effectivePin(cap);
+    if (pin && out.some((a) => a.name === pin)) {
+      out.sort((a, b) => this.pinRank(a, cap, pin) - this.pinRank(b, cap, pin));
       return out;
     }
-    // plan-step fast path: when a rung-2 BYOK adapter is live and the user hasn't
-    // opted back into free quota, promote rung 2 ahead of rung 1 (HTTP beats the
-    // CLI cold-spawn ~3×). Stable within rung; rung 0 (never a planner) untouched;
-    // visual-verdict ladder is never reordered. Errors still fall down the rest.
-    if (cap === 'plan-step' && !this.preferFreePlanner && out.some((a) => a.rung === 2)) {
+    // planner fast path (plan-step + plan-goals): when a rung-2 BYOK adapter is
+    // live and the user hasn't opted back into free quota, promote rung 2 ahead of
+    // rung 1 (HTTP beats the CLI cold-spawn ~3×). Stable within rung; rung 0 (never
+    // a planner) untouched; visual-verdict ladder is never reordered. Errors still
+    // fall down the rest.
+    if (
+      (cap === 'plan-step' || cap === 'plan-goals') &&
+      !this.preferFreePlanner &&
+      out.some((a) => a.rung === 2)
+    ) {
       out.sort((a, b) => planRank(a.rung) - planRank(b.rung));
     }
     return out;
   }
 
   /** Sort key when a pin is active: lower comes first. Nano keeps the visual lead;
-   * the pinned adapter leads otherwise; everyone else stays in rung order behind. */
-  private pinRank(a: ModelAdapter, cap: Capability): number {
+   * the role pin leads otherwise; everyone else stays in rung order behind. */
+  private pinRank(a: ModelAdapter, cap: Capability, pin: string | undefined): number {
     if (cap === 'visual-verdict' && a.rung === 0) return -2; // Nano: $0 visual, always first
-    if (a.name === this.pinnedAdapter) return -1;
+    if (a.name === pin) return -1;
     return a.rung;
   }
 
@@ -132,9 +167,27 @@ export class ModelRouter {
     throw new Error(`all visual-verdict adapters failed: ${lastError?.message}`);
   }
 
-  /** Planning: rung 1 by default (rung 0 never plans); falls down-ladder on errors. */
+  /** NAVIGATOR step (cheap, called every step): ladder led by navigatorAdapter,
+   * falls down-ladder on errors. Keeps the planJson name to minimise churn. */
   async planJson(prompt: string, schema: object, step: number): Promise<unknown> {
-    const ladder = await this.candidates('plan-step');
+    return this.planWith('plan-step', prompt, schema, step);
+  }
+
+  /** BRAIN plan (smart, rare): the sub-goal checklist / re-plan call. Ladder led
+   * by plannerAdapter; identical error-fallback + trace behaviour as planJson. */
+  async planGoals(prompt: string, schema: object, step: number): Promise<unknown> {
+    return this.planWith('plan-goals', prompt, schema, step);
+  }
+
+  /** Shared planning body for both roles: rung ordering per candidates(cap), rung
+   * 1 by default (rung 0 never plans); falls down-ladder on errors. */
+  private async planWith(
+    cap: Capability,
+    prompt: string,
+    schema: object,
+    step: number,
+  ): Promise<unknown> {
+    const ladder = await this.candidates(cap);
     if (ladder.length === 0) {
       throw new Error(
         'no planner available — install the Google CLI (free quota) or set GEMINI_API_KEY (BYOK)',
@@ -148,7 +201,7 @@ export class ModelRouter {
         const result = await adapter.generateJson({ prompt, schema });
         this.trace.push({
           step,
-          capability: 'plan-step',
+          capability: cap,
           rung: adapter.rung,
           adapter: adapter.name,
           ms: Date.now() - t0,
@@ -160,7 +213,7 @@ export class ModelRouter {
         lastError = e instanceof Error ? e : new Error(String(e));
         this.trace.push({
           step,
-          capability: 'plan-step',
+          capability: cap,
           rung: adapter.rung,
           adapter: adapter.name,
           ms: Date.now() - t0,

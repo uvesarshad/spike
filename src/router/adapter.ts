@@ -4,7 +4,12 @@
  * that proves the rule: it only does visual verdicts (its runner enforces a
  * fixed verdict schema and requires an image), hence supports(). */
 
-export type Capability = 'visual-verdict' | 'plan-step';
+/** The three model roles the router fills. visual-verdict = judge a screenshot
+ * (Nano's job); plan-step = the NAVIGATOR (cheap, called every step); plan-goals
+ * = the BRAIN (smart, rare — makes/repairs the sub-goal plan). Any adapter that
+ * can do plan-step can also do plan-goals (same generateJson surface; only the
+ * prompt/schema differ) — Nano is the one exception: visual-verdict only. */
+export type Capability = 'visual-verdict' | 'plan-step' | 'plan-goals';
 
 export interface JsonRequest {
   prompt: string;

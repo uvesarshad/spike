@@ -11,6 +11,8 @@ export interface LiteNanoDeps {
   warmup(): Promise<void>;
   /** Judge a screenshot (data URL) against the QA question. */
   verdict(dataUrl: string, task: string): Promise<{ verdict: NanoVerdict; ms: number }>;
+  /** NAVIGATOR step: pick ONE action as JSON matching `schema` from a text prompt. */
+  navStep(prompt: string, schema: object): Promise<unknown>;
 }
 
 export class LiteNano implements NanoPort {
@@ -37,6 +39,10 @@ export class LiteNano implements NanoPort {
   async verdict(png: Buffer, task: string): Promise<{ verdict: NanoVerdict; ms: number }> {
     const dataUrl = 'data:image/png;base64,' + png.toString('base64');
     return this.deps.verdict(dataUrl, task);
+  }
+
+  async navStep(prompt: string, schema: object): Promise<unknown> {
+    return this.deps.navStep(prompt, schema);
   }
 
   async close(): Promise<void> {

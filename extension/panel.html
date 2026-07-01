@@ -42,11 +42,60 @@
         </div>
 
         <div class="settings-group">
-          <div class="settings-group-title">Browsing control AI</div>
+          <div class="settings-group-title">Navigator — does each step (cheap)</div>
+          <div class="settings-group-sub">The fast, cheap model that clicks, types, and looks at the page on every step.</div>
+
+          <label class="settings-field-label" for="setNavProvider">Provider</label>
+          <select id="setNavProvider" class="settings-select">
+            <option value="nano">Gemini Nano (on-device)</option>
+            <option value="gemini">Gemini</option>
+            <option value="claude">Claude</option>
+            <option value="gpt">GPT</option>
+            <option value="openrouter">OpenRouter</option>
+          </select>
+
+          <div id="setNavModeRow" class="settings-radio-row">
+            <label class="settings-radio">
+              <input type="radio" name="setNavMode" value="api" />
+              <span>API key</span>
+            </label>
+            <label class="settings-radio">
+              <input type="radio" name="setNavMode" value="cli" />
+              <span>CLI</span>
+              <span class="badge-adv">Advanced</span>
+            </label>
+          </div>
+
+          <div id="setNavNanoNote" class="settings-note" hidden>
+            <span class="ico" data-icon="info"></span>
+            <span><b>On-device AI (Gemini Nano)</b> runs on every step locally and free, but needs a one-time ~2&nbsp;GB download and works best on a recent machine with a capable GPU — it can be slow on older hardware.</span>
+          </div>
+          <button id="setNavNanoDownload" class="nano-download-btn" type="button" hidden>Download on-device AI (~2&nbsp;GB)</button>
+
+          <label class="settings-field-label" for="setNavModel">Model</label>
+          <input id="setNavModel" class="settings-input" type="text" placeholder="default model" />
+
+          <div id="setNavKeyRow" class="settings-key-row" hidden>
+            <label class="settings-field-label" for="setNavKey">API key</label>
+            <div class="settings-key-line">
+              <div class="settings-key-input-wrap">
+                <input id="setNavKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
+                <button id="setNavKeyToggle" class="settings-key-toggle" type="button" title="Show / hide key" aria-label="Show or hide the API key">
+                  <span class="ico" data-icon="eye"></span>
+                </button>
+              </div>
+              <button id="setNavKeySave" class="settings-btn-secondary" type="button">Save key</button>
+            </div>
+            <span id="setNavKeyStatus" class="settings-key-status"></span>
+          </div>
+        </div>
+
+        <div class="settings-group">
+          <div class="settings-group-title">Brain — makes the plan (smart)</div>
+          <div class="settings-group-sub">The smarter model, called only to plan and when the navigator gets stuck — so it barely affects cost.</div>
 
           <label class="settings-field-label" for="setProvider">Provider</label>
           <select id="setProvider" class="settings-select">
-            <option value="nano">Gemini Nano (on-device)</option>
             <option value="gemini">Gemini</option>
             <option value="claude">Claude</option>
             <option value="gpt">GPT</option>
@@ -66,12 +115,6 @@
               <span class="badge-adv">Advanced</span>
             </label>
           </div>
-
-          <div id="setNanoNote" class="settings-note" hidden>
-            <span class="ico" data-icon="info"></span>
-            <span><b>On-device AI (Gemini Nano)</b> runs visual checks locally and free, but needs a one-time ~2&nbsp;GB download and works best on a recent machine with a capable GPU — it can be slow on older hardware. It can't plan on its own, so pair it with a cloud provider for the steps.</span>
-          </div>
-          <button id="setNanoDownload" class="nano-download-btn" type="button" hidden>Download on-device AI (~2&nbsp;GB)</button>
 
           <label class="settings-field-label" for="setModel">Model</label>
           <input id="setModel" class="settings-input" type="text" placeholder="default model" />

@@ -98,6 +98,7 @@ const settingsModal = $('settingsModal');
 const settingsClose = $('settingsClose');
 const settingsCloseBtn = $('settingsCloseBtn');
 const settingsSave = $('settingsSave');
+// Brain card (the smart planner — cfg.planner)
 const setProvider = $('setProvider');
 const setModeRow = $('setModeRow');
 const setModel = $('setModel');
@@ -105,12 +106,36 @@ const setKeyRow = $('setKeyRow');
 const setKey = $('setKey');
 const setKeySave = $('setKeySave');
 const setKeyStatus = $('setKeyStatus');
+const setKeyToggle = $('setKeyToggle');
+// Navigator card (the cheap per-step model — cfg.navigator; the only card with Nano)
+const setNavProvider = $('setNavProvider');
+const setNavModeRow = $('setNavModeRow');
+const setNavModel = $('setNavModel');
+const setNavKeyRow = $('setNavKeyRow');
+const setNavKey = $('setNavKey');
+const setNavKeySave = $('setNavKeySave');
+const setNavKeyStatus = $('setNavKeyStatus');
+const setNavKeyToggle = $('setNavKeyToggle');
+const setNavNanoNote = $('setNavNanoNote');
+const setNavNanoDownload = $('setNavNanoDownload');
 const setDebugAgentRow = $('setDebugAgentRow');
 const setDebugAgent = $('setDebugAgent');
 const themeBtn = $('themeBtn');
-const setKeyToggle = $('setKeyToggle');
-const setNanoNote = $('setNanoNote');
-const setNanoDownload = $('setNanoDownload');
+
+// Per-card DOM references, so the settings logic runs once per role. `nanoNote`/
+// `nanoDownload` live only on the navigator card (Nano is navigator-only now).
+const brainCardRefs = {
+  role: 'brain',
+  provider: setProvider, modeRow: setModeRow, modeName: 'setMode',
+  model: setModel, keyRow: setKeyRow, key: setKey, keyStatus: setKeyStatus,
+  nanoNote: null, nanoDownload: null,
+};
+const navCardRefs = {
+  role: 'navigator',
+  provider: setNavProvider, modeRow: setNavModeRow, modeName: 'setNavMode',
+  model: setNavModel, keyRow: setNavKeyRow, key: setNavKey, keyStatus: setNavKeyStatus,
+  nanoNote: setNavNanoNote, nanoDownload: setNavNanoDownload,
+};
 
 // last nano availability reported by the SW (drives the settings nano note/button)
 let nanoAvailability = null;
@@ -840,28 +865,45 @@ function onFixDone(msg) {
 // save with config-set, and manage keys with set-key/clear-key. The SW replies
 // with a fresh { kind:'config', ... } we render here.
 
-/** The provider currently selected in the form. */
+/** The provider currently selected in the Brain card. */
 function selectedProvider() {
   return setProvider.value;
 }
+/** The provider currently selected in the Navigator card. */
+function selectedNavProvider() {
+  return setNavProvider.value;
+}
 
-/** The provider descriptor (from config.providers) for the selected provider. */
+/** The provider descriptor (from config.providers) for a provider id. */
 function providerInfo(id) {
   const list = (currentConfig && Array.isArray(currentConfig.providers)) ? currentConfig.providers : [];
   return list.find((p) => p && p.id === id) || null;
 }
 
-/** The mode (api/cli/ondevice) currently chosen in the form, clamped to what
- * the selected provider supports. */
-function selectedMode() {
-  const info = providerInfo(selectedProvider());
+/** The mode (api/cli/ondevice) chosen for a card, clamped to what its provider
+ * supports. `provider` is the card's selected provider; `radioName` its radio group. */
+function chosenMode(provider, radioName) {
+  const info = providerInfo(provider);
   const modes = (info && Array.isArray(info.modes)) ? info.modes : [];
   if (modes.length === 0) return 'api';
-  const checked = settingsModal.querySelector('input[name="setMode"]:checked');
+  const checked = settingsModal.querySelector(`input[name="${radioName}"]:checked`);
   const want = checked ? checked.value : null;
   if (want && modes.includes(want)) return want;
   // single-mode providers (nano=ondevice, ollama/openrouter=api) → that mode
   return modes[0];
+}
+
+/** Brain-card mode (api/cli). */
+function selectedMode() {
+  return chosenMode(selectedProvider(), 'setMode');
+}
+/** Navigator-card mode (api/cli/ondevice). */
+function selectedNavMode() {
+  return chosenMode(selectedNavProvider(), 'setNavMode');
+}
+/** Navigator-card model text. */
+function selectedNavModel() {
+  return setNavModel.value.trim();
 }
 
 /** The debug mode currently chosen in the form. */
@@ -870,17 +912,20 @@ function selectedDebugMode() {
   return checked ? checked.value : 'prompt';
 }
 
-/** Placeholder/default model for the selected provider+mode. */
-function defaultModelFor(info, mode) {
+/** Placeholder/default model for a provider, preferring the role-specific default
+ * (navModelDefault / brainModelDefault) then falling back to the mode default. */
+function defaultModelFor(info, mode, role) {
   if (!info) return 'default model';
+  if (role === 'navigator' && info.navModelDefault) return info.navModelDefault;
+  if (role === 'brain' && info.brainModelDefault) return info.brainModelDefault;
   if (mode === 'cli') return info.cliModelDefault || 'default model';
   return info.apiModelDefault || 'default model';
 }
 
-/** Show/hide the mode radios, key row and agent select per the current form
- * selection. Called on open and whenever provider/mode/debug-mode change. */
-function refreshSettingsVisibility() {
-  const provider = selectedProvider();
+/** Show/hide the mode radios, key row, model placeholder and (nav-only) nano
+ * note/download for ONE card, per its current selection. */
+function refreshCardVisibility(refs) {
+  const provider = refs.provider.value;
   const info = providerInfo(provider);
   const modes = (info && Array.isArray(info.modes)) ? info.modes : [];
 
@@ -888,35 +933,44 @@ function refreshSettingsVisibility() {
   const hasApi = modes.includes('api');
   const hasCli = modes.includes('cli');
   const showModes = hasApi && hasCli;
-  setModeRow.hidden = !showModes;
-  setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
+  refs.modeRow.hidden = !showModes;
+  refs.modeRow.querySelectorAll(`input[name="${refs.modeName}"]`).forEach((el) => {
     if (el.value === 'api') el.disabled = !hasApi;
     if (el.value === 'cli') el.disabled = !hasCli;
   });
 
-  const mode = selectedMode();
+  const mode = chosenMode(provider, refs.modeName);
 
   // key row: only when the provider needs a key AND we're in API mode
   const needsKey = !!(info && info.needsKey);
   const showKey = needsKey && mode === 'api';
-  setKeyRow.hidden = !showKey;
+  refs.keyRow.hidden = !showKey;
 
-  // model placeholder reflects the default for the current provider+mode
-  setModel.placeholder = defaultModelFor(info, mode);
+  // model placeholder reflects the role-specific / mode default
+  refs.model.placeholder = defaultModelFor(info, mode, refs.role);
 
   // key status from providers[].hasKey
   if (showKey) {
-    setKeyStatus.classList.remove('err');
-    setKeyStatus.textContent = (info && info.hasKey) ? 'saved ✓' : '';
+    refs.keyStatus.classList.remove('err');
+    refs.keyStatus.textContent = (info && info.hasKey) ? 'saved ✓' : '';
   }
 
-  // Gemini Nano: on-device note + one-time download prompt (only while selected).
-  const isNano = provider === 'nano';
-  if (setNanoNote) setNanoNote.hidden = !isNano;
-  if (setNanoDownload) {
-    const ready = nanoAvailability === 'available' || nanoAvailability === 'readily';
-    setNanoDownload.hidden = !isNano || ready || nanoDownloading;
+  // Gemini Nano: on-device note + one-time download prompt (navigator card only).
+  if (refs.nanoNote || refs.nanoDownload) {
+    const isNano = provider === 'nano';
+    if (refs.nanoNote) refs.nanoNote.hidden = !isNano;
+    if (refs.nanoDownload) {
+      const ready = nanoAvailability === 'available' || nanoAvailability === 'readily';
+      refs.nanoDownload.hidden = !isNano || ready || nanoDownloading;
+    }
   }
+}
+
+/** Refresh BOTH settings cards + the debug agent row. Called on open and whenever
+ * provider/mode/debug-mode change. */
+function refreshSettingsVisibility() {
+  refreshCardVisibility(navCardRefs);
+  refreshCardVisibility(brainCardRefs);
 
   // agent select only when auto-fix is chosen
   setDebugAgentRow.hidden = selectedDebugMode() !== 'auto';
@@ -925,19 +979,32 @@ function refreshSettingsVisibility() {
 /** Populate the whole form from a daemon config payload. */
 function renderSettings(cfg) {
   if (!cfg) return;
-  const planner = cfg.planner || {};
+  const planner = cfg.planner || {};   // BRAIN role
+  const navi = cfg.navigator || {};     // NAVIGATOR role
 
-  // provider select
+  // Brain card: provider select
   if (planner.provider) setProvider.value = planner.provider;
 
-  // mode radios (respect the saved mode; visibility handled below)
+  // Brain card: mode radios (respect the saved mode; visibility handled below)
   const wantMode = planner.mode || 'api';
   setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
     el.checked = (el.value === wantMode);
   });
 
-  // model value
+  // Brain card: model value
   setModel.value = planner.model || '';
+
+  // Navigator card: provider select
+  if (navi.provider) setNavProvider.value = navi.provider;
+
+  // Navigator card: mode radios
+  const wantNavMode = navi.mode || 'ondevice';
+  setNavModeRow.querySelectorAll('input[name="setNavMode"]').forEach((el) => {
+    el.checked = (el.value === wantNavMode);
+  });
+
+  // Navigator card: model value
+  setNavModel.value = navi.model || '';
 
   // debug mode radios
   const wantDebug = cfg.debugMode || 'prompt';
@@ -953,29 +1020,38 @@ function renderSettings(cfg) {
 
 function onKeySaved(msg) {
   if (!msg) return;
+  // reflect hasKey locally so a re-render keeps the status accurate
   if (msg.ok) {
-    setKeyStatus.classList.remove('err');
-    setKeyStatus.textContent = msg.cleared ? '' : 'saved ✓';
-    // keep the key in the field (persistent) — the user can reveal it with the eye
-    // toggle to confirm; clear it only when the key was removed.
-    if (msg.cleared) setKey.value = '';
-    // reflect hasKey locally so a re-render keeps the status accurate
     const info = providerInfo(msg.provider);
     if (info) info.hasKey = !msg.cleared;
-  } else {
-    setKeyStatus.classList.add('err');
-    setKeyStatus.textContent = msg.message ? ('error: ' + msg.message) : 'could not save key';
+  }
+  // A provider's key is shared across cards — update every card showing it.
+  for (const refs of [navCardRefs, brainCardRefs]) {
+    if (refs.provider.value !== msg.provider) continue;
+    if (msg.ok) {
+      refs.keyStatus.classList.remove('err');
+      refs.keyStatus.textContent = msg.cleared ? '' : 'saved ✓';
+      // keep the key in the field (persistent) — the user can reveal it with the
+      // eye toggle to confirm; clear it only when the key was removed.
+      if (msg.cleared) refs.key.value = '';
+    } else {
+      refs.keyStatus.classList.add('err');
+      refs.keyStatus.textContent = msg.message ? ('error: ' + msg.message) : 'could not save key';
+    }
   }
 }
 
-// show / hide the API key
-if (setKeyToggle) {
-  setKeyToggle.addEventListener('click', () => {
-    const reveal = setKey.type === 'password';
-    setKey.type = reveal ? 'text' : 'password';
-    setKeyToggle.innerHTML = qaIcon(reveal ? 'eye-off' : 'eye');
+// show / hide the API key (one eye toggle per card)
+function wireKeyToggle(toggle, input) {
+  if (!toggle) return;
+  toggle.addEventListener('click', () => {
+    const reveal = input.type === 'password';
+    input.type = reveal ? 'text' : 'password';
+    toggle.innerHTML = qaIcon(reveal ? 'eye-off' : 'eye');
   });
 }
+wireKeyToggle(setKeyToggle, setKey);
+wireKeyToggle(setNavKeyToggle, setNavKey);
 
 function openSettings() {
   settingsModal.hidden = false;
@@ -993,28 +1069,40 @@ settingsCloseBtn.addEventListener('click', closeSettings);
 settingsModal.addEventListener('click', (ev) => {
   if (ev.target === settingsModal) closeSettings();
 });
-// settings-side "Download on-device AI" — reuses the SW nano-download flow
-if (setNanoDownload) {
-  setNanoDownload.addEventListener('click', () => {
-    setNanoDownload.hidden = true;
+// settings-side "Download on-device AI" (navigator card) — reuses the SW nano-download flow
+if (setNavNanoDownload) {
+  setNavNanoDownload.addEventListener('click', () => {
+    setNavNanoDownload.hidden = true;
     postToSW({ kind: 'nano-download' });
   });
 }
 
 setProvider.addEventListener('change', refreshSettingsVisibility);
+setNavProvider.addEventListener('change', refreshSettingsVisibility);
 setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
+  el.addEventListener('change', refreshSettingsVisibility);
+});
+setNavModeRow.querySelectorAll('input[name="setNavMode"]').forEach((el) => {
   el.addEventListener('change', refreshSettingsVisibility);
 });
 settingsModal.querySelectorAll('input[name="setDebugMode"]').forEach((el) => {
   el.addEventListener('change', refreshSettingsVisibility);
 });
 
+// Save key — one handler per card; keys are stored per-provider (shared across cards).
 setKeySave.addEventListener('click', () => {
   const key = setKey.value.trim();
   if (!key) return;
   setKeyStatus.classList.remove('err');
   setKeyStatus.textContent = 'saving…';
   postToSW({ kind: 'set-key', provider: selectedProvider(), key });
+});
+setNavKeySave.addEventListener('click', () => {
+  const key = setNavKey.value.trim();
+  if (!key) return;
+  setNavKeyStatus.classList.remove('err');
+  setNavKeyStatus.textContent = 'saving…';
+  postToSW({ kind: 'set-key', provider: selectedNavProvider(), key });
 });
 
 settingsSave.addEventListener('click', () => {
@@ -1024,6 +1112,11 @@ settingsSave.addEventListener('click', () => {
       provider: selectedProvider(),
       mode: selectedMode(),
       model: setModel.value.trim(),
+    },
+    navigator: {
+      provider: selectedNavProvider(),
+      mode: selectedNavMode(),
+      model: selectedNavModel(),
     },
     debugMode: selectedDebugMode(),
     debugAgent: setDebugAgent.value,

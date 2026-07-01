@@ -1,0 +1,12 @@
+{
+  "name": "nano-nav-spike",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Phase A spike: can Gemini Nano act as the navigator (pick actions from an a11y tree)?",
+  "scripts": {
+    "spike": "node spike-nano-nav.js"
+  },
+  "dependencies": {
+    "chrome-remote-interface": "^0.33.2"
+  }
+}

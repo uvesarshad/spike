@@ -236,22 +236,34 @@ async function pollNanoAvailable(
 
 /**
  * Build the full fallback ladder (everything EXCEPT rung-0 Nano, which the caller
- * prepends only when it's available) and figure out which adapter to PIN to the
- * front — the user's chosen "browsing control AI" (cfg.planner).
+ * prepends only when it's available) and figure out which two adapters to PIN to
+ * the front — the NAVIGATOR (cfg.navigator, leads plan-step) and the BRAIN
+ * (cfg.planner, leads plan-goals).
  *
- * Every provider/mode is constructed exactly once, keyed `provider:mode`. The
- * chosen slot gets cfg.planner.model (or the per-provider default); other slots
- * get their defaults. Unconfigured adapters (no key / missing CLI) report
- * available()===false and the router simply skips them, so the ladder is always
- * complete and fallback Just Works regardless of the selection. API keys come
- * from the Vault (anthropic/openai/openrouter) with an env fallback; Gemini also
- * honors the legacy cfg.geminiApiKey.
+ * Every provider/mode is constructed exactly once, keyed `provider:mode`. A slot
+ * pinned by a role gets that role's model (cfg.<role>.model when set, else the
+ * role-appropriate default via defaultModelFor); any unpinned fallback rung takes
+ * the cheap navigator-tier default. Unconfigured adapters (no key / missing CLI)
+ * report available()===false and the router simply skips them, so the ladder is
+ * always complete and fallback Just Works regardless of the selection. API keys
+ * come from the Vault (anthropic/openai/openrouter) with an env fallback; Gemini
+ * also honors the legacy cfg.geminiApiKey.
+ *
+ * A role pinned to nano (navigator default) resolves to name 'nano', which the
+ * router simply won't find among plan-step candidates yet → it falls through to
+ * the next available per-step adapter (Nano plan-step is a later phase).
  */
-function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; pinnedName?: string } {
-  const sel = cfg.planner;
-  // the chosen slot uses the user's model (when set); every other slot its default.
-  const modelFor = (provider: ProviderId, mode: PlannerMode, fallback: string): string =>
-    sel.provider === provider && sel.mode === mode && sel.model ? sel.model : fallback;
+function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; navigatorName?: string; plannerName?: string } {
+  const nav = cfg.navigator;
+  const brain = cfg.planner;
+  // Model for a provider:mode slot: the role that pins it supplies its own model
+  // (when set) or the role default; `base` lets a slot pass an explicit fallback
+  // (gemini honours cfg.googleCliModel); unpinned rungs take the cheap tier.
+  const modelFor = (provider: ProviderId, mode: PlannerMode, base?: string): string => {
+    if (nav.provider === provider && nav.mode === mode) return nav.model || base || defaultModelFor(provider, mode, 'navigator');
+    if (brain.provider === provider && brain.mode === mode) return brain.model || base || defaultModelFor(provider, mode, 'brain');
+    return base ?? defaultModelFor(provider, mode, 'navigator');
+  };
 
   const geminiKey = vault.get('gemini') ?? cfg.geminiApiKey;
   const anthropicKey = vault.get('anthropic') ?? process.env.ANTHROPIC_API_KEY;
@@ -266,26 +278,28 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; p
   const glmThinking = process.env.GLM_THINKING === 'enabled' ? 'enabled' : 'disabled';
 
   const byKey = new Map<string, ModelAdapter>();
+  // gemini keeps cfg.googleCliModel as its explicit base fallback (QA_GOOGLE_CLI_MODEL override).
   byKey.set('gemini:cli', new GoogleCliAdapter({ bin: cfg.googleCliBin, model: modelFor('gemini', 'cli', cfg.googleCliModel), env: cfg.googleCliEnv }));
   byKey.set('gemini:api', new ByokGeminiAdapter({ apiKey: geminiKey, model: modelFor('gemini', 'api', cfg.googleCliModel) }));
-  byKey.set('claude:api', new AnthropicAdapter({ apiKey: anthropicKey, model: modelFor('claude', 'api', defaultModelFor('claude', 'api')) }));
-  byKey.set('claude:cli', new CliPlannerAdapter({ bin: 'claude', model: modelFor('claude', 'cli', defaultModelFor('claude', 'cli')) }));
-  byKey.set('gpt:api', new OpenAiCompatibleAdapter({ apiKey: openaiKey, baseUrl: 'https://api.openai.com/v1', label: 'gpt', model: modelFor('gpt', 'api', defaultModelFor('gpt', 'api')) }));
+  byKey.set('claude:api', new AnthropicAdapter({ apiKey: anthropicKey, model: modelFor('claude', 'api') }));
+  byKey.set('claude:cli', new CliPlannerAdapter({ bin: 'claude', model: modelFor('claude', 'cli') }));
+  byKey.set('gpt:api', new OpenAiCompatibleAdapter({ apiKey: openaiKey, baseUrl: 'https://api.openai.com/v1', label: 'gpt', model: modelFor('gpt', 'api') }));
   // codex uses its own configured model when none is given (default is blank)
-  const codexModel = modelFor('gpt', 'cli', defaultModelFor('gpt', 'cli'));
+  const codexModel = modelFor('gpt', 'cli');
   byKey.set('gpt:cli', new CliPlannerAdapter({ bin: 'codex', model: codexModel || undefined }));
-  byKey.set('openrouter:api', new OpenAiCompatibleAdapter({ apiKey: openrouterKey, baseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter', 'api', defaultModelFor('openrouter', 'api')) }));
+  byKey.set('openrouter:api', new OpenAiCompatibleAdapter({ apiKey: openrouterKey, baseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter', 'api') }));
   // GLM-5.2 is a text-only reasoning model: supportsVision:false → it joins the
   // plan-step ladder only (Nano/Gemini still own visual verdicts). thinking is
   // disabled by default (GLM_THINKING=enabled to flip) so the planner stays fast.
-  byKey.set('glm:api', new OpenAiCompatibleAdapter({ apiKey: glmKey, baseUrl: glmBaseUrl, label: 'glm', model: modelFor('glm', 'api', defaultModelFor('glm', 'api')), supportsVision: false, extraBody: { thinking: { type: glmThinking } } }));
-  byKey.set('ollama:api', new OllamaAdapter({ model: modelFor('ollama', 'api', 'llama3.2-vision') }));
+  byKey.set('glm:api', new OpenAiCompatibleAdapter({ apiKey: glmKey, baseUrl: glmBaseUrl, label: 'glm', model: modelFor('glm', 'api'), supportsVision: false, extraBody: { thinking: { type: glmThinking } } }));
+  byKey.set('ollama:api', new OllamaAdapter({ model: modelFor('ollama', 'api') }));
 
-  // Pinned name: Nano (handled by the caller) pins to its own name — harmless,
-  // since Nano never plans and already leads the visual ladder. Otherwise the
-  // chosen provider:mode adapter's name.
-  const pinnedName = sel.provider === 'nano' ? 'nano' : byKey.get(`${sel.provider}:${sel.mode}`)?.name;
-  return { adapters: [...byKey.values()], pinnedName };
+  // Two pins, same lookup for each: nano resolves to name 'nano' (the router won't
+  // find it among plan-step/plan-goals candidates → falls through), otherwise the
+  // chosen provider:mode adapter's name. navigator → plan-step, brain → plan-goals.
+  const navigatorName = nav.provider === 'nano' ? 'nano' : byKey.get(`${nav.provider}:${nav.mode}`)?.name;
+  const plannerName = brain.provider === 'nano' ? 'nano' : byKey.get(`${brain.provider}:${brain.mode}`)?.name;
+  return { adapters: [...byKey.values()], navigatorName, plannerName };
 }
 
 export async function qaRun(task: string, url: string, opts: QaRunOptions = {}): Promise<QaRunResult> {
@@ -302,11 +316,17 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
   } else {
     progress('rung 0: Gemini Nano not available — ladder starts at rung 1 (run `qa nano --download` to enable $0 visual checks)');
   }
-  // The rest of the ladder + the user's pinned "browsing control AI" (cfg.planner).
-  const { adapters: ladder, pinnedName } = buildLadder(cfg, vault);
+  // The rest of the ladder + the user's two pins: navigator (plan-step, cheap) and
+  // brain (plan-goals, smart). Each leads its own ladder; fallback stays intact.
+  const { adapters: ladder, navigatorName, plannerName } = buildLadder(cfg, vault);
   adapters.push(...ladder);
-  if (pinnedName && pinnedName !== 'nano') progress(`browsing-control AI: ${pinnedName} (leads the planner ladder; fallback intact)`);
-  const router = new ModelRouter(adapters, { preferFreePlanner: cfg.preferFreePlanner, pinnedAdapter: pinnedName });
+  if (navigatorName && navigatorName !== 'nano') progress(`navigator: ${navigatorName} (leads the per-step ladder; fallback intact)`);
+  if (plannerName && plannerName !== 'nano') progress(`brain: ${plannerName} (leads the plan/re-plan ladder; consulted on stuck)`);
+  const router = new ModelRouter(adapters, {
+    preferFreePlanner: cfg.preferFreePlanner,
+    navigatorAdapter: navigatorName,
+    plannerAdapter: plannerName,
+  });
 
   const artifacts = new ArtifactStore(cfg.artifactsDir);
   progress(`run ${artifacts.runId}: "${task}" on ${url}`);

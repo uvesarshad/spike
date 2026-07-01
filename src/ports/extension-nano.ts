@@ -59,6 +59,10 @@ export class ExtensionNano implements NanoPort {
     );
   }
 
+  async navStep(prompt: string, schema: object): Promise<unknown> {
+    return this.bridge.call<unknown>('nano.navStep', { prompt, schema }, 2 * 60 * 1000);
+  }
+
   /** No-op: the bridge is owned by the caller. */
   async close(): Promise<void> {
     /* intentionally empty */

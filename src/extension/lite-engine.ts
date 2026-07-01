@@ -55,7 +55,10 @@ export interface LiteRunOptions {
   allowedHosts: string[];
   maxSteps?: number;
   keys: LiteKeys;
+  /** BRAIN — smart model, leads plan-goals (rare plan/re-plan call). */
   planner: PlannerSelection;
+  /** NAVIGATOR — cheap/free model, leads plan-step (the per-step call). */
+  navigator: PlannerSelection;
   /** chrome.debugger transport + lifecycle, injected by the SW. */
   browserDeps: LiteBrowserDeps;
   /** Nano (rung 0) callbacks; omit to skip the on-device visual rung. */
@@ -73,24 +76,34 @@ export interface LiteRunResult {
   done: Record<string, unknown>;
 }
 
-/** BYOK-only ladder (no CLI/Ollama rungs). Pins the user's chosen provider. */
-function buildLiteLadder(keys: LiteKeys, planner: PlannerSelection): {
+/** BYOK-only ladder (no CLI/Ollama rungs). Pins BOTH roles: navigator (plan-step)
+ * and brain/planner (plan-goals). All BYOK slots are api-mode; nano (navigator
+ * default) is handled separately as the rung-0 visual adapter, so a nano navigator
+ * resolves to name 'nano' here — not a plan-step candidate yet, so the router
+ * falls through to the next available cloud adapter. */
+function buildLiteLadder(keys: LiteKeys, planner: PlannerSelection, navigator: PlannerSelection): {
   adapters: ModelAdapter[];
-  pinnedName?: string;
+  plannerName?: string;
+  navigatorName?: string;
 } {
-  // chosen api-mode provider uses planner.model when set; others their default.
-  const modelFor = (provider: ProviderId, fallback: string): string =>
-    planner.provider === provider && planner.mode === 'api' && planner.model ? planner.model : fallback;
+  // Model for an api-mode slot: the role that pins it supplies its model (when set)
+  // or the role default; unpinned fallback rungs take the cheap navigator tier.
+  const modelFor = (provider: ProviderId): string => {
+    if (navigator.provider === provider && navigator.mode === 'api') return navigator.model || defaultModelFor(provider, 'api', 'navigator');
+    if (planner.provider === provider && planner.mode === 'api') return planner.model || defaultModelFor(provider, 'api', 'brain');
+    return defaultModelFor(provider, 'api', 'navigator');
+  };
 
   const byKey = new Map<ProviderId, ModelAdapter>();
-  byKey.set('gemini', new ByokGeminiAdapter({ apiKey: keys.gemini, model: modelFor('gemini', defaultModelFor('gemini', 'api')) }));
-  byKey.set('claude', new AnthropicAdapter({ apiKey: keys.anthropic, model: modelFor('claude', defaultModelFor('claude', 'api')), browserDirect: true }));
-  byKey.set('gpt', new OpenAiCompatibleAdapter({ apiKey: keys.openai, baseUrl: 'https://api.openai.com/v1', label: 'gpt', model: modelFor('gpt', defaultModelFor('gpt', 'api')) }));
-  byKey.set('openrouter', new OpenAiCompatibleAdapter({ apiKey: keys.openrouter, baseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter', defaultModelFor('openrouter', 'api')) }));
-  byKey.set('glm', new OpenAiCompatibleAdapter({ apiKey: keys.glm, baseUrl: 'https://api.z.ai/api/paas/v4', label: 'glm', model: modelFor('glm', defaultModelFor('glm', 'api')), supportsVision: false, extraBody: { thinking: { type: 'disabled' } } }));
+  byKey.set('gemini', new ByokGeminiAdapter({ apiKey: keys.gemini, model: modelFor('gemini') }));
+  byKey.set('claude', new AnthropicAdapter({ apiKey: keys.anthropic, model: modelFor('claude'), browserDirect: true }));
+  byKey.set('gpt', new OpenAiCompatibleAdapter({ apiKey: keys.openai, baseUrl: 'https://api.openai.com/v1', label: 'gpt', model: modelFor('gpt') }));
+  byKey.set('openrouter', new OpenAiCompatibleAdapter({ apiKey: keys.openrouter, baseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter') }));
+  byKey.set('glm', new OpenAiCompatibleAdapter({ apiKey: keys.glm, baseUrl: 'https://api.z.ai/api/paas/v4', label: 'glm', model: modelFor('glm'), supportsVision: false, extraBody: { thinking: { type: 'disabled' } } }));
 
-  const pinnedName = byKey.get(planner.provider)?.name;
-  return { adapters: [...byKey.values()], pinnedName };
+  const navigatorName = navigator.provider === 'nano' ? 'nano' : byKey.get(navigator.provider)?.name;
+  const plannerName = planner.provider === 'nano' ? 'nano' : byKey.get(planner.provider)?.name;
+  return { adapters: [...byKey.values()], plannerName, navigatorName };
 }
 
 /** Build the panel's vibe.config.get payload from chrome.storage values. Same
@@ -106,6 +119,9 @@ export function buildLiteConfig(keys: LiteKeys, settings: QaSettings): Record<st
       modes: PROVIDER_MODES[id],
       apiModelDefault: defaultModelFor(id, 'api'),
       cliModelDefault: defaultModelFor(id, 'cli'),
+      // role-aware defaults for the two Settings cards (navigator=cheap, brain=smart).
+      navModelDefault: defaultModelFor(id, 'api', 'navigator'),
+      brainModelDefault: defaultModelFor(id, 'api', 'brain'),
       needsKey,
       hasKey: needsKey ? Boolean(k[vaultName!]) : false,
       // lite mode can't drive CLI/Ollama rungs — flag unsupported providers so the
@@ -115,6 +131,7 @@ export function buildLiteConfig(keys: LiteKeys, settings: QaSettings): Record<st
   });
   return {
     planner: settings.planner,
+    navigator: settings.navigator,
     debugMode: settings.debugMode,
     debugAgent: settings.debugAgent,
     providers,
@@ -143,12 +160,12 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       }
     }
 
-    // rung 2 — BYOK ladder, pinned to the user's chosen provider.
-    const { adapters: ladder, pinnedName } = buildLiteLadder(opts.keys, opts.planner);
+    // rung 2 — BYOK ladder, with both pins: navigator (plan-step) + brain (plan-goals).
+    const { adapters: ladder, plannerName, navigatorName } = buildLiteLadder(opts.keys, opts.planner, opts.navigator);
     adapters.push(...ladder);
-    progress(`planner: ${pinnedName ?? opts.planner.provider} (BYOK; lite mode — no daemon)`);
+    progress(`navigator: ${navigatorName ?? opts.navigator.provider} · brain: ${plannerName ?? opts.planner.provider} (BYOK; lite mode — no daemon)`);
 
-    const router = new ModelRouter(adapters, { pinnedAdapter: pinnedName });
+    const router = new ModelRouter(adapters, { navigatorAdapter: navigatorName, plannerAdapter: plannerName });
     const artifacts = new BrowserArtifactStore();
     progress(`run ${artifacts.runId}: "${opts.task}" on ${opts.url}`);
 

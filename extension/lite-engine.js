@@ -1852,29 +1852,49 @@ var ModelRouter = class {
     this.adapters = [...adapters].sort((a, b) => a.rung - b.rung);
     this.preferFreePlanner = opts?.preferFreePlanner ?? false;
     this.pinnedAdapter = opts?.pinnedAdapter;
+    this.navigatorAdapter = opts?.navigatorAdapter;
+    this.plannerAdapter = opts?.plannerAdapter;
   }
   adapters;
   trace = [];
   preferFreePlanner;
   pinnedAdapter;
+  navigatorAdapter;
+  plannerAdapter;
+  /** True when at least one adapter can serve `cap` right now (availability-probed
+   * in parallel). The driver uses this to detect whether a BRAIN (plan-goals) is
+   * configured at all — if not, it runs navigator-only with a single implicit goal
+   * instead of failing the run. */
+  async hasCapability(cap) {
+    return (await this.candidates(cap)).length > 0;
+  }
+  /** Which pin leads the ladder for a role. plan-step → navigator, plan-goals →
+   * planner, each falling back to the back-compat pinnedAdapter; visual-verdict
+   * keeps pinnedAdapter behind the always-first rung-0 Nano. */
+  effectivePin(cap) {
+    if (cap === "plan-step") return this.navigatorAdapter ?? this.pinnedAdapter;
+    if (cap === "plan-goals") return this.plannerAdapter ?? this.pinnedAdapter;
+    return this.pinnedAdapter;
+  }
   async candidates(cap) {
     const supported = this.adapters.filter((a) => a.supports(cap));
     const ready = await Promise.all(supported.map((a) => a.available().catch(() => false)));
     const out = supported.filter((_, i) => ready[i]);
-    if (this.pinnedAdapter && out.some((a) => a.name === this.pinnedAdapter)) {
-      out.sort((a, b) => this.pinRank(a, cap) - this.pinRank(b, cap));
+    const pin = this.effectivePin(cap);
+    if (pin && out.some((a) => a.name === pin)) {
+      out.sort((a, b) => this.pinRank(a, cap, pin) - this.pinRank(b, cap, pin));
       return out;
     }
-    if (cap === "plan-step" && !this.preferFreePlanner && out.some((a) => a.rung === 2)) {
+    if ((cap === "plan-step" || cap === "plan-goals") && !this.preferFreePlanner && out.some((a) => a.rung === 2)) {
       out.sort((a, b) => planRank(a.rung) - planRank(b.rung));
     }
     return out;
   }
   /** Sort key when a pin is active: lower comes first. Nano keeps the visual lead;
-   * the pinned adapter leads otherwise; everyone else stays in rung order behind. */
-  pinRank(a, cap) {
+   * the role pin leads otherwise; everyone else stays in rung order behind. */
+  pinRank(a, cap, pin) {
     if (cap === "visual-verdict" && a.rung === 0) return -2;
-    if (a.name === this.pinnedAdapter) return -1;
+    if (a.name === pin) return -1;
     return a.rung;
   }
   /** Visual assertion: rung 0 first; an `uncertain` verdict escalates to the next rung. */
@@ -1928,9 +1948,20 @@ var ModelRouter = class {
     if (lastUncertain) return lastUncertain;
     throw new Error(`all visual-verdict adapters failed: ${lastError?.message}`);
   }
-  /** Planning: rung 1 by default (rung 0 never plans); falls down-ladder on errors. */
+  /** NAVIGATOR step (cheap, called every step): ladder led by navigatorAdapter,
+   * falls down-ladder on errors. Keeps the planJson name to minimise churn. */
   async planJson(prompt, schema, step) {
-    const ladder = await this.candidates("plan-step");
+    return this.planWith("plan-step", prompt, schema, step);
+  }
+  /** BRAIN plan (smart, rare): the sub-goal checklist / re-plan call. Ladder led
+   * by plannerAdapter; identical error-fallback + trace behaviour as planJson. */
+  async planGoals(prompt, schema, step) {
+    return this.planWith("plan-goals", prompt, schema, step);
+  }
+  /** Shared planning body for both roles: rung ordering per candidates(cap), rung
+   * 1 by default (rung 0 never plans); falls down-ladder on errors. */
+  async planWith(cap, prompt, schema, step) {
+    const ladder = await this.candidates(cap);
     if (ladder.length === 0) {
       throw new Error(
         "no planner available \u2014 install the Google CLI (free quota) or set GEMINI_API_KEY (BYOK)"
@@ -1944,7 +1975,7 @@ var ModelRouter = class {
         const result = await adapter.generateJson({ prompt, schema });
         this.trace.push({
           step,
-          capability: "plan-step",
+          capability: cap,
           rung: adapter.rung,
           adapter: adapter.name,
           ms: Date.now() - t0,
@@ -1956,7 +1987,7 @@ var ModelRouter = class {
         lastError = e instanceof Error ? e : new Error(String(e));
         this.trace.push({
           step,
-          capability: "plan-step",
+          capability: cap,
           rung: adapter.rung,
           adapter: adapter.name,
           ms: Date.now() - t0,
@@ -6161,11 +6192,15 @@ var ActionSchema = external_exports.discriminatedUnion("type", [
 var PlanResultSchema = external_exports.object({
   thought: external_exports.string(),
   /** 1-3 actions; the loop may discard the tail of the batch (see loop.ts). */
-  actions: external_exports.array(ActionSchema).min(1).max(3)
+  actions: external_exports.array(ActionSchema).min(1).max(3).optional(),
+  goalComplete: external_exports.boolean().optional(),
+  blocked: external_exports.string().optional()
+}).refine((r) => !!(r.actions?.length || r.goalComplete || r.blocked), {
+  message: "navigator must return actions, goalComplete, or blocked"
 });
 var PLAN_JSON_SCHEMA = {
   type: "object",
-  required: ["thought", "actions"],
+  required: ["thought"],
   additionalProperties: false,
   properties: {
     thought: { type: "string", description: "one short sentence of reasoning" },
@@ -6173,7 +6208,7 @@ var PLAN_JSON_SCHEMA = {
       type: "array",
       minItems: 1,
       maxItems: 3,
-      description: "1-3 actions to run in sequence; only batch ones independent of each other",
+      description: "1-3 actions to run in sequence; only batch ones independent of each other. Omit when signalling goalComplete or blocked.",
       items: {
         type: "object",
         required: ["type"],
@@ -6192,7 +6227,43 @@ var PLAN_JSON_SCHEMA = {
           reason: { type: "string" }
         }
       }
+    },
+    goalComplete: {
+      type: "boolean",
+      description: "true when the CURRENT GOAL is already satisfied by the page (instead of actions)"
+    },
+    blocked: {
+      type: "string",
+      description: "reason the page stops progress and you cannot proceed (instead of actions)"
     }
+  }
+};
+var GoalPlanSchema = external_exports.object({
+  thought: external_exports.string(),
+  goals: external_exports.array(external_exports.string()).min(1).optional(),
+  hint: external_exports.string().optional(),
+  verdict: external_exports.enum(["pass", "fail"]).optional(),
+  reason: external_exports.string().optional()
+});
+var GOAL_PLAN_JSON_SCHEMA = {
+  type: "object",
+  required: ["thought"],
+  additionalProperties: false,
+  properties: {
+    thought: { type: "string", description: "one short sentence of reasoning" },
+    goals: {
+      type: "array",
+      minItems: 1,
+      description: "ordered sub-goals for the navigator to execute one at a time",
+      items: { type: "string" }
+    },
+    hint: { type: "string", description: "a hint for the navigator instead of re-planning the goals" },
+    verdict: {
+      type: "string",
+      enum: ["pass", "fail"],
+      description: "final verdict when the task is already complete or is impossible"
+    },
+    reason: { type: "string", description: "why the verdict was reached" }
   }
 };
 
@@ -6205,28 +6276,75 @@ function consoleLines(entries) {
 function networkLines(entries) {
   return entries.filter((e) => e.failed).slice(-MAX_EVIDENCE_LINES).map((e) => `net: ${e.method} ${e.url} \u2192 ${e.status ?? e.errorText ?? "failed"}`);
 }
-function buildPlannerPrompt(ctx) {
-  const historyLines = ctx.history.map((s) => {
+function formatHistory(history) {
+  return history.map((s) => {
     const bits = [`${s.index}. ${s.description} \u2192 ${s.ok ? "ok" : `FAILED: ${s.error ?? "unknown"}`}`];
     bits.push(...consoleLines(s.console).map((l) => `   ${l}`));
     bits.push(...networkLines(s.network).map((l) => `   ${l}`));
     if (s.visual) bits.push(`   visual verdict: ${s.visual.verdict} \u2014 ${s.visual.summary.slice(0, 150)}`);
     return bits.join("\n");
-  });
-  return `You are a browser QA agent. You control a real Chrome page one action at a time.
+  }).join("\n");
+}
+function goalChecklist(goals, currentGoal) {
+  return goals.map((g, i) => `${i === currentGoal ? "\u2192" : " "} ${i + 1}. ${g}`).join("\n");
+}
+function buildGoalPlannerPrompt(ctx) {
+  const escalating = !!(ctx.failure || ctx.goals?.length || ctx.currentGoal !== void 0);
+  const checklist = ctx.goals?.length ? goalChecklist(ctx.goals, ctx.currentGoal ?? 0) : "";
+  const historyLines = ctx.history?.length ? formatHistory(ctx.history) : "";
+  return `You are the PLANNER (the "brain") of a browser QA agent. You do NOT drive the page yourself \u2014 a separate NAVIGATOR clicks, types, and looks at the page to carry out each goal you set. Your job is to turn the task into an ordered checklist of concrete sub-goals the navigator can execute one at a time.
 
 TASK: ${ctx.task}
 
+CURRENT URL: ${ctx.url}
+
+CURRENT PAGE (accessibility tree; the navigator references nodeIds like n7 \u2014 you do not):
+${ctx.axText}
+${escalating ? `
+The navigator is STUCK and has escalated to you.
+${checklist ? `PLAN SO FAR (\u2192 marks the goal it was on):
+${checklist}
+` : ""}${ctx.failure ? `WHY IT STOPPED: ${ctx.failure}
+` : ""}${historyLines ? `ACTIONS SO FAR (with any errors/console/network evidence):
+${historyLines}
+` : ""}
+Decide how to unblock the run \u2014 return ONE of:
+- REVISED remaining "goals": drop the ones already done and rewrite the rest so the navigator can succeed.
+- a short "hint": tell the navigator how to get past the current goal (the plan stands).
+- a "verdict" ("pass" or "fail") with a "reason": use this only if the task is already complete or is genuinely impossible from here.
+` : `
+Produce an ordered checklist of sub-goals. Rules:
+- Each goal is ONE concrete outcome the navigator can achieve (e.g. "log in with the given credentials", "add the widget to the cart", "reach the order confirmation").
+- Keep the list short \u2014 usually 2-6 goals \u2014 in the order they must happen.
+- The last goal must be the one that proves the task is done.
+- Do NOT reference nodeIds or individual clicks; those are the navigator's job.
+`}
+Respond with ONLY JSON: {"thought":"<one short sentence>","goals":["...","..."]}
+${escalating ? 'Instead of "goals" you may return {"thought":"...","hint":"..."} or {"thought":"...","verdict":"pass"|"fail","reason":"..."}.' : 'Or, if the task is impossible from here, return {"thought":"...","verdict":"fail","reason":"..."}.'}`;
+}
+function buildNavigatorPrompt(ctx) {
+  const checklist = goalChecklist(ctx.goals, ctx.currentGoal);
+  const historyLines = ctx.history.length ? formatHistory(ctx.history) : "";
+  return `You are the NAVIGATOR of a browser QA agent. You control a real Chrome page one step at a time to carry out the CURRENT GOAL the planner gave you.
+
+TASK: ${ctx.task}
+
+CURRENT GOAL: ${ctx.goal}
+GOAL CHECKLIST (\u2192 is the one you are on now):
+${checklist}
+${ctx.hint ? `
+PLANNER HINT: ${ctx.hint}
+` : ""}
 CURRENT URL: ${ctx.url}
 STEP: ${ctx.stepIndex + 1} of max ${ctx.maxSteps}
 
 CURRENT PAGE (accessibility tree; nodeIds like n7 are what you reference in actions):
 ${ctx.axText}
 
-${ctx.history.length ? `ACTIONS SO FAR (with any errors/console/network evidence they caused):
-${historyLines.join("\n")}` : "No actions taken yet."}
+${historyLines ? `ACTIONS SO FAR (with any errors/console/network evidence they caused):
+${historyLines}` : "No actions taken yet."}
 
-Decide the next 1-3 actions. Rules:
+Work on the CURRENT GOAL. Decide the next 1-3 actions. Rules:
 - Interact via nodeIds from the tree above (click/type). nodeIds change every step \u2014 only use ids from THIS tree.
 - typing into a field REPLACES its content; no need to clear first.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
@@ -6235,6 +6353,8 @@ Decide the next 1-3 actions. Rules:
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
 - Do not repeat an action that already failed twice.
 - If the task references a stored secret like {{secret:NAME}}, pass that placeholder VERBATIM as the text of a type action \u2014 never invent its value.
+- Return goalComplete: true (INSTEAD of actions) when the CURRENT GOAL is already satisfied by the page \u2014 the planner then advances you to the next goal.
+- Return blocked: "<reason>" (INSTEAD of actions) when the page shows an error that stops progress or you cannot proceed \u2014 do NOT repeat a failed action; the planner will re-plan.
 
 BATCHING: PREFER returning 2-3 actions when you are confident they are independent of each other's outcomes \u2014 this is much faster. The actions run in order against THIS tree. Examples:
 - fill several fields then click submit: [type email, type password, click "Sign in"].
@@ -6253,12 +6373,18 @@ Action types:
 - {"type":"wait","ms":number}
 - {"type":"finish","verdict":"pass"|"fail","reason":string}
 
-Respond with ONLY JSON: {"thought": "<one short sentence>", "actions": [{...}, ...]}
+Respond with ONLY JSON, ONE of:
+- {"thought":"<one short sentence>","actions":[{...}, ...]}
+- {"thought":"<one short sentence>","goalComplete":true}
+- {"thought":"<one short sentence>","blocked":"<reason>"}
 Example: {"thought":"Fill the login form and submit it.","actions":[{"type":"type","nodeId":"n4","text":"test@test.com"},{"type":"type","nodeId":"n6","text":"pw"},{"type":"click","nodeId":"n8"}]}`;
 }
 
 // src/driver/loop.ts
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var DEFAULT_MAX_STEPS = 40;
+var DEFAULT_PER_GOAL_STEPS = 12;
+var MAX_BRAIN_ESCALATIONS = 2;
 var SECRET_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
 var SecretNotFoundError = class extends Error {
 };
@@ -6352,6 +6478,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
   const allowedHosts = opts.allowedHosts ?? ["localhost", "127.0.0.1"];
   const vault = opts.vault;
   const signal = opts.signal;
+  const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
+  const perGoalMaxSteps = opts.perGoalMaxSteps ?? Math.min(maxSteps, DEFAULT_PER_GOAL_STEPS);
   await browser.navigate(url);
   browser.drainConsole();
   browser.drainNetwork();
@@ -6359,46 +6487,265 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
   let lastBatchFirstSig = null;
   let lastSnapshotAx = null;
   let done = false;
-  while (stepIndex < opts.maxSteps && !done) {
+  let goals = [];
+  let currentGoal = 0;
+  let hint;
+  let stepsInGoal = 0;
+  let brainEscalations = 0;
+  let brainAvailable = true;
+  const escalate = async (failure) => {
     if (signal?.aborted) {
       reason = "cancelled by user";
+      return "end";
+    }
+    if (!brainAvailable) {
+      const visibleErr = visibleErrorText(lastSnapshotAx?.text);
+      verdict = "uncertain";
+      reason = `stuck: ${failure}` + (visibleErr ? ` \u2014 page shows: "${visibleErr}" (likely the real cause)` : "");
+      return "end";
+    }
+    if (brainEscalations >= MAX_BRAIN_ESCALATIONS) {
+      const visibleErr = visibleErrorText(lastSnapshotAx?.text);
+      verdict = "uncertain";
+      reason = `stuck: ${failure}` + (visibleErr ? ` \u2014 page shows: "${visibleErr}" (likely the real cause)` : "") + " \u2014 the planner could not recover";
+      return "end";
+    }
+    brainEscalations++;
+    const ax = await browser.axTree();
+    lastSnapshotAx = ax;
+    const nowUrl = await browser.url();
+    onStep({ index: stepIndex, kind: "plan", text: `Stuck \u2014 asking the planner: ${failure.slice(0, 80)}` });
+    let gp;
+    try {
+      gp = await planGoalsOnce(router, {
+        prompt: buildGoalPlannerPrompt({
+          task,
+          url: nowUrl,
+          axText: ax.text,
+          history: steps,
+          goals,
+          currentGoal,
+          failure
+        }),
+        step: stepIndex
+      });
+    } catch (e) {
+      verdict = "uncertain";
+      reason = `planner failed while recovering from "${failure}": ${e instanceof Error ? e.message : e}`;
+      return "end";
+    }
+    if (gp.verdict) {
+      verdict = gp.verdict;
+      reason = gp.reason ?? failure;
+      if (verdict === "fail" && !failingStep) failingStep = lastInteraction(steps);
+      return "end";
+    }
+    if (gp.goals && gp.goals.length) {
+      goals = [...goals.slice(0, currentGoal), ...gp.goals];
+      hint = gp.hint;
+      stepsInGoal = 0;
+      lastBatchFirstSig = null;
+      onStep({
+        index: stepIndex,
+        kind: "plan",
+        text: `Re-planned ${gp.goals.length} goal${gp.goals.length === 1 ? "" : "s"}: ${gp.goals.join(" \u2192 ").slice(0, 140)}`
+      });
+      return "continue";
+    }
+    if (gp.hint) {
+      hint = gp.hint;
+      lastBatchFirstSig = null;
+      onStep({ index: stepIndex, kind: "plan", text: `Planner hint: ${gp.hint.slice(0, 100)}` });
+      return "continue";
+    }
+    verdict = "uncertain";
+    reason = `stuck: ${failure} \u2014 the planner offered no new plan`;
+    return "end";
+  };
+  const confirmPass = async (i, record, reasonText) => {
+    const png = await browser.screenshot();
+    record.screenshot = artifacts.saveScreenshot(i, png);
+    const confirm = await router.visualVerdict(
+      png,
+      `The task "${task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
+      i
+    );
+    record.visual = confirm;
+    if (confirm.verdict === "pass") {
+      verdict = "pass";
+      reason = reasonText;
+      return "pass";
+    }
+    if (!brainAvailable) {
+      verdict = confirm.verdict === "fail" ? "fail" : "uncertain";
+      reason = `navigator declared success but the confirmation visual was ${confirm.verdict}: ${confirm.summary}` + (confirm.issues.length ? ` \u2014 ${confirm.issues.join("; ")}` : "");
+      if (verdict === "fail") failingStep = { index: i, action: record.action, description: record.description };
+      return "end";
+    }
+    return escalate(
+      `navigator declared success but the confirmation visual was ${confirm.verdict}: ${confirm.summary}` + (confirm.issues.length ? ` \u2014 ${confirm.issues.join("; ")}` : "")
+    );
+  };
+  const runFinishPass = async (reasonText) => {
+    const i = stepIndex++;
+    stepsInGoal++;
+    const action = { type: "finish", verdict: "pass", reason: reasonText };
+    const record = {
+      index: i,
+      action,
+      description: describeAction(action),
+      ok: true,
+      console: [],
+      network: [],
+      ts: Date.now()
+    };
+    steps.push(record);
+    let outcome;
+    try {
+      outcome = await confirmPass(i, record, reasonText);
+    } catch (e) {
+      record.ok = false;
+      record.error = e instanceof Error ? e.message : String(e);
+      verdict = "uncertain";
+      reason = `could not confirm success: ${record.error}`;
+      outcome = "end";
+    }
+    await sleep(150);
+    record.console = browser.drainConsole();
+    record.network = browser.drainNetwork();
+    artifacts.appendAudit({
+      ts: record.ts,
+      runId: artifacts.runId,
+      action: action.type,
+      target: void 0,
+      url: await browser.url(),
+      ok: record.ok
+    });
+    onStep({ index: i, kind: stepKind(action), text: humanizeAction(action), ok: record.ok });
+    return outcome;
+  };
+  brainAvailable = await router.hasCapability("plan-goals");
+  if (!brainAvailable) {
+    goals = [task];
+    onStep({ index: stepIndex, kind: "plan", text: "No planner configured \u2014 navigating directly." });
+  } else {
+    const ax = await browser.axTree();
+    lastSnapshotAx = ax;
+    const planUrl = await browser.url();
+    onStep({ index: stepIndex, kind: "plan", text: "Planning goals\u2026" });
+    try {
+      const goalPlan = await planGoalsOnce(router, {
+        prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text }),
+        step: stepIndex
+      });
+      if (goalPlan.verdict) {
+        verdict = goalPlan.verdict;
+        reason = goalPlan.reason ?? `planner decided ${goalPlan.verdict} before any steps were needed`;
+        if (verdict === "fail") failingStep = lastInteraction(steps);
+        done = true;
+      } else if (goalPlan.goals && goalPlan.goals.length) {
+        goals = goalPlan.goals;
+        onStep({
+          index: stepIndex,
+          kind: "plan",
+          text: `Planned ${goals.length} goal${goals.length === 1 ? "" : "s"}: ${goals.join(" \u2192 ").slice(0, 160)}`
+        });
+      } else {
+        reason = "planner returned no goals to execute";
+        done = true;
+      }
+    } catch (e) {
+      brainAvailable = false;
+      goals = [task];
+      onStep({
+        index: stepIndex,
+        kind: "plan",
+        text: `Planner unavailable (${e instanceof Error ? e.message.slice(0, 60) : e}) \u2014 navigating directly.`
+      });
+    }
+  }
+  while (stepIndex < maxSteps && !done) {
+    if (signal?.aborted) {
+      reason = "cancelled by user";
+      break;
+    }
+    if (currentGoal >= goals.length) {
+      const outcome = await runFinishPass(`all ${goals.length} goals completed`);
+      if (outcome === "continue") continue;
       break;
     }
     const ax = await browser.axTree();
     lastSnapshotAx = ax;
     const batchUrl = await browser.url();
-    onStep({ index: stepIndex, kind: "plan", text: "Planning next step\u2026" });
+    onStep({
+      index: stepIndex,
+      kind: "plan",
+      text: `Planning next step (goal ${currentGoal + 1}/${goals.length})\u2026`
+    });
     let plan;
     try {
-      plan = await planOnce(router, {
-        prompt: buildPlannerPrompt({
+      plan = await navigateOnce(router, {
+        prompt: buildNavigatorPrompt({
           task,
           url: batchUrl,
           axText: ax.text,
+          goal: goals[currentGoal],
+          goals,
+          currentGoal,
           history: steps,
           stepIndex,
-          maxSteps: opts.maxSteps
+          maxSteps,
+          hint
         }),
         step: stepIndex
       });
     } catch (e) {
-      reason = `planner failed: ${e instanceof Error ? e.message : e}`;
-      break;
+      const outcome = await escalate(`navigator failed: ${e instanceof Error ? e.message : e}`);
+      if (outcome === "end") break;
+      continue;
+    }
+    if (plan.blocked) {
+      const outcome = await escalate(`navigator blocked: ${plan.blocked}`);
+      if (outcome === "end") break;
+      continue;
+    }
+    if (plan.goalComplete) {
+      currentGoal++;
+      hint = void 0;
+      stepsInGoal = 0;
+      brainEscalations = 0;
+      if (currentGoal >= goals.length) {
+        const outcome = await runFinishPass(`completed all ${goals.length} goals`);
+        if (outcome === "continue") continue;
+        break;
+      }
+      onStep({ index: stepIndex, kind: "plan", text: `Goal done \u2192 next: ${goals[currentGoal].slice(0, 100)}` });
+      continue;
     }
     let actions = plan.actions;
+    if (!actions || actions.length === 0) {
+      const outcome = await escalate("navigator returned neither actions nor a goal outcome");
+      if (outcome === "end") break;
+      continue;
+    }
     if (actions[0].type === "finish" || actions[0].type === "assert_visual" || actions[0].type === "assert_dom") {
       actions = [actions[0]];
     }
     const firstSig = actions.length === 1 ? JSON.stringify(actions[0]) : null;
     if (firstSig !== null && firstSig === lastBatchFirstSig && steps.length >= 2 && JSON.stringify(steps[steps.length - 1].action) === firstSig && JSON.stringify(steps[steps.length - 2].action) === firstSig) {
       const visibleErr = visibleErrorText(lastSnapshotAx?.text);
-      reason = `planner repeated the same action 3\xD7: ${describeAction(actions[0])}` + (visibleErr ? ` \u2014 page shows: "${visibleErr}" (likely the real cause)` : "");
-      break;
+      const outcome = await escalate(
+        `navigator repeated the same action 3\xD7: ${describeAction(actions[0])}` + (visibleErr ? ` \u2014 page shows: "${visibleErr}" (likely the real cause)` : "")
+      );
+      if (outcome === "end") break;
+      lastBatchFirstSig = null;
+      continue;
     }
     lastBatchFirstSig = firstSig;
     let aborted = false;
     let readOnlyBlock = null;
-    for (let a = 0; a < actions.length && stepIndex < opts.maxSteps; a++) {
+    let finishReplan = false;
+    for (let a = 0; a < actions.length && stepIndex < maxSteps; a++) {
       const action = actions[a];
       if (signal?.aborted) {
         aborted = true;
@@ -6413,6 +6760,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         }
       }
       const i = stepIndex++;
+      stepsInGoal++;
       const record = {
         index: i,
         thought: a === 0 ? plan.thought : void 0,
@@ -6446,22 +6794,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             reason = action.reason;
             failingStep = lastInteraction(steps) ?? { index: i, action, description: record.description };
           } else {
-            const png = await browser.screenshot();
-            record.screenshot = artifacts.saveScreenshot(i, png);
-            const confirm = await router.visualVerdict(
-              png,
-              `The task "${task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
-              i
-            );
-            record.visual = confirm;
-            if (confirm.verdict === "fail") {
-              verdict = "fail";
-              reason = `planner claimed success but the confirmation visual check failed: ${confirm.summary}`;
-              failingStep = { index: i, action, description: record.description };
-            } else {
-              verdict = "pass";
-              reason = action.reason;
-            }
+            const outcome = await confirmPass(i, record, action.reason);
+            if (outcome === "continue") finishReplan = true;
           }
         } else if (action.type === "assert_visual") {
           const png = await browser.screenshot();
@@ -6510,7 +6844,11 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         text: humanizeAction(action, record.target),
         ok: record.ok
       });
+      if (record.ok && (action.type === "click" || action.type === "type" || action.type === "navigate")) {
+        brainEscalations = 0;
+      }
       if (verdict !== "uncertain" || action.type === "finish") {
+        if (finishReplan) break;
         done = true;
         break;
       }
@@ -6528,6 +6866,11 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       verdict = "uncertain";
       reason = `read-only mode: ${readOnlyBlock} is not in allowedHosts \u2014 add it via QA_ALLOWED_HOSTS or qa.config.json to allow interaction`;
       break;
+    }
+    if (!done && !finishReplan && stepsInGoal >= perGoalMaxSteps) {
+      const outcome = await escalate(`goal "${goals[currentGoal]}" ran ${stepsInGoal} steps without completing`);
+      if (outcome === "end") break;
+      stepsInGoal = 0;
     }
   }
   const lastStep = steps[steps.length - 1];
@@ -6563,7 +6906,17 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
     model_trace: router.trace,
     durationMs: Date.now() - t0,
     tokenEstimate: 0,
-    tokens: { cheapModelTotal: 0, cheapModelCached: 0, callsByRung: {}, verdictPayloadTokens: 0 }
+    tokens: {
+      cheapModelTotal: 0,
+      cheapModelCached: 0,
+      callsByRung: {},
+      verdictPayloadTokens: 0,
+      navigatorCalls: 0,
+      brainCalls: 0,
+      visualCalls: 0,
+      navigatorTokens: 0,
+      brainTokens: 0
+    }
   };
   report.evidence_paths = [
     ...steps.filter((s) => s.screenshot).map((s) => s.screenshot)
@@ -6589,17 +6942,41 @@ function computeTokens(r) {
   let cheapModelTotal = 0;
   let cheapModelCached = 0;
   const callsByRung = {};
+  let navigatorCalls = 0;
+  let brainCalls = 0;
+  let visualCalls = 0;
+  let navigatorTokens = 0;
+  let brainTokens = 0;
   for (const t of r.model_trace) {
     callsByRung[t.rung] = (callsByRung[t.rung] ?? 0) + 1;
     if (t.usage?.totalTokens) cheapModelTotal += t.usage.totalTokens;
     if (t.usage?.cachedTokens) cheapModelCached += t.usage.cachedTokens;
+    if (t.capability === "plan-step") {
+      navigatorCalls++;
+      if (t.usage?.totalTokens) navigatorTokens += t.usage.totalTokens;
+    } else if (t.capability === "plan-goals") {
+      brainCalls++;
+      if (t.usage?.totalTokens) brainTokens += t.usage.totalTokens;
+    } else if (t.capability === "visual-verdict") {
+      visualCalls++;
+    }
   }
   const verdictPayloadTokens = Math.ceil(
     JSON.stringify(r.steps.length ? slimForEstimate(r) : {}).length / 4
   );
-  return { cheapModelTotal, cheapModelCached, callsByRung, verdictPayloadTokens };
+  return {
+    cheapModelTotal,
+    cheapModelCached,
+    callsByRung,
+    verdictPayloadTokens,
+    navigatorCalls,
+    brainCalls,
+    visualCalls,
+    navigatorTokens,
+    brainTokens
+  };
 }
-async function planOnce(router, { prompt, step }) {
+async function navigateOnce(router, { prompt, step }) {
   const raw = await router.planJson(prompt, PLAN_JSON_SCHEMA, step);
   const parsed = PlanResultSchema.safeParse(raw);
   if (parsed.success) return parsed.data;
@@ -6613,7 +6990,23 @@ Respond again with ONLY valid JSON.`,
   );
   const retry = PlanResultSchema.safeParse(retryRaw);
   if (retry.success) return retry.data;
-  throw new Error(`planner returned invalid actions twice: ${retry.error.message.slice(0, 200)}`);
+  throw new Error(`navigator returned invalid actions twice: ${retry.error.message.slice(0, 200)}`);
+}
+async function planGoalsOnce(router, { prompt, step }) {
+  const raw = await router.planGoals(prompt, GOAL_PLAN_JSON_SCHEMA, step);
+  const parsed = GoalPlanSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  const retryRaw = await router.planGoals(
+    `${prompt}
+
+Your previous response was invalid: ${parsed.error.message.slice(0, 300)}
+Respond again with ONLY valid JSON.`,
+    GOAL_PLAN_JSON_SCHEMA,
+    step
+  );
+  const retry = GoalPlanSchema.safeParse(retryRaw);
+  if (retry.success) return retry.data;
+  throw new Error(`brain returned an invalid goal plan twice: ${retry.error.message.slice(0, 200)}`);
 }
 async function executeWithRetry(browser, action, planTree) {
   try {
@@ -6937,12 +7330,14 @@ var NanoAdapter = class {
     }
   }
   supports(cap) {
-    return cap === "visual-verdict";
+    return cap === "visual-verdict" || cap === "plan-step";
   }
   async generateJson(req) {
-    if (!req.imagePng) throw new Error("nano adapter requires an image");
-    const { verdict } = await this.nano.verdict(req.imagePng, req.prompt);
-    return verdict;
+    if (req.imagePng) {
+      const { verdict } = await this.nano.verdict(req.imagePng, req.prompt);
+      return verdict;
+    }
+    return this.nano.navStep(req.prompt, req.schema);
   }
 };
 
@@ -7419,6 +7814,9 @@ var LiteNano = class {
     const dataUrl = "data:image/png;base64," + png.toString("base64");
     return this.deps.verdict(dataUrl, task);
   }
+  async navStep(prompt, schema) {
+    return this.deps.navStep(prompt, schema);
+  }
   async close() {
   }
 };
@@ -7465,16 +7863,21 @@ var BrowserArtifactStore = class {
 // src/vibe/settings-data.ts
 init_buffer_shim();
 var DEFAULT_SETTINGS = {
-  // Default planner: claude CLI. The old default (gemini:cli, free Gemini quota)
-  // died on 2026-06-18 (IneligibleTierError), so it's a broken out-of-box choice.
-  // claude CLI needs no API key and is near-ubiquitous in this tool's audience;
-  // if it's absent the router falls through the ladder to codex/BYOK/Ollama.
-  // (Lite mode overrides this to a BYOK provider — it has no CLI rungs.)
-  planner: { provider: "claude", mode: "cli" },
+  // BRAIN default: Claude Sonnet via BYOK. The brain is consulted rarely (initial
+  // plan + on stuck), so paying for a smart model barely affects run cost. Out of
+  // the box the user has no Anthropic key yet → the panel must prompt for one and
+  // the ladder degrades gracefully (falls through to any other configured planner).
+  // (The daemon's config.ts keeps claude:cli as ITS brain default — it has CLI
+  // rungs; lite/BYOK has none, so the shared default here is api.)
+  planner: { provider: "claude", mode: "api", model: "" },
+  // NAVIGATOR default: Gemini Nano, on-device and $0. It does the frequent grunt
+  // work every step, so cheap/free is the whole point; cloud fallback applies
+  // automatically when Nano can't drive a step (or has no plan-step support yet).
+  navigator: { provider: "nano", mode: "ondevice" },
   debugMode: "prompt",
   debugAgent: "auto"
 };
-var DEFAULT_MODELS = {
+var NAVIGATOR_MODELS = {
   "gemini:api": "gemini-3-flash-preview",
   "gemini:cli": "gemini-3-flash-preview",
   "claude:api": "claude-haiku-4-5",
@@ -7487,8 +7890,23 @@ var DEFAULT_MODELS = {
   "glm:api": "glm-5.2"
   // z.ai GLM-5.2 (text-only reasoning model; planner-only)
 };
-function defaultModelFor(provider, mode) {
-  return DEFAULT_MODELS[`${provider}:${mode}`] ?? "";
+var BRAIN_MODELS = {
+  "gemini:api": "gemini-3-flash-preview",
+  // no confirmed pro id — keep flash
+  "gemini:cli": "gemini-3-flash-preview",
+  "claude:api": "claude-sonnet-5",
+  "claude:cli": "claude-sonnet-5",
+  "gpt:api": "gpt-4o",
+  "gpt:cli": "",
+  // codex uses its own configured model
+  "ollama:api": "llama3.2-vision",
+  "openrouter:api": "anthropic/claude-3.5-sonnet",
+  "glm:api": "glm-5.2"
+  // z.ai GLM-5.2 (text-only reasoning model)
+};
+function defaultModelFor(provider, mode, role) {
+  const table = role === "brain" ? BRAIN_MODELS : NAVIGATOR_MODELS;
+  return table[`${provider}:${mode}`] ?? "";
 }
 function isSafeModelId(model) {
   return /^[A-Za-z0-9._:/+-]+$/.test(model);
@@ -7583,8 +8001,18 @@ function renderPlainReport(report) {
       for (const c of calls) lines.push(`- ${describeCall(c)}`);
     }
   }
+  if (report.tokens) {
+    const t = report.tokens;
+    lines.push("");
+    lines.push(
+      `Cost: ${t.navigatorCalls} navigator step${t.navigatorCalls === 1 ? "" : "s"} \xB7 ${t.brainCalls} brain call${t.brainCalls === 1 ? "" : "s"} \xB7 verdict payload ~${fmtTokens(t.verdictPayloadTokens)} tok`
+    );
+  }
   lines.push("");
   return lines.join("\n");
+}
+function fmtTokens(n) {
+  return n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : `${n}`;
 }
 function expectedFromTask(task) {
   const t = task.trim();
@@ -7678,16 +8106,21 @@ function baseName(p) {
 }
 
 // src/extension/lite-engine.ts
-function buildLiteLadder(keys, planner) {
-  const modelFor = (provider, fallback) => planner.provider === provider && planner.mode === "api" && planner.model ? planner.model : fallback;
+function buildLiteLadder(keys, planner, navigator) {
+  const modelFor = (provider) => {
+    if (navigator.provider === provider && navigator.mode === "api") return navigator.model || defaultModelFor(provider, "api", "navigator");
+    if (planner.provider === provider && planner.mode === "api") return planner.model || defaultModelFor(provider, "api", "brain");
+    return defaultModelFor(provider, "api", "navigator");
+  };
   const byKey = /* @__PURE__ */ new Map();
-  byKey.set("gemini", new ByokGeminiAdapter({ apiKey: keys.gemini, model: modelFor("gemini", defaultModelFor("gemini", "api")) }));
-  byKey.set("claude", new AnthropicAdapter({ apiKey: keys.anthropic, model: modelFor("claude", defaultModelFor("claude", "api")), browserDirect: true }));
-  byKey.set("gpt", new OpenAiCompatibleAdapter({ apiKey: keys.openai, baseUrl: "https://api.openai.com/v1", label: "gpt", model: modelFor("gpt", defaultModelFor("gpt", "api")) }));
-  byKey.set("openrouter", new OpenAiCompatibleAdapter({ apiKey: keys.openrouter, baseUrl: "https://openrouter.ai/api/v1", label: "openrouter", model: modelFor("openrouter", defaultModelFor("openrouter", "api")) }));
-  byKey.set("glm", new OpenAiCompatibleAdapter({ apiKey: keys.glm, baseUrl: "https://api.z.ai/api/paas/v4", label: "glm", model: modelFor("glm", defaultModelFor("glm", "api")), supportsVision: false, extraBody: { thinking: { type: "disabled" } } }));
-  const pinnedName = byKey.get(planner.provider)?.name;
-  return { adapters: [...byKey.values()], pinnedName };
+  byKey.set("gemini", new ByokGeminiAdapter({ apiKey: keys.gemini, model: modelFor("gemini") }));
+  byKey.set("claude", new AnthropicAdapter({ apiKey: keys.anthropic, model: modelFor("claude"), browserDirect: true }));
+  byKey.set("gpt", new OpenAiCompatibleAdapter({ apiKey: keys.openai, baseUrl: "https://api.openai.com/v1", label: "gpt", model: modelFor("gpt") }));
+  byKey.set("openrouter", new OpenAiCompatibleAdapter({ apiKey: keys.openrouter, baseUrl: "https://openrouter.ai/api/v1", label: "openrouter", model: modelFor("openrouter") }));
+  byKey.set("glm", new OpenAiCompatibleAdapter({ apiKey: keys.glm, baseUrl: "https://api.z.ai/api/paas/v4", label: "glm", model: modelFor("glm"), supportsVision: false, extraBody: { thinking: { type: "disabled" } } }));
+  const navigatorName = navigator.provider === "nano" ? "nano" : byKey.get(navigator.provider)?.name;
+  const plannerName = planner.provider === "nano" ? "nano" : byKey.get(planner.provider)?.name;
+  return { adapters: [...byKey.values()], plannerName, navigatorName };
 }
 function buildLiteConfig(keys, settings) {
   const k = keys;
@@ -7699,6 +8132,9 @@ function buildLiteConfig(keys, settings) {
       modes: PROVIDER_MODES[id],
       apiModelDefault: defaultModelFor(id, "api"),
       cliModelDefault: defaultModelFor(id, "cli"),
+      // role-aware defaults for the two Settings cards (navigator=cheap, brain=smart).
+      navModelDefault: defaultModelFor(id, "api", "navigator"),
+      brainModelDefault: defaultModelFor(id, "api", "brain"),
       needsKey,
       hasKey: needsKey ? Boolean(k[vaultName]) : false,
       // lite mode can't drive CLI/Ollama rungs — flag unsupported providers so the
@@ -7708,6 +8144,7 @@ function buildLiteConfig(keys, settings) {
   });
   return {
     planner: settings.planner,
+    navigator: settings.navigator,
     debugMode: settings.debugMode,
     debugAgent: settings.debugAgent,
     providers,
@@ -7733,10 +8170,10 @@ async function runLite(opts) {
         progress(`rung 0: Gemini Nano ${a} \u2014 visual checks fall to the cloud model`);
       }
     }
-    const { adapters: ladder, pinnedName } = buildLiteLadder(opts.keys, opts.planner);
+    const { adapters: ladder, plannerName, navigatorName } = buildLiteLadder(opts.keys, opts.planner, opts.navigator);
     adapters.push(...ladder);
-    progress(`planner: ${pinnedName ?? opts.planner.provider} (BYOK; lite mode \u2014 no daemon)`);
-    const router = new ModelRouter(adapters, { pinnedAdapter: pinnedName });
+    progress(`navigator: ${navigatorName ?? opts.navigator.provider} \xB7 brain: ${plannerName ?? opts.planner.provider} (BYOK; lite mode \u2014 no daemon)`);
+    const router = new ModelRouter(adapters, { navigatorAdapter: navigatorName, plannerAdapter: plannerName });
     const artifacts = new BrowserArtifactStore();
     progress(`run ${artifacts.runId}: "${opts.task}" on ${opts.url}`);
     const report = await runDriverLoop(browser, router, artifacts, opts.task, opts.url, {

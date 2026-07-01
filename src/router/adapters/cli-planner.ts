@@ -1,11 +1,11 @@
 /* Generic CLI-planner adapter (rung 1) — drives a local coding-agent CLI
  * (claude, codex; gemini has its own richer adapter) as a cheap/free PLANNER.
  *
- * PLAN-STEP ONLY. Visual verdicts need an image, and headless image attach is
- * not reliable across these CLIs, so supports() rejects 'visual-verdict' — those
- * keep flowing to Nano / API / Ollama. The driver's planning is pure text (the
- * a11y tree), which is exactly what these CLIs do well at their cheap tiers
- * (claude haiku, gpt mini).
+ * PLANNER ONLY (plan-step + plan-goals). Visual verdicts need an image, and
+ * headless image attach is not reliable across these CLIs, so supports() rejects
+ * 'visual-verdict' — those keep flowing to Nano / API / Ollama. Both planner
+ * roles are pure text (the a11y tree / a compact digest), which is exactly what
+ * these CLIs do well at their cheap tiers (claude haiku, gpt mini).
  *
  * Spawn recipe mirrors google-cli.ts + auto-fix.ts: the bulky multi-line prompt
  * goes on STDIN (Windows argv can't carry newlines), the binary runs via a shell
@@ -56,7 +56,7 @@ export class CliPlannerAdapter implements ModelAdapter {
   }
 
   supports(cap: Capability): boolean {
-    return cap === 'plan-step';
+    return cap === 'plan-step' || cap === 'plan-goals';
   }
 
   async generateJson(req: JsonRequest): Promise<unknown> {

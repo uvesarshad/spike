@@ -52,12 +52,25 @@ export interface FailingStep {
  *    spent doing the looking — measured from envelope/usageMetadata counts.
  *  - callsByRung: how many model calls landed on each rung (rung 0 = $0 Nano).
  *  - verdictPayloadTokens: what the EXPENSIVE calling agent pays — the slim
- *    5-field report it reads back (~chars/4). This is `tokenEstimate`'s meaning. */
+ *    5-field report it reads back (~chars/4). This is `tokenEstimate`'s meaning.
+ *
+ * Per-role split (planner/navigator architecture) — grouped from model_trace by
+ * `capability`, this is the proof the split works: the smart BRAIN plans rarely
+ * (plan-goals) while the cheap NAVIGATOR does every step (plan-step), so
+ * brainCalls must NOT scale with step count.
+ *  - navigatorCalls / navigatorTokens: plan-step (cheap, every step).
+ *  - brainCalls / brainTokens: plan-goals (smart, rare — start + on stuck).
+ *  - visualCalls: visual-verdict checks (Nano first, $0). */
 export interface ReportTokens {
   cheapModelTotal: number;
   cheapModelCached: number;
   callsByRung: Record<number, number>;
   verdictPayloadTokens: number;
+  navigatorCalls: number;
+  brainCalls: number;
+  visualCalls: number;
+  navigatorTokens: number;
+  brainTokens: number;
 }
 
 export interface Report {

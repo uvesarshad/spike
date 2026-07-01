@@ -103,8 +103,25 @@ export function renderPlainReport(report: Report): string {
     }
   }
 
+  // One-line proof of the two-tier cost win: many cheap navigator steps, few
+  // smart brain calls. Absent on bare replay reports (no planner trace).
+  if (report.tokens) {
+    const t = report.tokens;
+    lines.push('');
+    lines.push(
+      `Cost: ${t.navigatorCalls} navigator step${t.navigatorCalls === 1 ? '' : 's'} · ` +
+        `${t.brainCalls} brain call${t.brainCalls === 1 ? '' : 's'} · ` +
+        `verdict payload ~${fmtTokens(t.verdictPayloadTokens)} tok`,
+    );
+  }
+
   lines.push('');
   return lines.join('\n');
+}
+
+/** Compact token count: "1.9K" for thousands, the raw number otherwise. */
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : `${n}`;
 }
 
 /* ---- fix prompt ------------------------------------------------------------ */

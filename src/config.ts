@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   SettingsStore,
+  DEFAULT_SETTINGS,
   type DebugAgent,
   type DebugMode,
   type PlannerSelection,
@@ -65,9 +66,12 @@ export interface QaConfig {
    * faster planning (rung-2 HTTP beats the CLI cold-spawn). Set true to keep free
    * quota first for plan-step. Visual verdicts are unaffected (Nano always first). */
   preferFreePlanner: boolean;
-  /** The user's chosen "browsing control AI" — pinned to the FRONT of the planner
-   * ladder (fallback still applies). From SettingsStore (panel/CLI). */
+  /** BRAIN — the smart model pinned to the FRONT of the plan-goals ladder (the
+   * rare plan/re-plan call; fallback still applies). From SettingsStore (panel/CLI). */
   planner: PlannerSelection;
+  /** NAVIGATOR — the cheap/free model pinned to the FRONT of the plan-step ladder
+   * (the per-step call; fallback still applies). From SettingsStore (panel/CLI). */
+  navigator: PlannerSelection;
   /** Debugging UX: 'prompt' = surface a paste-ready fix prompt; 'auto' = hand it
    * to a coding agent headlessly. */
   debugMode: DebugMode;
@@ -95,8 +99,12 @@ const DEFAULTS: QaConfig = {
   // Vibe-mode clips need a chrome.tabCapture recorder (planned).
   recordClip: false,
   preferFreePlanner: false,
-  // claude CLI by default — the former gemini:cli free tier is dead (see settings.ts).
+  // BRAIN default: claude CLI — the daemon HAS cli rungs and the former gemini:cli
+  // free tier is dead (see settings.ts). (This intentionally differs from
+  // DEFAULT_SETTINGS.planner, which is api because lite/BYOK has no cli rungs.)
   planner: { provider: 'claude', mode: 'cli' },
+  // NAVIGATOR default: shared with settings-data (Nano, on-device, $0).
+  navigator: DEFAULT_SETTINGS.navigator,
   debugMode: 'prompt',
   debugAgent: 'auto',
 };
@@ -134,22 +142,28 @@ function fromEnv(): Partial<QaConfig> {
   if (e.QA_ALLOWED_HOSTS) out.allowedHosts = e.QA_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
   if (e.QA_RECORD_CLIP) out.recordClip = e.QA_RECORD_CLIP !== '0' && e.QA_RECORD_CLIP !== 'false';
   if (e.QA_PREFER_FREE_PLANNER) out.preferFreePlanner = e.QA_PREFER_FREE_PLANNER !== '0' && e.QA_PREFER_FREE_PLANNER !== 'false';
-  // planner selection — env wins over the SettingsStore (power-users / tests).
+  // planner (BRAIN) selection — env wins over the SettingsStore (power-users / tests).
   const planner: Partial<PlannerSelection> = {};
   if (e.QA_PLANNER_PROVIDER && PROVIDERS.includes(e.QA_PLANNER_PROVIDER as ProviderId)) planner.provider = e.QA_PLANNER_PROVIDER as ProviderId;
   if (e.QA_PLANNER_MODE === 'api' || e.QA_PLANNER_MODE === 'cli') planner.mode = e.QA_PLANNER_MODE as PlannerMode;
   if (e.QA_PLANNER_MODEL) planner.model = e.QA_PLANNER_MODEL;
   if (Object.keys(planner).length) out.planner = planner as PlannerSelection;
+  // navigator selection — mirrors QA_PLANNER_* (also accepts 'ondevice' for nano).
+  const navigator: Partial<PlannerSelection> = {};
+  if (e.QA_NAVIGATOR_PROVIDER && PROVIDERS.includes(e.QA_NAVIGATOR_PROVIDER as ProviderId)) navigator.provider = e.QA_NAVIGATOR_PROVIDER as ProviderId;
+  if (e.QA_NAVIGATOR_MODE === 'api' || e.QA_NAVIGATOR_MODE === 'cli' || e.QA_NAVIGATOR_MODE === 'ondevice') navigator.mode = e.QA_NAVIGATOR_MODE as PlannerMode;
+  if (e.QA_NAVIGATOR_MODEL) navigator.model = e.QA_NAVIGATOR_MODEL;
+  if (Object.keys(navigator).length) out.navigator = navigator as PlannerSelection;
   if (e.QA_DEBUG_MODE === 'prompt' || e.QA_DEBUG_MODE === 'auto') out.debugMode = e.QA_DEBUG_MODE;
   if (e.QA_DEBUG_AGENT && DEBUG_AGENTS.includes(e.QA_DEBUG_AGENT as DebugAgent)) out.debugAgent = e.QA_DEBUG_AGENT as DebugAgent;
   return out;
 }
 
-/** The user's panel/CLI picks (planner + debug prefs). Folded in below env. */
+/** The user's panel/CLI picks (planner + navigator + debug prefs). Folded in below env. */
 function fromSettings(): Partial<QaConfig> {
   try {
     const s = new SettingsStore().read();
-    return { planner: s.planner, debugMode: s.debugMode, debugAgent: s.debugAgent };
+    return { planner: s.planner, navigator: s.navigator, debugMode: s.debugMode, debugAgent: s.debugAgent };
   } catch {
     return {};
   }
@@ -169,6 +183,15 @@ export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd(
     ...(settingsCfg.planner ?? {}),
     ...(envCfg.planner ?? {}),
     ...(overrides.planner ?? {}),
+  };
+  // navigator: same partial-merge precedence as planner (a lone QA_NAVIGATOR_MODEL
+  // must not wipe provider/mode).
+  merged.navigator = {
+    ...DEFAULTS.navigator,
+    ...(fileCfg.navigator ?? {}),
+    ...(settingsCfg.navigator ?? {}),
+    ...(envCfg.navigator ?? {}),
+    ...(overrides.navigator ?? {}),
   };
   return merged;
 }

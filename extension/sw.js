@@ -228,7 +228,8 @@ async function getKeys() {
 async function getSettings() {
   const s = (await storageGet('qaSettings')) || {};
   return {
-    planner: { ...DEFAULT_SETTINGS.planner, ...(s.planner || {}) },
+    planner: { ...DEFAULT_SETTINGS.planner, ...(s.planner || {}) },       // BRAIN role
+    navigator: { ...DEFAULT_SETTINGS.navigator, ...(s.navigator || {}) }, // NAVIGATOR role
     debugMode: s.debugMode || DEFAULT_SETTINGS.debugMode,
     debugAgent: s.debugAgent || DEFAULT_SETTINGS.debugAgent,
   };
@@ -255,7 +256,8 @@ async function liteSetSettings(patch) {
   const next = {
     debugMode: patch.debugMode || cur.debugMode,
     debugAgent: patch.debugAgent || cur.debugAgent,
-    planner: { ...cur.planner, ...(patch.planner || {}) },
+    planner: { ...cur.planner, ...(patch.planner || {}) },        // BRAIN role
+    navigator: { ...cur.navigator, ...(patch.navigator || {}) },  // NAVIGATOR role
   };
   await storageSet({ qaSettings: next });
   return next;
@@ -267,6 +269,7 @@ const liteNanoDeps = {
   avail: () => Promise.race([nanoAvail(), new Promise((r) => setTimeout(() => r('unavailable'), 10_000))]),
   warmup: () => withSwTimeout(nanoWarmup(), 120_000, 'nano.warmup'),
   verdict: (dataUrl, task) => withSwTimeout(nanoVerdict(dataUrl, task), 5 * 60_000, 'nano.verdict'),
+  navStep: (prompt, schema) => withSwTimeout(nanoNavStep(prompt, schema), 2 * 60_000, 'nano.navStep'),
 };
 
 /** chrome.debugger-backed browser deps bound to one tab, injected into runLite. */
@@ -300,9 +303,18 @@ async function runLiteFromPanel(port, msg) {
   }
   const settings = await getSettings();
   const keys = await getKeys();
-  const keyName = LITE_KEY_NAME[settings.planner.provider];
-  if (!keyName || !keys[keyName]) {
-    port.postMessage({ kind: 'error', message: `no API key for "${settings.planner.provider}" — open Settings and add one (lite mode is BYOK; no daemon).` });
+  // Brain (planner) key: required unless its provider needs none (e.g. ollama).
+  const brainProvider = settings.planner.provider;
+  const brainKeyName = LITE_KEY_NAME[brainProvider];
+  if (brainKeyName && !keys[brainKeyName]) {
+    port.postMessage({ kind: 'error', message: `Add your Brain (planner) API key in Settings — no "${brainProvider}" key found (lite mode is BYOK; no daemon).` });
+    return;
+  }
+  // Navigator key: required unless nano/ollama (they need no key).
+  const navProvider = settings.navigator.provider;
+  const navKeyName = LITE_KEY_NAME[navProvider];
+  if (navProvider !== 'nano' && navProvider !== 'ollama' && navKeyName && !keys[navKeyName]) {
+    port.postMessage({ kind: 'error', message: `Add your Navigator API key in Settings (or set Navigator to Nano) — no "${navProvider}" key found.` });
     return;
   }
   liteBusy = true;
@@ -318,7 +330,8 @@ async function runLiteFromPanel(port, msg) {
       url: msg.url,
       allowedHosts,
       keys,
-      planner: settings.planner,
+      planner: settings.planner,       // BRAIN role
+      navigator: settings.navigator,   // NAVIGATOR role
       browserDeps: makeLiteBrowserDeps(tabId),
       nanoDeps: liteNanoDeps,
       onProgress: (line) => broadcastToPanels({ kind: 'progress', line }),
@@ -789,6 +802,22 @@ async function nanoVerdict(dataUrl, task) {
   return callOffscreen('verdict', { dataUrl, task });
 }
 
+// NAVIGATOR step (Nano as the cheap per-step model): pick ONE action from the
+// a11y text. Text-only (no image); mirrors runner-assets.ts navStep + the
+// offscreen op. Rejects on non-JSON so the router falls to a cloud navigator.
+async function nanoNavStep(prompt, schema) {
+  if (nanoInSW()) {
+    const session = await LanguageModel.create(NANO_MODEL_OPTS);
+    const raw = await session.prompt(
+      [{ role: 'user', content: [{ type: 'text', value: prompt }] }],
+      { responseConstraint: schema },
+    );
+    session.destroy();
+    return JSON.parse(raw);
+  }
+  return callOffscreen('navStep', { prompt, schema });
+}
+
 // Offscreen → SW: nano download progress. The offscreen document streams
 // { target:'nano-progress', status } updates here; rebroadcast to panel ports.
 chrome.runtime.onMessage.addListener((msg) => {
@@ -932,6 +961,10 @@ async function handleRequest(msg) {
       }
       case 'nano.verdict': {
         result = await withSwTimeout(nanoVerdict(params.dataUrl, params.task), 5 * 60_000, 'nano.verdict');
+        break;
+      }
+      case 'nano.navStep': {
+        result = await withSwTimeout(nanoNavStep(params.prompt, params.schema), 2 * 60_000, 'nano.navStep');
         break;
       }
       case 'rec.start': {

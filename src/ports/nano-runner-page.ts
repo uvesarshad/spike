@@ -130,6 +130,14 @@ export class NanoRunnerPage implements NanoPort {
     );
   }
 
+  async navStep(prompt: string, schema: object): Promise<unknown> {
+    return evalIn<unknown>(
+      this.c,
+      `window.nano.navStep(${JSON.stringify(prompt)}, ${JSON.stringify(schema)})`,
+      { timeout: 2 * 60 * 1000 },
+    );
+  }
+
   /** Disconnect, leaving the tab + Chrome alive so the model stays warm. */
   async close(): Promise<void> {
     if (this.client) {

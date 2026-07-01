@@ -23,5 +23,10 @@ export interface NanoPort {
   /** Hold a session so the model stays in memory (~5.5s warm vs ~16.7s cold). */
   warmup(): Promise<void>;
   verdict(png: Buffer, task: string): Promise<{ verdict: NanoVerdict; ms: number }>;
+  /** NAVIGATOR step ($0): pick ONE action as JSON matching `schema` from a
+   * text-only prompt (the a11y tree + current sub-goal — no screenshot needed to
+   * reference a nodeId). Resolves the parsed JSON; rejects on non-JSON output so
+   * the router can fall through to a cloud navigator. Never used for plan-goals. */
+  navStep(prompt: string, schema: object): Promise<unknown>;
   close(): Promise<void>;
 }

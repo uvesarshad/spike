@@ -834,6 +834,12 @@ body {
   text-transform: uppercase;
   color: var(--muted);
 }
+.settings-group-sub {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin-top: -4px;
+}
 .settings-field-label {
   font-size: 11.5px;
   font-weight: 600;

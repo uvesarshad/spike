@@ -1,22 +1,52 @@
-/* The driver loop — a11y-tree-first, vision on demand.
+/* The driver loop — a11y-tree-first, vision on demand, two-tier model split.
  *
- * Per step: snapshot tree → planner picks ONE action → execute via the port →
- * drain console/network into the step record (exact per-step correlation).
- * Policies: step budget → uncertain; invalid planner JSON → one retry with the
- * validation error; action throw → one retry after re-resolving the target by
- * role+name in a fresh tree; same action 3× → uncertain; visual fail → run
- * fails; finish:pass → one confirmation visual before accepting. */
+ * A smart BRAIN plans ONCE (an ordered sub-goal checklist) and is re-consulted
+ * only when the cheap NAVIGATOR gets stuck; the navigator reads the page and
+ * picks 1-3 actions EVERY step. This makes brain cost ~O(stuck events) instead
+ * of O(steps), so a run can go long at near-navigator cost.
+ *
+ * Per navigator step: snapshot tree → navigator picks actions (or reports
+ * goalComplete / blocked) → execute via the port → drain console/network into
+ * the step record (exact per-step correlation).
+ * Escalate to the brain on: navigator `blocked`; same action 3× (was: end the
+ * run — now re-plans FIRST); invalid navigator JSON twice; a per-goal step
+ * overflow; or a finish:pass the confirmation visual disagrees with. Brain
+ * escalations without progress are capped so a truly stuck run ends honestly.
+ * Other policies unchanged: action throw → one retry after re-resolving the
+ * target by role+name in a fresh tree; visual fail → run fails; finish:pass →
+ * one confirmation visual before accepting; finish:fail → trusted. */
 
 import type { AxNode, AxSnapshot, BrowserPort } from '../ports/browser-port.js';
 import { firstError } from '../capture/console-network.js';
 import type { ModelRouter } from '../router/model-router.js';
 import type { ArtifactStore } from '../report/artifacts.js';
 import { describeAction, type FailingStep, type Report, type StepRecord, type RunVerdict } from '../report/report.js';
-import { PLAN_JSON_SCHEMA, PlanResultSchema, type Action, type PlanResult } from './actions.js';
-import { buildPlannerPrompt } from './planner-prompt.js';
+import {
+  GOAL_PLAN_JSON_SCHEMA,
+  GoalPlanSchema,
+  PLAN_JSON_SCHEMA,
+  PlanResultSchema,
+  type Action,
+  type GoalPlan,
+  type PlanResult,
+} from './actions.js';
+import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
 import type { Vault } from '../vault/vault.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** Default global step budget for an AI run. Raised from the old 12 because the
+ * brain/navigator split makes per-step cost the CHEAP navigator, so runs can go
+ * long. Caller-provided LoopOptions.maxSteps always wins; the budget stays the
+ * ultimate safety net. */
+const DEFAULT_MAX_STEPS = 40;
+/** Default per-goal step cap (kept small vs the global budget so it fires first):
+ * a single goal grinding past this many steps without completing triggers a
+ * brain re-plan. Caller-overridable via LoopOptions.perGoalMaxSteps. */
+const DEFAULT_PER_GOAL_STEPS = 12;
+/** Consecutive brain escalations with NO navigator progress before we give up
+ * and end honestly — bounds brain cost when the page truly can't be driven. */
+const MAX_BRAIN_ESCALATIONS = 2;
 
 /** {{secret:NAME}} — NAME is [a-zA-Z0-9_-]+. Resolved AT EXECUTE TIME ONLY; the
  * placeholder is what lives in every recorded/reported/logged surface. */
@@ -69,7 +99,13 @@ export interface StepInfo {
 }
 
 export interface LoopOptions {
-  maxSteps: number;
+  /** Global step budget (the safety net). Defaults to DEFAULT_MAX_STEPS (40) —
+   * raised from the old 12 because the brain/navigator split makes per-step cost
+   * cheap, so runs can go long. A caller-provided value always wins. */
+  maxSteps?: number;
+  /** Per-goal step cap: a single goal that grinds past this without completing
+   * triggers a brain re-plan. Defaults to min(maxSteps, DEFAULT_PER_GOAL_STEPS). */
+  perGoalMaxSteps?: number;
   onStep?: (info: StepInfo) => void;
   /** Hosts the driver may click/type on; everywhere else is read-only (Tier-4).
    * navigate/asserts/wait stay allowed. Defaults to localhost/127.0.0.1 when
@@ -169,6 +205,8 @@ export async function runDriverLoop(
   const allowedHosts = opts.allowedHosts ?? ['localhost', '127.0.0.1'];
   const vault = opts.vault;
   const signal = opts.signal;
+  const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
+  const perGoalMaxSteps = opts.perGoalMaxSteps ?? Math.min(maxSteps, DEFAULT_PER_GOAL_STEPS);
 
   await browser.navigate(url);
   browser.drainConsole();
@@ -179,44 +217,319 @@ export async function runDriverLoop(
   let lastSnapshotAx: AxSnapshot | null = null; // last tree text, for the uncertain-reason heuristic
   let done = false;
 
-  // each outer iteration = ONE planner call → a batch of 1-3 actions
-  while (stepIndex < opts.maxSteps && !done) {
+  // ---- the plan (two-tier split) ----
+  // goals: the ordered sub-goal checklist the smart BRAIN makes ONCE up front;
+  // currentGoal walks it. The cheap NAVIGATOR drives every step toward
+  // goals[currentGoal]; the brain is re-consulted only on stuck (see escalate()).
+  let goals: string[] = [];
+  let currentGoal = 0;
+  let hint: string | undefined; // one-shot brain steer for the next navigator call
+  let stepsInGoal = 0; // steps spent on the current goal (per-goal budget)
+  // Bounds brain cost when the navigator can't recover: N consecutive escalations
+  // that yield no navigator progress → end honestly instead of looping forever.
+  let brainEscalations = 0;
+  // Whether a BRAIN (plan-goals) adapter is configured at all. Set from the router
+  // just before the initial plan. When false the run degrades to navigator-only:
+  // one implicit goal = the task, and escalate() ends honestly (no brain to ask).
+  let brainAvailable = true;
+
+  /* Escalate to the BRAIN with a failure reason and apply its answer:
+   *  - a final verdict → end the run with it;
+   *  - replacement goals (completed ones kept) → keep navigating the new plan;
+   *  - a hint → feed it to the next navigator call;
+   *  - nothing useful, or the escalation cap is hit → end honestly (uncertain).
+   * Returns 'continue' to keep the outer loop going, 'end' to stop it. */
+  const escalate = async (failure: string): Promise<'continue' | 'end'> => {
     if (signal?.aborted) {
       reason = 'cancelled by user';
-      break;
+      return 'end';
     }
+    // navigator-only mode (no brain configured): there is nobody to ask — end
+    // honestly with the failure reason (mirrors the old single-model behaviour).
+    if (!brainAvailable) {
+      const visibleErr = visibleErrorText(lastSnapshotAx?.text);
+      verdict = 'uncertain';
+      reason =
+        `stuck: ${failure}` +
+        (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : '');
+      return 'end';
+    }
+    if (brainEscalations >= MAX_BRAIN_ESCALATIONS) {
+      const visibleErr = visibleErrorText(lastSnapshotAx?.text);
+      verdict = 'uncertain';
+      reason =
+        `stuck: ${failure}` +
+        (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : '') +
+        ' — the planner could not recover';
+      return 'end';
+    }
+    brainEscalations++;
     const ax = await browser.axTree();
     lastSnapshotAx = ax;
-    const batchUrl = await browser.url();
-
-    // ---- plan ----
-    onStep({ index: stepIndex, kind: 'plan', text: 'Planning next step…' });
-    let plan: PlanResult;
+    const nowUrl = await browser.url();
+    onStep({ index: stepIndex, kind: 'plan', text: `Stuck — asking the planner: ${failure.slice(0, 80)}` });
+    let gp: GoalPlan;
     try {
-      plan = await planOnce(router, {
-        prompt: buildPlannerPrompt({
+      gp = await planGoalsOnce(router, {
+        prompt: buildGoalPlannerPrompt({
           task,
-          url: batchUrl,
+          url: nowUrl,
           axText: ax.text,
           history: steps,
-          stepIndex,
-          maxSteps: opts.maxSteps,
+          goals,
+          currentGoal,
+          failure,
         }),
         step: stepIndex,
       });
     } catch (e) {
-      reason = `planner failed: ${e instanceof Error ? e.message : e}`;
+      verdict = 'uncertain';
+      reason = `planner failed while recovering from "${failure}": ${e instanceof Error ? e.message : e}`;
+      return 'end';
+    }
+    // a final verdict from the brain ends the run
+    if (gp.verdict) {
+      verdict = gp.verdict;
+      reason = gp.reason ?? failure;
+      if (verdict === 'fail' && !failingStep) failingStep = lastInteraction(steps);
+      return 'end';
+    }
+    // replacement goals: keep the ones already completed, swap the rest
+    if (gp.goals && gp.goals.length) {
+      goals = [...goals.slice(0, currentGoal), ...gp.goals];
+      hint = gp.hint;
+      stepsInGoal = 0;
+      lastBatchFirstSig = null; // fresh plan — don't trip loop-detection on stale history
+      onStep({
+        index: stepIndex,
+        kind: 'plan',
+        text: `Re-planned ${gp.goals.length} goal${gp.goals.length === 1 ? '' : 's'}: ${gp.goals.join(' → ').slice(0, 140)}`,
+      });
+      return 'continue';
+    }
+    // just a hint for the next navigator call
+    if (gp.hint) {
+      hint = gp.hint;
+      lastBatchFirstSig = null;
+      onStep({ index: stepIndex, kind: 'plan', text: `Planner hint: ${gp.hint.slice(0, 100)}` });
+      return 'continue';
+    }
+    // the brain offered nothing actionable — end honestly
+    verdict = 'uncertain';
+    reason = `stuck: ${failure} — the planner offered no new plan`;
+    return 'end';
+  };
+
+  /* Confirm a claimed pass with ONE visual check over the current page and record
+   * it on `record`. pass → verdict pass; disagree/uncertain → let the BRAIN make
+   * the final call (cheap-then-smart). Returns escalate()'s outcome in that case. */
+  const confirmPass = async (
+    i: number,
+    record: StepRecord,
+    reasonText: string,
+  ): Promise<'pass' | 'end' | 'continue'> => {
+    const png = await browser.screenshot();
+    record.screenshot = artifacts.saveScreenshot(i, png);
+    const confirm = await router.visualVerdict(
+      png,
+      `The task "${task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
+      i,
+    );
+    record.visual = confirm;
+    if (confirm.verdict === 'pass') {
+      verdict = 'pass';
+      reason = reasonText;
+      return 'pass';
+    }
+    // navigator-only mode: no brain to arbitrate — honour the visual directly (a
+    // failing confirmation = a broken end state), exactly as the old loop did.
+    if (!brainAvailable) {
+      verdict = confirm.verdict === 'fail' ? 'fail' : 'uncertain';
+      reason =
+        `navigator declared success but the confirmation visual was ${confirm.verdict}: ${confirm.summary}` +
+        (confirm.issues.length ? ` — ${confirm.issues.join('; ')}` : '');
+      if (verdict === 'fail') failingStep = { index: i, action: record.action, description: record.description };
+      return 'end';
+    }
+    // navigator claimed success but the visual disagrees/uncertain — brain decides
+    return escalate(
+      `navigator declared success but the confirmation visual was ${confirm.verdict}: ${confirm.summary}` +
+        (confirm.issues.length ? ` — ${confirm.issues.join('; ')}` : ''),
+    );
+  };
+
+  /* The navigator believes every goal is met → synthesize a finish:pass step and
+   * confirm it. Shared by the goalComplete-past-last path and the safety guard. */
+  const runFinishPass = async (reasonText: string): Promise<'pass' | 'end' | 'continue'> => {
+    const i = stepIndex++;
+    stepsInGoal++;
+    const action: Action = { type: 'finish', verdict: 'pass', reason: reasonText };
+    const record: StepRecord = {
+      index: i,
+      action,
+      description: describeAction(action),
+      ok: true,
+      console: [],
+      network: [],
+      ts: Date.now(),
+    };
+    steps.push(record);
+    let outcome: 'pass' | 'end' | 'continue';
+    try {
+      outcome = await confirmPass(i, record, reasonText);
+    } catch (e) {
+      record.ok = false;
+      record.error = e instanceof Error ? e.message : String(e);
+      verdict = 'uncertain';
+      reason = `could not confirm success: ${record.error}`;
+      outcome = 'end';
+    }
+    await sleep(150);
+    record.console = browser.drainConsole();
+    record.network = browser.drainNetwork();
+    artifacts.appendAudit({
+      ts: record.ts,
+      runId: artifacts.runId,
+      action: action.type,
+      target: undefined,
+      url: await browser.url(),
+      ok: record.ok,
+    });
+    onStep({ index: i, kind: stepKind(action), text: humanizeAction(action), ok: record.ok });
+    return outcome;
+  };
+
+  // ---- initial plan (BRAIN, 1 call) — or navigator-only when no brain configured ----
+  brainAvailable = await router.hasCapability('plan-goals');
+  if (!brainAvailable) {
+    // no smart planner on the ladder (a single-model setup, or a navigator-only
+    // config): run one implicit goal = the whole task; the navigator drives it and
+    // escalate() ends honestly on stuck. This is the old single-model behaviour.
+    goals = [task];
+    onStep({ index: stepIndex, kind: 'plan', text: 'No planner configured — navigating directly.' });
+  } else {
+    const ax = await browser.axTree();
+    lastSnapshotAx = ax;
+    const planUrl = await browser.url();
+    onStep({ index: stepIndex, kind: 'plan', text: 'Planning goals…' });
+    try {
+      const goalPlan = await planGoalsOnce(router, {
+        prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text }),
+        step: stepIndex,
+      });
+      if (goalPlan.verdict) {
+        // the brain reached a verdict from the first look — honour it
+        verdict = goalPlan.verdict;
+        reason = goalPlan.reason ?? `planner decided ${goalPlan.verdict} before any steps were needed`;
+        if (verdict === 'fail') failingStep = lastInteraction(steps);
+        done = true;
+      } else if (goalPlan.goals && goalPlan.goals.length) {
+        goals = goalPlan.goals;
+        onStep({
+          index: stepIndex,
+          kind: 'plan',
+          text: `Planned ${goals.length} goal${goals.length === 1 ? '' : 's'}: ${goals.join(' → ').slice(0, 160)}`,
+        });
+      } else {
+        reason = 'planner returned no goals to execute';
+        done = true;
+      }
+    } catch (e) {
+      // the brain was advertised but failed on the first call — degrade to
+      // navigator-only rather than abort the whole run.
+      brainAvailable = false;
+      goals = [task];
+      onStep({
+        index: stepIndex,
+        kind: 'plan',
+        text: `Planner unavailable (${e instanceof Error ? e.message.slice(0, 60) : e}) — navigating directly.`,
+      });
+    }
+  }
+
+  // each outer iteration = ONE navigator call → a batch of 1-3 actions (or a
+  // meta-output: goalComplete / blocked) toward the current goal.
+  while (stepIndex < maxSteps && !done) {
+    if (signal?.aborted) {
+      reason = 'cancelled by user';
       break;
     }
 
+    // all goals consumed but no finish yet — treat as a pass candidate (safety net)
+    if (currentGoal >= goals.length) {
+      const outcome = await runFinishPass(`all ${goals.length} goals completed`);
+      if (outcome === 'continue') continue;
+      break;
+    }
+
+    const ax = await browser.axTree();
+    lastSnapshotAx = ax;
+    const batchUrl = await browser.url();
+
+    // ---- navigate (cheap NAVIGATOR: one call per step) ----
+    onStep({
+      index: stepIndex,
+      kind: 'plan',
+      text: `Planning next step (goal ${currentGoal + 1}/${goals.length})…`,
+    });
+    let plan: PlanResult;
+    try {
+      plan = await navigateOnce(router, {
+        prompt: buildNavigatorPrompt({
+          task,
+          url: batchUrl,
+          axText: ax.text,
+          goal: goals[currentGoal],
+          goals,
+          currentGoal,
+          history: steps,
+          stepIndex,
+          maxSteps,
+          hint,
+        }),
+        step: stepIndex,
+      });
+    } catch (e) {
+      // invalid navigator JSON twice (or adapter failure) → ask the brain
+      const outcome = await escalate(`navigator failed: ${e instanceof Error ? e.message : e}`);
+      if (outcome === 'end') break;
+      continue;
+    }
+
+    // ---- navigator meta-outputs (see PlanResultSchema) ----
+    if (plan.blocked) {
+      const outcome = await escalate(`navigator blocked: ${plan.blocked}`);
+      if (outcome === 'end') break;
+      continue;
+    }
+    if (plan.goalComplete) {
+      currentGoal++;
+      hint = undefined;
+      stepsInGoal = 0;
+      brainEscalations = 0; // completing a goal is progress
+      if (currentGoal >= goals.length) {
+        const outcome = await runFinishPass(`completed all ${goals.length} goals`);
+        if (outcome === 'continue') continue;
+        break;
+      }
+      onStep({ index: stepIndex, kind: 'plan', text: `Goal done → next: ${goals[currentGoal].slice(0, 100)}` });
+      continue;
+    }
+
     let actions = plan.actions;
+    if (!actions || actions.length === 0) {
+      // neither actions nor a meta-output we could act on — ask the brain
+      const outcome = await escalate('navigator returned neither actions nor a goal outcome');
+      if (outcome === 'end') break;
+      continue;
+    }
     // finish / asserts must be alone in their batch — if the model bundled
     // extras, keep only the first action (these never batch)
     if (actions[0].type === 'finish' || actions[0].type === 'assert_visual' || actions[0].type === 'assert_dom') {
       actions = [actions[0]];
     }
 
-    // ---- loop detection ----
+    // ---- loop detection → escalate FIRST (was: end the run) ----
     // compare the FIRST action of consecutive identical single-action batches.
     const firstSig = actions.length === 1 ? JSON.stringify(actions[0]) : null;
     if (
@@ -227,16 +540,21 @@ export async function runDriverLoop(
       JSON.stringify(steps[steps.length - 2].action) === firstSig
     ) {
       const visibleErr = visibleErrorText(lastSnapshotAx?.text);
-      reason = `planner repeated the same action 3×: ${describeAction(actions[0])}` +
-        (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : '');
-      break;
+      const outcome = await escalate(
+        `navigator repeated the same action 3×: ${describeAction(actions[0])}` +
+          (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : ''),
+      );
+      if (outcome === 'end') break;
+      lastBatchFirstSig = null; // brain re-planned — reset the loop signature
+      continue;
     }
     lastBatchFirstSig = firstSig;
 
     // ---- execute the batch, one StepRecord + drain per action ----
     let aborted = false;
     let readOnlyBlock: string | null = null; // set when a mutation hits a non-allowed host
-    for (let a = 0; a < actions.length && stepIndex < opts.maxSteps; a++) {
+    let finishReplan = false; // brain overruled a premature finish:pass → keep going
+    for (let a = 0; a < actions.length && stepIndex < maxSteps; a++) {
       const action = actions[a];
 
       if (signal?.aborted) {
@@ -257,6 +575,7 @@ export async function runDriverLoop(
       }
 
       const i = stepIndex++;
+      stepsInGoal++;
 
       const record: StepRecord = {
         index: i,
@@ -301,22 +620,9 @@ export async function runDriverLoop(
             reason = action.reason;
             failingStep = lastInteraction(steps) ?? { index: i, action, description: record.description };
           } else {
-            const png = await browser.screenshot();
-            record.screenshot = artifacts.saveScreenshot(i, png);
-            const confirm = await router.visualVerdict(
-              png,
-              `The task "${task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
-              i,
-            );
-            record.visual = confirm;
-            if (confirm.verdict === 'fail') {
-              verdict = 'fail';
-              reason = `planner claimed success but the confirmation visual check failed: ${confirm.summary}`;
-              failingStep = { index: i, action, description: record.description };
-            } else {
-              verdict = 'pass';
-              reason = action.reason;
-            }
+            const outcome = await confirmPass(i, record, action.reason);
+            // 'pass'/'end' → verdict settled, run ends; 'continue' → brain re-planned
+            if (outcome === 'continue') finishReplan = true;
           }
         } else if (action.type === 'assert_visual') {
           const png = await browser.screenshot();
@@ -374,8 +680,15 @@ export async function runDriverLoop(
         ok: record.ok,
       });
 
-      // a finish or a settled verdict ends the whole run
+      // a real action that landed = navigator progress; reset the stuck counter
+      if (record.ok && (action.type === 'click' || action.type === 'type' || action.type === 'navigate')) {
+        brainEscalations = 0;
+      }
+
+      // a finish or a settled verdict ends the whole run — UNLESS the brain
+      // overruled a premature finish:pass, in which case we keep navigating.
       if (verdict !== 'uncertain' || action.type === 'finish') {
+        if (finishReplan) break; // out of the batch; outer loop continues (done stays false)
         done = true;
         break;
       }
@@ -401,6 +714,13 @@ export async function runDriverLoop(
         `read-only mode: ${readOnlyBlock} is not in allowedHosts — ` +
         'add it via QA_ALLOWED_HOSTS or qa.config.json to allow interaction';
       break;
+    }
+
+    // ---- per-goal budget: a goal grinding on without completing → ask the brain ----
+    if (!done && !finishReplan && stepsInGoal >= perGoalMaxSteps) {
+      const outcome = await escalate(`goal "${goals[currentGoal]}" ran ${stepsInGoal} steps without completing`);
+      if (outcome === 'end') break;
+      stepsInGoal = 0; // fresh budget for the (possibly re-planned) goal
     }
   }
 
@@ -444,7 +764,17 @@ export async function runDriverLoop(
     model_trace: router.trace,
     durationMs: Date.now() - t0,
     tokenEstimate: 0,
-    tokens: { cheapModelTotal: 0, cheapModelCached: 0, callsByRung: {}, verdictPayloadTokens: 0 },
+    tokens: {
+      cheapModelTotal: 0,
+      cheapModelCached: 0,
+      callsByRung: {},
+      verdictPayloadTokens: 0,
+      navigatorCalls: 0,
+      brainCalls: 0,
+      visualCalls: 0,
+      navigatorTokens: 0,
+      brainTokens: 0,
+    },
   };
   report.evidence_paths = [
     ...steps.filter((s) => s.screenshot).map((s) => s.screenshot!),
@@ -473,25 +803,57 @@ function slimForEstimate(r: Report) {
  * trace (the FREE/cheap-rung spend doing the looking); callsByRung counts every
  * model call (rung 0 = $0 on-device Nano, whose tokens are irrelevant);
  * verdictPayloadTokens = the slim 5-field report the EXPENSIVE caller reads back
- * (~chars/4) — what the calling agent actually pays. */
+ * (~chars/4) — what the calling agent actually pays.
+ *
+ * Per-role split (the proof the two-tier architecture works): group the trace by
+ * `capability` — plan-step → navigator (cheap, every step), plan-goals → brain
+ * (smart, rare), visual-verdict → visual. brainCalls must NOT scale with steps. */
 function computeTokens(r: Report): NonNullable<Report['tokens']> {
   let cheapModelTotal = 0;
   let cheapModelCached = 0;
   const callsByRung: Record<number, number> = {};
+  let navigatorCalls = 0;
+  let brainCalls = 0;
+  let visualCalls = 0;
+  let navigatorTokens = 0;
+  let brainTokens = 0;
   for (const t of r.model_trace) {
     callsByRung[t.rung] = (callsByRung[t.rung] ?? 0) + 1;
     if (t.usage?.totalTokens) cheapModelTotal += t.usage.totalTokens;
     if (t.usage?.cachedTokens) cheapModelCached += t.usage.cachedTokens;
+    // per-role split by capability
+    if (t.capability === 'plan-step') {
+      navigatorCalls++;
+      if (t.usage?.totalTokens) navigatorTokens += t.usage.totalTokens;
+    } else if (t.capability === 'plan-goals') {
+      brainCalls++;
+      if (t.usage?.totalTokens) brainTokens += t.usage.totalTokens;
+    } else if (t.capability === 'visual-verdict') {
+      visualCalls++;
+    }
   }
   const verdictPayloadTokens = Math.ceil(
     JSON.stringify(r.steps.length ? slimForEstimate(r) : {}).length / 4,
   );
-  return { cheapModelTotal, cheapModelCached, callsByRung, verdictPayloadTokens };
+  return {
+    cheapModelTotal,
+    cheapModelCached,
+    callsByRung,
+    verdictPayloadTokens,
+    navigatorCalls,
+    brainCalls,
+    visualCalls,
+    navigatorTokens,
+    brainTokens,
+  };
 }
 
 /* ---------- planning ---------- */
 
-async function planOnce(
+/** NAVIGATOR call (cheap, every step): one validated PlanResult, with one retry
+ * on invalid JSON carrying the validation error. Throws after the second invalid
+ * response — the loop turns that into a brain escalation. */
+async function navigateOnce(
   router: ModelRouter,
   { prompt, step }: { prompt: string; step: number },
 ): Promise<PlanResult> {
@@ -506,7 +868,28 @@ async function planOnce(
   );
   const retry = PlanResultSchema.safeParse(retryRaw);
   if (retry.success) return retry.data;
-  throw new Error(`planner returned invalid actions twice: ${retry.error.message.slice(0, 200)}`);
+  throw new Error(`navigator returned invalid actions twice: ${retry.error.message.slice(0, 200)}`);
+}
+
+/** BRAIN call (smart, rare): one validated GoalPlan, with one retry on invalid
+ * JSON carrying the validation error. Same retry-with-validation-error shape as
+ * navigateOnce; throws after the second invalid response. */
+async function planGoalsOnce(
+  router: ModelRouter,
+  { prompt, step }: { prompt: string; step: number },
+): Promise<GoalPlan> {
+  const raw = await router.planGoals(prompt, GOAL_PLAN_JSON_SCHEMA, step);
+  const parsed = GoalPlanSchema.safeParse(raw);
+  if (parsed.success) return parsed.data;
+  // one retry with the validation error attached
+  const retryRaw = await router.planGoals(
+    `${prompt}\n\nYour previous response was invalid: ${parsed.error.message.slice(0, 300)}\nRespond again with ONLY valid JSON.`,
+    GOAL_PLAN_JSON_SCHEMA,
+    step,
+  );
+  const retry = GoalPlanSchema.safeParse(retryRaw);
+  if (retry.success) return retry.data;
+  throw new Error(`brain returned an invalid goal plan twice: ${retry.error.message.slice(0, 200)}`);
 }
 
 /* ---------- execution ---------- */

@@ -75,6 +75,18 @@ window.nano = {
     catch { v = { verdict: 'uncertain', summary: 'model returned non-JSON', issues: [String(raw).slice(0, 300)] }; }
     return { verdict: v, ms };
   },
+  async navStep(prompt, schema) {
+    // NAVIGATOR: pick ONE action from the a11y text (text-only, no image). A fresh
+    // session per step avoids context bleed; the model stays paged in via warmup().
+    const constraint = typeof schema === 'string' ? JSON.parse(schema) : schema;
+    const session = await LanguageModel.create(MODEL_OPTS);
+    const raw = await session.prompt(
+      [{ role: 'user', content: [{ type: 'text', value: prompt }] }],
+      { responseConstraint: constraint },
+    );
+    session.destroy();
+    return JSON.parse(raw); // throws on non-JSON → router falls to a cloud navigator
+  },
 };
 `;
 

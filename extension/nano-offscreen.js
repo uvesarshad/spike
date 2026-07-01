@@ -264,6 +264,20 @@ async function verdict(dataUrl, task) {
   return { verdict: v, ms };
 }
 
+async function navStep(prompt, schema) {
+  // NAVIGATOR step: pick ONE action from the a11y text (text-only, no image).
+  // Mirrors runner-assets.ts navStep. Throws on non-JSON so the router can fall
+  // through to a cloud navigator.
+  if (typeof LanguageModel === 'undefined') throw new Error('LanguageModel API missing in offscreen document');
+  const session = await LanguageModel.create(MODEL_OPTS);
+  const raw = await session.prompt(
+    [{ role: 'user', content: [{ type: 'text', value: prompt }] }],
+    { responseConstraint: schema },
+  );
+  session.destroy();
+  return JSON.parse(raw);
+}
+
 // Relay handler: SW → offscreen. Messages are tagged { target: 'nano-offscreen', op, args }.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || msg.target !== 'nano-offscreen') return false;
@@ -275,6 +289,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         case 'warmup':   result = await warmup(); break;
         case 'download': result = await download(); break;
         case 'verdict':  result = await verdict(msg.args.dataUrl, msg.args.task); break;
+        case 'navStep':  result = await navStep(msg.args.prompt, msg.args.schema); break;
         case 'rec.start': result = await recStart(msg.args.streamId); break;
         case 'rec.stop':  result = await recStop(); break;
         default: throw new Error('unknown nano offscreen op ' + msg.op);

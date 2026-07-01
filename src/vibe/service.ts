@@ -181,12 +181,16 @@ export class VibeService {
           modes: PROVIDER_MODES[id],
           apiModelDefault: defaultModelFor(id, 'api'),
           cliModelDefault: defaultModelFor(id, 'cli'),
+          // role-aware defaults for the two Settings cards (navigator=cheap, brain=smart).
+          navModelDefault: defaultModelFor(id, 'api', 'navigator'),
+          brainModelDefault: defaultModelFor(id, 'api', 'brain'),
           needsKey,
           hasKey,
         };
       });
       return {
         planner: settings.planner,
+        navigator: settings.navigator,
         debugMode: settings.debugMode,
         debugAgent: settings.debugAgent,
         providers,
@@ -209,6 +213,15 @@ export class VibeService {
           throw new Error('vibe.config.set: invalid model id (letters, digits and . _ - : / + only)');
         }
         patch.planner = p.planner;
+      }
+      if (p.navigator !== undefined) {
+        // Same command-injection guard as planner above — navigator.model is
+        // interpolated into the CLI command line for cli-mode navigators.
+        const model = (p.navigator as { model?: unknown }).model;
+        if (typeof model === 'string' && model && !isSafeModelId(model)) {
+          throw new Error('vibe.config.set: invalid model id (letters, digits and . _ - : / + only)');
+        }
+        patch.navigator = p.navigator;
       }
       if (p.debugMode !== undefined) patch.debugMode = p.debugMode;
       if (p.debugAgent !== undefined) patch.debugAgent = p.debugAgent;
