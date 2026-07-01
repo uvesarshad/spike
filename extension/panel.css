@@ -22,6 +22,13 @@
   --accent-press:#A6E312;
   --accent-tint: rgba(196, 248, 42, .12);
   --accent-ring: rgba(196, 248, 42, .22);
+  /* text that sits ON the lime fill — stays dark in BOTH themes (lime is bright) */
+  --on-accent:  #12140A;
+  /* result card + code surfaces (theme-aware; see the light overrides below) */
+  --surface:    var(--card-2);
+  --surface-line: var(--border);
+  --code-bg:    #0A0A0C;
+  --code-ink:   #C9C9D0; /* text on the always-dark console/code surfaces */
 
   /* text on dark */
   --ink:       #F4F4F6;
@@ -44,6 +51,30 @@
   --radius:    14px;
   --radius-sm: 10px;
   --pill:      999px;
+}
+
+/* ---- light theme (JS sets data-theme on <html>; default above is dark) ------ */
+:root[data-theme="light"] {
+  --bg:        #F6F6F8;
+  --bg-2:      #FFFFFF;
+  --card:      #FFFFFF;
+  --card-2:    #F1F1F4;
+  --raised:    #E9E9EE;
+  --border:    #E3E3E9;
+  --border-soft:#ECECF0;
+
+  --ink:       #17171A;
+  --ink-2:     #45454D;
+  --muted:     #77777F;
+
+  --accent:     #8FCB0A;
+  --accent-2:   #83BC07;
+  --accent-tint: rgba(143, 203, 10, .14);
+  --accent-ring: rgba(143, 203, 10, .28);
+  --on-accent:  #10130A;
+
+  --code-bg:    #16161A; /* keep the console/code surfaces dark in both themes */
+  --green:     #5C9A00;
 }
 
 * { box-sizing: border-box; }
@@ -168,7 +199,7 @@ body {
   font-family: inherit;
   font-size: 11.5px;
   font-weight: 700;
-  color: var(--bg);
+  color: var(--on-accent);
   background: var(--accent);
   border: none;
   border-radius: var(--pill);
@@ -313,26 +344,25 @@ body {
   padding: 8px 11px;
 }
 
-/* ---- suggestion cards (pills) --------------------------------------------- */
+/* ---- suggestion chips (wrapping tag cloud) -------------------------------- */
 .suggestions {
   display: flex;
-  flex-direction: column;
+  flex-flow: row wrap;
   gap: 7px;
 }
 .suggestion-card {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
+  gap: 7px;
   text-align: left;
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--ink-2);
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--pill);
-  padding: 9px 14px;
+  padding: 6px 12px 6px 8px;
   cursor: pointer;
   transition: background .14s ease, border-color .14s ease, color .14s ease, transform .06s ease;
 }
@@ -341,21 +371,21 @@ body {
   border-color: var(--accent);
   color: var(--ink);
 }
-.suggestion-card:active:not(:disabled) { transform: scale(.99); }
+.suggestion-card:active:not(:disabled) { transform: scale(.98); }
 .suggestion-card:disabled { opacity: .45; cursor: default; }
 .suggestion-emoji {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
   color: var(--accent);
   background: var(--raised);
   border-radius: var(--pill);
 }
-.suggestion-emoji .ico-svg { width: 15px; height: 15px; }
-.suggestion-text { flex: 1; min-width: 0; }
+.suggestion-emoji .ico-svg { width: 13px; height: 13px; }
+.suggestion-text { white-space: nowrap; }
 
 /* ---- interaction consent toggle ------------------------------------------- */
 .consent-row {
@@ -399,7 +429,7 @@ body {
   font-size: 14px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  color: var(--bg);
+  color: var(--on-accent);
   background: var(--accent);
   border: none;
   border-radius: var(--radius);
@@ -447,8 +477,8 @@ body {
   color: var(--muted);
 }
 .feed {
-  background: #0A0A0C;
-  color: var(--ink-2);
+  background: var(--code-bg);
+  color: var(--code-ink);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
   padding: 11px 12px;
@@ -536,17 +566,17 @@ body {
 /* wrench icon prefixing auto-fix lines in the dark feed */
 .fix-line-ico { width: 12px; height: 12px; vertical-align: -2px; margin-right: 1px; }
 
-/* ---- result card (WHITE floating panel — inverted) ------------------------- */
+/* ---- result card (theme-aware raised surface) ------------------------------ */
 .result-card {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  border: 1px solid var(--white-line);
+  border: 1px solid var(--surface-line);
   border-radius: var(--radius-lg);
   padding: 16px;
-  background: var(--white);
-  color: var(--white-ink);
-  box-shadow: 0 18px 40px -20px rgba(0, 0, 0, .7);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 18px 40px -20px rgba(0, 0, 0, .45);
 }
 .verdict-badge {
   align-self: flex-start;
@@ -569,47 +599,47 @@ body {
   font-family: inherit;
   font-size: 12.5px;
   line-height: 1.6;
-  color: var(--white-ink);
+  color: var(--ink);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
-/* ghost button on a white panel */
+/* ghost button on the result panel */
 .clip-btn {
   align-self: flex-start;
   padding: 8px 15px;
   font-family: inherit;
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--white-ink);
+  color: var(--ink);
   background: transparent;
-  border: 1px solid #D7D7DD;
+  border: 1px solid var(--border);
   border-radius: var(--pill);
   cursor: pointer;
   transition: background .14s ease, border-color .14s ease;
 }
-.clip-btn:hover:not(:disabled) { background: var(--white-inset); border-color: #C2C2CA; }
+.clip-btn:hover:not(:disabled) { background: var(--raised); border-color: var(--accent); }
 .clip-btn:disabled { opacity: .55; cursor: default; }
 
-/* ---- fix prompt (within white panel) -------------------------------------- */
+/* ---- fix prompt (within the result panel) --------------------------------- */
 .fix-section {
   display: flex;
   flex-direction: column;
   gap: 9px;
-  border-top: 1px solid var(--white-line);
+  border-top: 1px solid var(--surface-line);
   padding-top: 14px;
 }
 .fix-head { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; }
-.fix-title { font-weight: 700; font-size: 12.5px; color: var(--white-ink); }
-.fix-sub   { font-size: 11px; color: var(--white-muted); }
+.fix-title { font-weight: 700; font-size: 12.5px; color: var(--ink); }
+.fix-sub   { font-size: 11px; color: var(--muted); }
 .fix-prompt {
   width: 100%;
   min-height: 110px;
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
   font-size: 11.5px;
   line-height: 1.55;
-  color: var(--ink-2);
-  background: #0A0A0C;
+  color: var(--code-ink);
+  background: var(--code-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 11px 12px;
@@ -622,14 +652,14 @@ body {
   font-family: inherit;
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--white-ink);
+  color: var(--ink);
   background: transparent;
-  border: 1px solid #D7D7DD;
+  border: 1px solid var(--border);
   border-radius: var(--pill);
   cursor: pointer;
   transition: background .14s ease, color .14s ease, border-color .14s ease;
 }
-.copy-btn:hover { background: var(--white-inset); border-color: #C2C2CA; }
+.copy-btn:hover { background: var(--raised); border-color: var(--accent); }
 .copy-btn.copied { color: #4A7A00; border-color: #BFE76A; background: #F2FBDD; }
 
 /* ---- auto-fix (primary CTA on white panel) -------------------------------- */
@@ -639,7 +669,7 @@ body {
   font-family: inherit;
   font-size: 13px;
   font-weight: 700;
-  color: var(--bg);
+  color: var(--on-accent);
   background: var(--accent);
   border: none;
   border-radius: var(--radius);
@@ -651,7 +681,7 @@ body {
 .autofix-btn:disabled { opacity: .5; cursor: default; }
 .fix-status {
   font-size: 12px;
-  color: var(--white-muted);
+  color: var(--muted);
 }
 .fix-note {
   font-size: 12.5px;
@@ -732,19 +762,33 @@ body {
 }
 .history-time { flex: 0 0 auto; font-size: 10.5px; color: var(--muted); }
 
-/* ---- settings modal -------------------------------------------------------- */
+/* ---- settings modal (centered overlay with backdrop) ----------------------- */
 .settings-modal {
-  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 22px 16px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, .5);
+  backdrop-filter: blur(2px);
 }
+/* the [hidden] attribute must actually hide it — a bare `.settings-modal`
+   display rule would otherwise beat the UA `[hidden]{display:none}` and pin it open. */
+.settings-modal[hidden] { display: none; }
 .settings-card {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  width: 100%;
+  max-width: 420px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 16px;
   background: var(--card);
-  box-shadow: 0 18px 40px -20px rgba(0, 0, 0, .7);
+  box-shadow: 0 18px 60px -20px rgba(0, 0, 0, .7);
 }
 .settings-head {
   display: flex;
@@ -879,7 +923,7 @@ body {
   font-family: inherit;
   font-size: 13px;
   font-weight: 700;
-  color: var(--bg);
+  color: var(--on-accent);
   background: var(--accent);
   border: none;
   border-radius: var(--radius);
@@ -902,3 +946,85 @@ body {
   transition: background .14s ease, color .14s ease, border-color .14s ease;
 }
 .settings-btn-secondary:hover { background: var(--raised); color: var(--ink); border-color: var(--raised); }
+
+/* ---- header theme toggle (mirrors the gear button) ------------------------- */
+.theme-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  color: var(--muted);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--pill);
+  cursor: pointer;
+  transition: color .14s ease, background .14s ease, border-color .14s ease;
+}
+.theme-btn:hover { color: var(--ink); background: var(--accent-tint); border-color: var(--accent); }
+.theme-btn .ico-svg { width: 15px; height: 15px; }
+
+/* ---- "Advanced" badge (daemon-only providers / CLI mode) ------------------- */
+.badge-adv {
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--amber);
+  background: rgba(245, 194, 74, .12);
+  border: 1px solid rgba(245, 194, 74, .30);
+  border-radius: var(--pill);
+  padding: 2px 7px;
+  margin-left: 7px;
+}
+
+/* ---- API key input with a show/hide eye ------------------------------------ */
+.settings-key-input-wrap {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+}
+.settings-key-input-wrap .settings-input {
+  flex: 1;
+  min-width: 0;
+  padding-right: 38px;
+}
+.settings-key-toggle {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color .14s ease;
+}
+.settings-key-toggle:hover { color: var(--ink); }
+.settings-key-toggle .ico-svg { width: 15px; height: 15px; }
+
+/* ---- settings info note (e.g. on-device AI requirements) ------------------- */
+.settings-note {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+}
+.settings-note .ico-svg { width: 13px; height: 13px; flex: 0 0 13px; margin-top: 2px; color: var(--muted); }
+.settings-note b { color: var(--ink); font-weight: 600; }

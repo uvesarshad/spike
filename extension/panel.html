@@ -13,6 +13,9 @@
       <button id="settingsBtn" class="settings-btn" type="button" title="Settings" aria-label="Settings">
         <span class="ico" data-icon="gear"></span>
       </button>
+      <button id="themeBtn" class="theme-btn" type="button" title="Toggle light / dark" aria-label="Toggle light or dark theme">
+        <span class="ico" data-icon="moon"></span>
+      </button>
       <span id="bridgeDot" class="dot dot-off" title="Daemon connection"></span>
     </div>
     <div id="nanoLine" class="nano-line">On-device AI: checking…</div>
@@ -47,7 +50,7 @@
             <option value="gemini">Gemini</option>
             <option value="claude">Claude</option>
             <option value="gpt">GPT</option>
-            <option value="ollama">Ollama</option>
+            <option value="ollama">Ollama — Advanced</option>
             <option value="openrouter">OpenRouter</option>
             <option value="glm">GLM (z.ai)</option>
           </select>
@@ -60,8 +63,15 @@
             <label class="settings-radio">
               <input type="radio" name="setMode" value="cli" />
               <span>CLI</span>
+              <span class="badge-adv">Advanced</span>
             </label>
           </div>
+
+          <div id="setNanoNote" class="settings-note" hidden>
+            <span class="ico" data-icon="info"></span>
+            <span><b>On-device AI (Gemini Nano)</b> runs visual checks locally and free, but needs a one-time ~2&nbsp;GB download and works best on a recent machine with a capable GPU — it can be slow on older hardware. It can't plan on its own, so pair it with a cloud provider for the steps.</span>
+          </div>
+          <button id="setNanoDownload" class="nano-download-btn" type="button" hidden>Download on-device AI (~2&nbsp;GB)</button>
 
           <label class="settings-field-label" for="setModel">Model</label>
           <input id="setModel" class="settings-input" type="text" placeholder="default model" />
@@ -69,7 +79,12 @@
           <div id="setKeyRow" class="settings-key-row" hidden>
             <label class="settings-field-label" for="setKey">API key</label>
             <div class="settings-key-line">
-              <input id="setKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
+              <div class="settings-key-input-wrap">
+                <input id="setKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
+                <button id="setKeyToggle" class="settings-key-toggle" type="button" title="Show / hide key" aria-label="Show or hide the API key">
+                  <span class="ico" data-icon="eye"></span>
+                </button>
+              </div>
               <button id="setKeySave" class="settings-btn-secondary" type="button">Save key</button>
             </div>
             <span id="setKeyStatus" class="settings-key-status"></span>
@@ -142,7 +157,7 @@
 
       <label class="field-label" for="task">What should I test?</label>
       <textarea id="task" class="text-area" rows="3"
-                placeholder="…or describe what to test"></textarea>
+                placeholder="e.g. Log in with test@demo.com / pw, add an item to the cart, and complete checkout"></textarea>
 
       <label class="consent-row" for="consentToggle">
         <input id="consentToggle" class="consent-check" type="checkbox" checked />

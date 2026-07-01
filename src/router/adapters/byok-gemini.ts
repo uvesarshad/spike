@@ -3,7 +3,7 @@
  * the same way. Unavailable (cleanly) when no key is configured. */
 
 import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
-import { extractJson } from '../adapter.js';
+import { extractJson, withSchemaInstruction } from '../adapter.js';
 
 export interface ByokGeminiOptions {
   apiKey?: string;
@@ -31,7 +31,12 @@ export class ByokGeminiAdapter implements ModelAdapter {
   async generateJson(req: JsonRequest): Promise<unknown> {
     if (!this.opts.apiKey) throw new Error('byok-gemini: no API key configured');
     this.lastUsage = undefined; // reset; set only when usageMetadata comes back
-    const parts: object[] = [{ text: req.prompt }];
+    // Steer the shape IN-PROMPT (+ responseMimeType:'application/json' to force
+    // valid JSON) and parse with extractJson — the same recipe the other adapters
+    // use. Do NOT pass req.schema as Gemini's `responseSchema`: our schemas use
+    // constructs (additionalProperties, minItems, $-keywords) that Gemini's strict
+    // schema subset rejects with a 400 "Unknown name" error.
+    const parts: object[] = [{ text: withSchemaInstruction(req.prompt, req.schema) }];
     if (req.imagePng) {
       parts.push({ inlineData: { mimeType: 'image/png', data: req.imagePng.toString('base64') } });
     }
@@ -47,7 +52,6 @@ export class ByokGeminiAdapter implements ModelAdapter {
           contents: [{ role: 'user', parts }],
           generationConfig: {
             responseMimeType: 'application/json',
-            responseSchema: req.schema,
           },
         }),
         signal: AbortSignal.timeout(this.opts.timeoutMs ?? 120_000),

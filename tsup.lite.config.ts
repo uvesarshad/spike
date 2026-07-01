@@ -16,6 +16,10 @@ export default defineConfig({
   sourcemap: false,
   clean: false, // NEVER wipe extension/ (sw.js, panel.*, manifest.json live here)
   dts: false,
+  // tsup externalizes `dependencies` by default — but a service worker cannot
+  // resolve a bare `import from "buffer"`. Force the polyfill (and anything else)
+  // to be bundled INLINE so the output is fully self-contained.
+  noExternal: [/.*/],
   banner: {}, // no Node shebang
   esbuildOptions(o) {
     // rewire bare `Buffer` references to the feross/buffer polyfill

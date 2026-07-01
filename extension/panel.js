@@ -107,6 +107,41 @@ const setKeySave = $('setKeySave');
 const setKeyStatus = $('setKeyStatus');
 const setDebugAgentRow = $('setDebugAgentRow');
 const setDebugAgent = $('setDebugAgent');
+const themeBtn = $('themeBtn');
+const setKeyToggle = $('setKeyToggle');
+const setNanoNote = $('setNanoNote');
+const setNanoDownload = $('setNanoDownload');
+
+// last nano availability reported by the SW (drives the settings nano note/button)
+let nanoAvailability = null;
+
+// ---- theme (light / dark) --------------------------------------------------
+const THEME_KEY = 'qaTheme';
+function applyTheme(theme) {
+  const t = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', t);
+  // show the icon of the mode you'll switch TO (sun in dark, moon in light)
+  if (themeBtn) themeBtn.innerHTML = qaIcon(t === 'light' ? 'moon' : 'sun');
+}
+function initTheme() {
+  try {
+    chrome.storage.local.get(THEME_KEY, (v) => {
+      const stored = v && v[THEME_KEY];
+      if (stored === 'light' || stored === 'dark') { applyTheme(stored); return; }
+      const prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+      applyTheme(prefersLight ? 'light' : 'dark');
+    });
+  } catch {
+    applyTheme('dark');
+  }
+}
+if (themeBtn) {
+  themeBtn.addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    try { chrome.storage.local.set({ [THEME_KEY]: next }); } catch { /* noop */ }
+  });
+}
 
 let busy = false;
 let fixing = false;
@@ -247,6 +282,8 @@ function setBridge(connected) {
 
 function setNano(availability) {
   const a = String(availability || '').toLowerCase();
+  nanoAvailability = a;
+  if (settingsModal && !settingsModal.hidden) refreshSettingsVisibility();
   let text;
   // onboarding sub-elements default hidden; specific states reveal them
   let showOnboard = false;
@@ -873,6 +910,14 @@ function refreshSettingsVisibility() {
     setKeyStatus.textContent = (info && info.hasKey) ? 'saved ✓' : '';
   }
 
+  // Gemini Nano: on-device note + one-time download prompt (only while selected).
+  const isNano = provider === 'nano';
+  if (setNanoNote) setNanoNote.hidden = !isNano;
+  if (setNanoDownload) {
+    const ready = nanoAvailability === 'available' || nanoAvailability === 'readily';
+    setNanoDownload.hidden = !isNano || ready || nanoDownloading;
+  }
+
   // agent select only when auto-fix is chosen
   setDebugAgentRow.hidden = selectedDebugMode() !== 'auto';
 }
@@ -911,7 +956,9 @@ function onKeySaved(msg) {
   if (msg.ok) {
     setKeyStatus.classList.remove('err');
     setKeyStatus.textContent = msg.cleared ? '' : 'saved ✓';
-    setKey.value = '';
+    // keep the key in the field (persistent) — the user can reveal it with the eye
+    // toggle to confirm; clear it only when the key was removed.
+    if (msg.cleared) setKey.value = '';
     // reflect hasKey locally so a re-render keeps the status accurate
     const info = providerInfo(msg.provider);
     if (info) info.hasKey = !msg.cleared;
@@ -919,6 +966,15 @@ function onKeySaved(msg) {
     setKeyStatus.classList.add('err');
     setKeyStatus.textContent = msg.message ? ('error: ' + msg.message) : 'could not save key';
   }
+}
+
+// show / hide the API key
+if (setKeyToggle) {
+  setKeyToggle.addEventListener('click', () => {
+    const reveal = setKey.type === 'password';
+    setKey.type = reveal ? 'text' : 'password';
+    setKeyToggle.innerHTML = qaIcon(reveal ? 'eye-off' : 'eye');
+  });
 }
 
 function openSettings() {
@@ -933,6 +989,17 @@ function closeSettings() {
 settingsBtn.addEventListener('click', openSettings);
 settingsClose.addEventListener('click', closeSettings);
 settingsCloseBtn.addEventListener('click', closeSettings);
+// click the dimmed backdrop (outside the card) to dismiss
+settingsModal.addEventListener('click', (ev) => {
+  if (ev.target === settingsModal) closeSettings();
+});
+// settings-side "Download on-device AI" — reuses the SW nano-download flow
+if (setNanoDownload) {
+  setNanoDownload.addEventListener('click', () => {
+    setNanoDownload.hidden = true;
+    postToSW({ kind: 'nano-download' });
+  });
+}
 
 setProvider.addEventListener('change', refreshSettingsVisibility);
 setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
@@ -1109,6 +1176,7 @@ function requestInitialState() {
   postToSW({ kind: 'config-get' });
 }
 
+initTheme();
 loadActiveTab();
 requestInitialState();
 void loadHistory().then(renderHistory);
