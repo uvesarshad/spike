@@ -46,6 +46,7 @@
     "test:e2e": "tsx test/e2e.run-fixture.ts",
     "gen:icons": "tsx scripts/gen-icons.ts",
     "pack:extension": "tsx scripts/pack-extension.ts",
+    "share": "npm run build && npm run pack:extension",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
