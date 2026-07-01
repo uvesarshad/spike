@@ -11,6 +11,12 @@ export interface AnthropicOptions {
   apiKey?: string;
   model: string;
   timeoutMs?: number;
+  /** LITE mode: calling the Anthropic API directly from a browser/extension
+   * context is gated server-side — without this opt-in header Anthropic returns
+   * a CORS error. The daemon path leaves it false. (Note: this exposes the key to
+   * the page's origin context; acceptable in an extension SW where the key is the
+   * user's own and never leaves their machine except to Anthropic.) */
+  browserDirect?: boolean;
 }
 
 export class AnthropicAdapter implements ModelAdapter {
@@ -48,6 +54,7 @@ export class AnthropicAdapter implements ModelAdapter {
         'content-type': 'application/json',
         'x-api-key': this.opts.apiKey,
         'anthropic-version': '2023-06-01',
+        ...(this.opts.browserDirect ? { 'anthropic-dangerous-direct-browser-access': 'true' } : {}),
       },
       body: JSON.stringify({
         model: this.opts.model,

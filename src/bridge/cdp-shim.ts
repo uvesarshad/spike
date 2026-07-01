@@ -1,17 +1,21 @@
-/* CDP shim — makes a BridgeServer + a bound tabId look like a chrome-remote-
- * interface CDP.Client, so the existing capture modules (axtree.ts,
- * console-network.ts, logpoints.ts) run UNCHANGED over the extension transport.
+/* CDP shim — makes a transport (the daemon↔extension bridge, OR chrome.debugger
+ * directly in lite mode) look like a chrome-remote-interface CDP.Client, so the
+ * existing capture modules (axtree.ts, console-network.ts, logpoints.ts) and the
+ * executor run UNCHANGED over either transport.
  *
  * chrome-remote-interface exposes two call shapes on a client:
  *   - method:  client.<Domain>.<method>(params) → Promise<result>
- *   - event:   client.<Domain>.<eventName>(handler) → registers handler;
- *              the daemon receives forwarded CDP events as bridge events
- *              { event: 'cdp', params: { tabId, method: 'Domain.eventName', params } }.
+ *   - event:   client.<Domain>.<eventName>(handler) → registers handler.
  *
  * We disambiguate the two the same way the capture code uses them: an event
  * subscription is invoked with exactly one *function* argument; everything else
  * is a command whose single argument is a params object (or undefined). This
  * matches every usage in src/capture/* and src/ports/cdp-browser.ts.
+ *
+ * buildCdpClient() is the transport-agnostic core. createCdpShim() wires it to a
+ * BridgeServer (daemon mode); lite mode wires it to chrome.debugger via a
+ * CdpTransport built in the service worker (no bridge). The BridgeServer/CDP
+ * imports below are TYPE-ONLY so the lite browser bundle pulls in no Node deps.
  */
 
 import type CDP from 'chrome-remote-interface';
@@ -23,7 +27,7 @@ type CdpMember = CdpCommand & CdpEventSub;
 
 export interface CdpShim {
   client: CDP.Client;
-  /** Detach the bridge event listener (call when the tab/browser closes). */
+  /** Detach the event listener (call when the tab/browser closes). */
   dispose(): void;
 }
 
@@ -35,34 +39,30 @@ export interface CdpShimOptions {
   clientId?: number;
 }
 
+/** The minimal transport buildCdpClient needs. `send` issues one CDP command;
+ * `subscribe` registers a handler for ALL forwarded CDP events (already filtered
+ * to the relevant tab by the transport) and returns an unsubscribe fn. */
+export interface CdpTransport {
+  send(method: string, params: Record<string, unknown>): Promise<unknown>;
+  subscribe(handler: (method: string, params: Record<string, unknown>) => void): () => void;
+}
+
 /**
  * Build a Proxy that satisfies the subset of CDP.Client the capture/executor
- * code touches, routing everything to `bridge` for the given `tabId`. When
- * `opts.clientId` is set every call/event is scoped to that bridge client.
+ * code touches, routing every command/event through `transport`. Transport-
+ * agnostic: works over the bridge OR chrome.debugger.
  */
-export function createCdpShim(
-  bridge: BridgeServer,
-  tabId: number,
-  opts: CdpShimOptions = {},
-): CdpShim {
-  const callTimeoutMs = opts.callTimeoutMs ?? 30_000;
-  const clientId = opts.clientId;
+export function buildCdpClient(transport: CdpTransport): CdpShim {
   // "Domain.eventName" → set of handlers registered for it
   const eventHandlers = new Map<string, Set<(params: Record<string, unknown>) => void>>();
 
-  const onBridgeEvent = (evt: BridgeEvent, ctx: ClientCtx): void => {
-    if (evt.event !== 'cdp') return;
-    // bound to a client → only accept its events (multi-Chrome isolation)
-    if (clientId !== undefined && ctx.clientId !== clientId) return;
-    const p = evt.params as { tabId?: number; method?: string; params?: Record<string, unknown> };
-    if (p.tabId !== tabId || typeof p.method !== 'string') return;
-    const handlers = eventHandlers.get(p.method);
+  const unsubscribe = transport.subscribe((method, params) => {
+    const handlers = eventHandlers.get(method);
     if (!handlers) return;
     for (const h of handlers) {
-      try { h(p.params ?? {}); } catch { /* a bad handler must not drop the event */ }
+      try { h(params ?? {}); } catch { /* a bad handler must not drop the event */ }
     }
-  };
-  bridge.onEvent(onBridgeEvent);
+  });
 
   const makeMember = (domain: string, name: string): CdpMember => {
     const fullName = `${domain}.${name}`;
@@ -78,14 +78,8 @@ export function createCdpShim(
         // crI returns an unsubscribe function; mirror that for parity
         return () => set!.delete(arg as (params: Record<string, unknown>) => void);
       }
-      // command shape: params object (or none) → bridge `cdp` call, scoped to
-      // this shim's client when bound.
-      return bridge.call(
-        'cdp',
-        { tabId, method: fullName, params: (arg as Record<string, unknown>) ?? {} },
-        callTimeoutMs,
-        clientId !== undefined ? { clientId } : undefined,
-      );
+      // command shape: params object (or none) → transport send.
+      return transport.send(fullName, (arg as Record<string, unknown>) ?? {});
     }) as CdpMember;
     return member;
   };
@@ -115,7 +109,7 @@ export function createCdpShim(
   const client = new Proxy({} as Record<string, unknown>, {
     get(_t, prop: string | symbol) {
       if (typeof prop !== 'string') return undefined;
-      if (prop === 'close') return async () => { /* transport owned by the bridge */ };
+      if (prop === 'close') return async () => { /* transport owned elsewhere */ };
       if (prop === 'then') return undefined; // not a thenable
       return domainProxy(prop);
     },
@@ -124,8 +118,45 @@ export function createCdpShim(
   return {
     client,
     dispose() {
-      bridge.offEvent(onBridgeEvent);
+      unsubscribe();
       eventHandlers.clear();
     },
   };
+}
+
+/**
+ * Bridge-backed shim (daemon mode): builds a CdpTransport from a BridgeServer +
+ * tabId and feeds it to buildCdpClient. Behavior is identical to the previous
+ * inlined implementation. When `opts.clientId` is set every call/event is scoped
+ * to that bridge client.
+ */
+export function createCdpShim(
+  bridge: BridgeServer,
+  tabId: number,
+  opts: CdpShimOptions = {},
+): CdpShim {
+  const callTimeoutMs = opts.callTimeoutMs ?? 30_000;
+  const clientId = opts.clientId;
+  const transport: CdpTransport = {
+    send: (method, params) =>
+      bridge.call(
+        'cdp',
+        { tabId, method, params },
+        callTimeoutMs,
+        clientId !== undefined ? { clientId } : undefined,
+      ),
+    subscribe: (handler) => {
+      const onBridgeEvent = (evt: BridgeEvent, ctx: ClientCtx): void => {
+        if (evt.event !== 'cdp') return;
+        // bound to a client → only accept its events (multi-Chrome isolation)
+        if (clientId !== undefined && ctx.clientId !== clientId) return;
+        const p = evt.params as { tabId?: number; method?: string; params?: Record<string, unknown> };
+        if (p.tabId !== tabId || typeof p.method !== 'string') return;
+        handler(p.method, p.params ?? {});
+      };
+      bridge.onEvent(onBridgeEvent);
+      return () => bridge.offEvent(onBridgeEvent);
+    },
+  };
+  return buildCdpClient(transport);
 }

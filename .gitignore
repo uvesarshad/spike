@@ -10,3 +10,5 @@ generated-tests/
 spikes/.chrome-profile/
 spikes/**/node_modules/
 spikes/**/shots/
+# throwaway lite-mode Phase-0 spike — holds a live API key at runtime, never commit
+spikes/lite-mode/

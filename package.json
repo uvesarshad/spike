@@ -39,7 +39,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsup --config tsup.lite.config.ts",
+    "build:lite": "tsup --config tsup.lite.config.ts",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test:e2e": "tsx test/e2e.run-fixture.ts",
@@ -49,6 +50,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "buffer": "^6.0.3",
     "chrome-remote-interface": "^0.33.2",
     "commander": "^13.1.0",
     "gifenc": "^1.0.3",

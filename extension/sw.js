@@ -13,7 +13,15 @@
  *   - no window/DOM: use self/globalThis; WebSocket is available in the SW.
  *   - the SW can be torn down at any time: reconnect loop with backoff, and a
  *     chrome.alarms keepalive ping so it isn't evicted mid-run.
+ *
+ * LITE MODE: when NO daemon is connected, the panel's run/config/key messages are
+ * served LOCALLY by running the bundled engine (./lite-engine.js) in this SW —
+ * keys + settings live in chrome.storage.local and the page is driven via
+ * chrome.debugger directly. The manifest declares this SW as a module so the
+ * static import below works. Pro mode (daemon present) is unchanged.
  */
+
+import { runLite, buildLiteConfig, DEFAULT_SETTINGS } from './lite-engine.js';
 
 /* The daemon's bridge usually listens on 9410 (config default), but tests and
  * multi-instance setups bind nearby ports — the reconnect loop scans a small
@@ -192,6 +200,142 @@ function handleBridgeEvent(event, params) {
   }
 }
 
+// ============================================================================
+// LITE MODE — run the bundled engine in this SW when no daemon is connected.
+// ============================================================================
+
+/** Daemon present? Pro mode uses it; otherwise we run lite, in-SW. */
+function daemonConnected() {
+  return !!(ws && ws.readyState === WebSocket.OPEN);
+}
+
+/** In-SW CDP event subscribers — the lite engine's CdpTransport.subscribe taps
+ * these (filled by the chrome.debugger.onEvent fan-out above). */
+const localCdpListeners = new Set();
+
+/** provider id (panel) → chrome.storage key name (the vault CONTRACT name). */
+const LITE_KEY_NAME = { gemini: 'gemini', claude: 'anthropic', gpt: 'openai', openrouter: 'openrouter', glm: 'glm' };
+
+function storageGet(key) {
+  return new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v && v[key])));
+}
+function storageSet(obj) {
+  return new Promise((resolve) => chrome.storage.local.set(obj, () => resolve()));
+}
+async function getKeys() {
+  return (await storageGet('qaKeys')) || {};
+}
+async function getSettings() {
+  const s = (await storageGet('qaSettings')) || {};
+  return {
+    planner: { ...DEFAULT_SETTINGS.planner, ...(s.planner || {}) },
+    debugMode: s.debugMode || DEFAULT_SETTINGS.debugMode,
+    debugAgent: s.debugAgent || DEFAULT_SETTINGS.debugAgent,
+  };
+}
+async function liteSetKey(provider, key) {
+  const name = LITE_KEY_NAME[provider];
+  if (!name) throw new Error(`provider ${provider} takes no key`);
+  if (!key) throw new Error('a non-empty key is required');
+  const keys = await getKeys();
+  keys[name] = String(key);
+  await storageSet({ qaKeys: keys });
+}
+async function liteClearKey(provider) {
+  const name = LITE_KEY_NAME[provider];
+  if (!name) throw new Error(`provider ${provider} takes no key`);
+  const keys = await getKeys();
+  const had = name in keys;
+  delete keys[name];
+  await storageSet({ qaKeys: keys });
+  return had;
+}
+async function liteSetSettings(patch) {
+  const cur = await getSettings();
+  const next = {
+    debugMode: patch.debugMode || cur.debugMode,
+    debugAgent: patch.debugAgent || cur.debugAgent,
+    planner: { ...cur.planner, ...(patch.planner || {}) },
+  };
+  await storageSet({ qaSettings: next });
+  return next;
+}
+
+// Nano (rung 0) callbacks for the lite engine — wired to the SW's existing nano
+// plumbing (SW-direct or offscreen), with the same timeouts the bridge path uses.
+const liteNanoDeps = {
+  avail: () => Promise.race([nanoAvail(), new Promise((r) => setTimeout(() => r('unavailable'), 10_000))]),
+  warmup: () => withSwTimeout(nanoWarmup(), 120_000, 'nano.warmup'),
+  verdict: (dataUrl, task) => withSwTimeout(nanoVerdict(dataUrl, task), 5 * 60_000, 'nano.verdict'),
+};
+
+/** chrome.debugger-backed browser deps bound to one tab, injected into runLite. */
+function makeLiteBrowserDeps(tabId) {
+  return {
+    transport: {
+      send: (method, params) => sendCdp(tabId, method, params),
+      subscribe: (handler) => {
+        const fn = (evTabId, method, params) => { if (evTabId === tabId) handler(method, params); };
+        localCdpListeners.add(fn);
+        return () => localCdpListeners.delete(fn);
+      },
+    },
+    navigate: (url) => navigateTab(tabId, url),
+    getUrl: async () => (await getTab(tabId)).url || '',
+    detach: () => detachDebugger(tabId), // keep the user's tab open
+    onCursor: (params) => routeCursorToOverlay({ tabId, ...params }),
+  };
+}
+
+let liteBusy = false;
+let liteAbort = null;
+let lastLiteBundle = null; // for a future "download report" affordance
+
+async function runLiteFromPanel(port, msg) {
+  if (liteBusy) { port.postMessage({ kind: 'error', message: 'a run is already in progress' }); return; }
+  const tabId = msg.tabId;
+  if (typeof tabId !== 'number') {
+    port.postMessage({ kind: 'error', message: 'lite mode needs the current tab — open the panel on the page you want to test' });
+    return;
+  }
+  const settings = await getSettings();
+  const keys = await getKeys();
+  const keyName = LITE_KEY_NAME[settings.planner.provider];
+  if (!keyName || !keys[keyName]) {
+    port.postMessage({ kind: 'error', message: `no API key for "${settings.planner.provider}" — open Settings and add one (lite mode is BYOK; no daemon).` });
+    return;
+  }
+  liteBusy = true;
+  liteAbort = new AbortController();
+  lastRunTabId = tabId;
+  port.postMessage({ kind: 'accepted' });
+  try {
+    await attachDebugger(tabId);
+    const allowedHosts = ['localhost', '127.0.0.1'];
+    if (typeof msg.allowHost === 'string' && msg.allowHost) allowedHosts.push(msg.allowHost);
+    const result = await runLite({
+      task: msg.task,
+      url: msg.url,
+      allowedHosts,
+      keys,
+      planner: settings.planner,
+      browserDeps: makeLiteBrowserDeps(tabId),
+      nanoDeps: liteNanoDeps,
+      onProgress: (line) => broadcastToPanels({ kind: 'progress', line }),
+      onStep: (info) => broadcastToPanels({ kind: 'step', ...info }),
+      signal: liteAbort.signal,
+    });
+    lastLiteBundle = result.bundle;
+    broadcastToPanels({ kind: 'done', ...result.done });
+  } catch (e) {
+    broadcastToPanels({ kind: 'error', message: String(e && e.message ? e.message : e) });
+  } finally {
+    sendOverlayEnd(tabId);
+    liteBusy = false;
+    liteAbort = null;
+  }
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'vibe-panel') return;
   panelPorts.add(port);
@@ -201,6 +345,7 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       switch (msg.kind) {
         case 'run': {
+          if (!daemonConnected()) { await runLiteFromPanel(port, msg); break; }
           try {
             // The panel targets the user's CURRENT tab (tabId/url from
             // chrome.tabs.query). Remember it so the overlay end signal lands there.
@@ -217,6 +362,12 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'cancel': {
+          if (!daemonConnected()) {
+            const was = !!liteAbort;
+            if (liteAbort) liteAbort.abort();
+            port.postMessage({ kind: 'cancelled', cancelled: was });
+            break;
+          }
           try {
             const result = await sendRequest('vibe.cancel', {});
             // {cancelled: boolean}. Old daemons answer 'unknown method …' → surfaced below.
@@ -227,6 +378,10 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'fix': {
+          if (!daemonConnected()) {
+            port.postMessage({ kind: 'fix-done', ok: false, message: 'auto-fix needs the desktop app — copy the fix prompt and paste it into your coding agent.' });
+            break;
+          }
           try {
             // {accepted:true} on success; fix-progress / fix-done stream as vibe.*
             // events handled by the generic fan-out in handleBridgeEvent.
@@ -239,6 +394,10 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'clip': {
+          if (!daemonConnected()) {
+            port.postMessage({ kind: 'clip-error', message: 'replay clips need the desktop app (lite mode is test-only).' });
+            break;
+          }
           try {
             // {name, mime, dataBase64} of the last saved replay clip.
             const result = await sendRequest('vibe.clip', {});
@@ -258,6 +417,7 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'status': {
+          if (!daemonConnected()) { port.postMessage({ kind: 'status', busy: liteBusy }); break; }
           try {
             const result = await sendRequest('vibe.status', {});
             port.postMessage({ kind: 'status', busy: !!(result && result.busy) });
@@ -280,6 +440,10 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'config-get': {
+          if (!daemonConnected()) {
+            port.postMessage({ kind: 'config', ...buildLiteConfig(await getKeys(), await getSettings()) });
+            break;
+          }
           try {
             const r = await sendRequest('vibe.config.get', {});
             port.postMessage({ kind: 'config', ...(r || {}) });
@@ -289,6 +453,11 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'config-set': {
+          if (!daemonConnected()) {
+            await liteSetSettings(msg);
+            port.postMessage({ kind: 'config', ...buildLiteConfig(await getKeys(), await getSettings()) });
+            break;
+          }
           try {
             await sendRequest('vibe.config.set', msg);
             // re-fetch the full config so providers/hasKey/defaults refresh
@@ -300,6 +469,11 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'set-key': {
+          if (!daemonConnected()) {
+            try { await liteSetKey(msg.provider, msg.key); port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: true }); }
+            catch (e) { port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: false, message: String(e && e.message ? e.message : e) }); }
+            break;
+          }
           try {
             await sendRequest('vibe.key.set', { provider: msg.provider, key: msg.key });
             port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: true });
@@ -309,6 +483,11 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'clear-key': {
+          if (!daemonConnected()) {
+            try { const cleared = await liteClearKey(msg.provider); port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: true, cleared }); }
+            catch (e) { port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: false, message: String(e && e.message ? e.message : e) }); }
+            break;
+          }
           try {
             await sendRequest('vibe.key.clear', { provider: msg.provider });
             port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: true, cleared: true });
@@ -785,7 +964,11 @@ async function handleRequest(msg) {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined) return;
-  emit('cdp', { tabId: source.tabId, method, params: params || {} });
+  emit('cdp', { tabId: source.tabId, method, params: params || {} }); // daemon (no-op if no ws)
+  // lite mode: fan CDP events out to in-SW subscribers (the lite engine's transport)
+  for (const fn of localCdpListeners) {
+    try { fn(source.tabId, method, params || {}); } catch { /* a bad handler must not drop the event */ }
+  }
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {
