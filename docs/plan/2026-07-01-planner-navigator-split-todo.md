@@ -50,7 +50,12 @@
 - [x] `npm run typecheck` — clean.
 - [x] `npm run build` — both tsup targets build; lite bundle grep-gate clean (0 `node:`; only `require(` is esbuild's `__require` helper).
 - [x] Unit tests: v13 tier4 (32/32), v20 tokens incl. per-role (17/17), v25 providers+pinning (26/26), m4 router (7/7 relevant). *m4 crashes at the end on the pre-existing dead-gemini-CLI spawn — not a regression.*
-- [ ] **Live (needs a working planner + Chrome):** `npm run test:e2e` fixture both bug modes.
-- [ ] **Cost proof:** dogfood on `https://mapleandsand.com/` + fixture → few brain calls vs many navigator calls; brain calls don't scale with step count.
-- [ ] **Robustness:** force a stuck goal → one brain escalation re-plans; recovers or fails honestly.
-- [ ] **Lite UI:** only pasted keys, Navigator=Gemini Flash + Brain=Claude Sonnet → live feed, correct verdict, per-role cost shown, graceful missing-brain-key prompt.
+- [x] **Live `npm run test:e2e`** (brain+navigator pinned to `claude:cli`) — **6/6 checks pass**: healthy→pass (8 steps), bug-on→fail with `[PAGE-ERROR]` `order.total.toFixed` + `/api/order` 500 + screenshot. Nano served the visual verdicts. (2026-07-03)
+- [x] **Cost proof — dogfood on `https://mapleandsand.com/`** (navigator=Nano $0, brain=`claude:cli`→Sonnet): PASS in 10 steps, **14 Nano navigator calls vs 3 Sonnet brain calls** (plan@0, escalate@2, verdict@10 — flat as steps grew), verdict payload 124 tok. `model_trace` grouped by capability confirms the per-role split. First run `fail`ed on a mis-scoped task (guessed `/shop` 404 — site is B2B "Procurement Intelligence" SaaS, no shop); corrected task → pass.
+- [x] **Robustness:** the mapleandsand run exercised escalation-on-stuck live — Nano looped a bad `/shop` nav → one brain escalation re-planned (step 2) → run continued and finished honestly. Fallback to navigator-only also covered by v13/v20 (no `plan-goals` adapter).
+- [ ] **Lite UI (extension, needs Chrome + pasted keys):** Navigator=Gemini Flash + Brain=Claude Sonnet → live feed, correct verdict, per-role cost shown, graceful missing-brain-key prompt. *(Deferred — needs interactive extension load; daemon path is proven above.)*
+
+### Notes surfaced by the live runs (2026-07-03)
+- **Nano-navigator is rough** — guessed a URL instead of clicking a nav link and repeated a failing navigation before the brain caught it. Reinforces: run the `spikes/nano-nav/` GO/NO-GO before making Nano the un-caveated default; a cheap vision cloud navigator (Gemini Flash / Haiku) is the safer default. (Task #16.)
+- **External sites are read-only** (Tier-4 guard) — allow the host(s) via `QA_ALLOWED_HOSTS` (mind `mapleandsand.com`→`www.` redirect) and keep tasks non-destructive.
+- **Per-role env override** needed because saved `settings.json` still pins brain=`gemini:cli` (dead): `QA_PLANNER_PROVIDER/MODE`, `QA_NAVIGATOR_PROVIDER/MODE`.
