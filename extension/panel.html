@@ -10,13 +10,15 @@
   <header class="hdr">
     <div class="hdr-top">
       <span class="logo">QA Subagent</span>
-      <button id="settingsBtn" class="settings-btn" type="button" title="Settings" aria-label="Settings">
-        <span class="ico" data-icon="gear"></span>
-      </button>
-      <button id="themeBtn" class="theme-btn" type="button" title="Toggle light / dark" aria-label="Toggle light or dark theme">
-        <span class="ico" data-icon="moon"></span>
-      </button>
       <span id="bridgeDot" class="dot dot-off" title="Daemon connection"></span>
+      <div class="hdr-actions">
+        <button id="themeBtn" class="theme-btn" type="button" title="Toggle light / dark" aria-label="Toggle light or dark theme">
+          <span class="ico" data-icon="moon"></span>
+        </button>
+        <button id="settingsBtn" class="settings-btn" type="button" title="Settings" aria-label="Settings">
+          <span class="ico" data-icon="gear"></span>
+        </button>
+      </div>
     </div>
     <div id="nanoLine" class="nano-line">On-device AI: checking…</div>
     <div id="nanoOnboard" class="nano-onboard" hidden>
@@ -36,143 +38,178 @@
       <div class="settings-card">
         <div class="settings-head">
           <span class="settings-title">Settings</span>
-          <button id="settingsClose" class="settings-close" type="button" aria-label="Close">
-            <span class="ico" data-icon="x"></span>
+        </div>
+
+        <!-- Navigator accordion -->
+        <div class="settings-acc" data-acc="nav">
+          <button id="accNavHead" class="settings-acc-head" type="button" aria-expanded="true" aria-controls="accNavBody">
+            <span class="settings-acc-caret" data-icon="chevron"></span>
+            <span class="settings-acc-title">Navigator</span>
+            <span id="accNavSummary" class="settings-acc-summary"></span>
           </button>
-        </div>
+          <div id="accNavBody" class="settings-acc-body">
+            <div class="settings-group-sub">The fast, cheap model that clicks and types on every step.</div>
 
-        <div class="settings-group">
-          <div class="settings-group-title">Navigator — does each step (cheap)</div>
-          <div class="settings-group-sub">The fast, cheap model that clicks, types, and looks at the page on every step.</div>
-
-          <label class="settings-field-label" for="setNavProvider">Provider</label>
-          <select id="setNavProvider" class="settings-select">
-            <option value="nano">Gemini Nano (on-device)</option>
-            <option value="gemini">Gemini</option>
-            <option value="claude">Claude</option>
-            <option value="gpt">GPT</option>
-            <option value="openrouter">OpenRouter</option>
-          </select>
-
-          <div id="setNavModeRow" class="settings-radio-row">
-            <label class="settings-radio">
-              <input type="radio" name="setNavMode" value="api" />
-              <span>API key</span>
-            </label>
-            <label class="settings-radio">
-              <input type="radio" name="setNavMode" value="cli" />
-              <span>CLI</span>
-              <span class="badge-adv">Advanced</span>
-            </label>
-          </div>
-
-          <div id="setNavNanoNote" class="settings-note" hidden>
-            <span class="ico" data-icon="info"></span>
-            <span><b>On-device AI (Gemini Nano)</b> runs on every step locally and free, but needs a one-time ~2&nbsp;GB download and works best on a recent machine with a capable GPU — it can be slow on older hardware.</span>
-          </div>
-          <button id="setNavNanoDownload" class="nano-download-btn" type="button" hidden>Download on-device AI (~2&nbsp;GB)</button>
-
-          <label class="settings-field-label" for="setNavModel">Model</label>
-          <input id="setNavModel" class="settings-input" type="text" placeholder="default model" />
-
-          <div id="setNavKeyRow" class="settings-key-row" hidden>
-            <label class="settings-field-label" for="setNavKey">API key</label>
-            <div class="settings-key-line">
-              <div class="settings-key-input-wrap">
-                <input id="setNavKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
-                <button id="setNavKeyToggle" class="settings-key-toggle" type="button" title="Show / hide key" aria-label="Show or hide the API key">
-                  <span class="ico" data-icon="eye"></span>
-                </button>
-              </div>
-              <button id="setNavKeySave" class="settings-btn-secondary" type="button">Save key</button>
-            </div>
-            <span id="setNavKeyStatus" class="settings-key-status"></span>
-          </div>
-        </div>
-
-        <div class="settings-group">
-          <div class="settings-group-title">Brain — makes the plan (smart)</div>
-          <div class="settings-group-sub">The smarter model, called only to plan and when the navigator gets stuck — so it barely affects cost.</div>
-
-          <label class="settings-same-row" for="setSameAsNav">
-            <input id="setSameAsNav" class="consent-check" type="checkbox" />
-            <span>Use the same provider, model &amp; key as the Navigator</span>
-          </label>
-          <div id="setSameAsNavNote" class="settings-note" hidden>
-            <span class="ico" data-icon="info"></span>
-            <span id="setSameAsNavNoteText">Brain will use the Navigator's provider, mode, model and API key.</span>
-          </div>
-
-          <div id="setBrainFields" class="settings-brain-fields">
-            <label class="settings-field-label" for="setProvider">Provider</label>
-            <select id="setProvider" class="settings-select">
+            <label class="settings-field-label" for="setNavProvider">Provider</label>
+            <select id="setNavProvider" class="settings-select">
+              <option value="nano">Gemini Nano (on-device)</option>
               <option value="gemini">Gemini</option>
               <option value="claude">Claude</option>
               <option value="gpt">GPT</option>
-              <option value="ollama">Ollama — Advanced</option>
               <option value="openrouter">OpenRouter</option>
-              <option value="glm">GLM (z.ai)</option>
             </select>
 
-            <div id="setModeRow" class="settings-radio-row">
+            <div id="setNavModeRow" class="settings-radio-row">
               <label class="settings-radio">
-                <input type="radio" name="setMode" value="api" />
+                <input type="radio" name="setNavMode" value="api" />
                 <span>API key</span>
               </label>
               <label class="settings-radio">
-                <input type="radio" name="setMode" value="cli" />
+                <input type="radio" name="setNavMode" value="cli" />
                 <span>CLI</span>
                 <span class="badge-adv">Advanced</span>
               </label>
             </div>
 
-            <label class="settings-field-label" for="setModel">Model</label>
-            <input id="setModel" class="settings-input" type="text" placeholder="default model" />
+            <div id="setNavNanoNote" class="settings-note" hidden>
+              <span class="ico" data-icon="info"></span>
+              <span><b>On-device AI (Gemini Nano)</b> runs free on every step, but needs a one-time ~2&nbsp;GB download and a recent GPU.</span>
+            </div>
+            <button id="setNavNanoDownload" class="nano-download-btn" type="button" hidden>Download on-device AI (~2&nbsp;GB)</button>
 
-            <div id="setKeyRow" class="settings-key-row" hidden>
-              <label class="settings-field-label" for="setKey">API key</label>
+            <label class="settings-field-label" for="setNavModel">Model</label>
+            <input id="setNavModel" class="settings-input" type="text" placeholder="default model" />
+
+            <div id="setNavKeyRow" class="settings-key-row" hidden>
+              <label class="settings-field-label" for="setNavKey">API key</label>
               <div class="settings-key-line">
                 <div class="settings-key-input-wrap">
-                  <input id="setKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
-                  <button id="setKeyToggle" class="settings-key-toggle" type="button" title="Show / hide key" aria-label="Show or hide the API key">
+                  <input id="setNavKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
+                  <button id="setNavKeyToggle" class="settings-key-toggle" type="button" title="Show / hide key" aria-label="Show or hide the API key">
                     <span class="ico" data-icon="eye"></span>
                   </button>
                 </div>
-                <button id="setKeySave" class="settings-btn-secondary" type="button">Save key</button>
+                <button id="setNavKeySave" class="settings-btn-secondary" type="button">Save key</button>
               </div>
-              <span id="setKeyStatus" class="settings-key-status"></span>
+              <span id="setNavKeyStatus" class="settings-key-status"></span>
             </div>
           </div>
         </div>
 
-        <div class="settings-group">
-          <div class="settings-group-title">Debugging</div>
+        <!-- Brain accordion -->
+        <div class="settings-acc" data-acc="brain">
+          <button id="accBrainHead" class="settings-acc-head" type="button" aria-expanded="false" aria-controls="accBrainBody">
+            <span class="settings-acc-caret" data-icon="chevron"></span>
+            <span class="settings-acc-title">Brain</span>
+            <span id="accBrainSummary" class="settings-acc-summary"></span>
+          </button>
+          <div id="accBrainBody" class="settings-acc-body" hidden>
+            <div class="settings-group-sub">The smarter model, called only to plan and when the navigator gets stuck.</div>
 
-          <div class="settings-radio-col">
-            <label class="settings-radio">
-              <input type="radio" name="setDebugMode" value="prompt" />
-              <span>Show me a prompt to paste</span>
+            <label class="settings-same-row" for="setSameAsNav">
+              <input id="setSameAsNav" class="consent-check" type="checkbox" />
+              <span>Same as Navigator</span>
             </label>
-            <label class="settings-radio">
-              <input type="radio" name="setDebugMode" value="auto" />
-              <span>Auto-fix with my coding agent</span>
-            </label>
+            <div id="setSameAsNavNote" class="settings-note" hidden>
+              <span class="ico" data-icon="info"></span>
+              <span id="setSameAsNavNoteText">Brain will use the Navigator's provider, mode, model and API key.</span>
+            </div>
+
+            <div id="setBrainFields" class="settings-brain-fields">
+              <label class="settings-field-label" for="setProvider">Provider</label>
+              <select id="setProvider" class="settings-select">
+                <option value="gemini">Gemini</option>
+                <option value="claude">Claude</option>
+                <option value="gpt">GPT</option>
+                <option value="ollama">Ollama — Advanced</option>
+                <option value="openrouter">OpenRouter</option>
+                <option value="glm">GLM (z.ai)</option>
+              </select>
+
+              <div id="setModeRow" class="settings-radio-row">
+                <label class="settings-radio">
+                  <input type="radio" name="setMode" value="api" />
+                  <span>API key</span>
+                </label>
+                <label class="settings-radio">
+                  <input type="radio" name="setMode" value="cli" />
+                  <span>CLI</span>
+                  <span class="badge-adv">Advanced</span>
+                </label>
+              </div>
+
+              <label class="settings-field-label" for="setModel">Model</label>
+              <input id="setModel" class="settings-input" type="text" placeholder="default model" />
+
+              <div id="setKeyRow" class="settings-key-row" hidden>
+                <label class="settings-field-label" for="setKey">API key</label>
+                <div class="settings-key-line">
+                  <div class="settings-key-input-wrap">
+                    <input id="setKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
+                    <button id="setKeyToggle" class="settings-key-toggle" type="button" title="Show / hide key" aria-label="Show or hide the API key">
+                      <span class="ico" data-icon="eye"></span>
+                    </button>
+                  </div>
+                  <button id="setKeySave" class="settings-btn-secondary" type="button">Save key</button>
+                </div>
+                <span id="setKeyStatus" class="settings-key-status"></span>
+              </div>
+            </div>
           </div>
+        </div>
 
-          <div id="setDebugAgentRow" class="settings-agent-row" hidden>
-            <label class="settings-field-label" for="setDebugAgent">Coding agent</label>
-            <select id="setDebugAgent" class="settings-select">
-              <option value="auto">Auto-detect</option>
-              <option value="claude">Claude</option>
-              <option value="codex">Codex</option>
-              <option value="gemini">Gemini</option>
-            </select>
+        <!-- Debugging accordion -->
+        <div class="settings-acc" data-acc="debug">
+          <button id="accDebugHead" class="settings-acc-head" type="button" aria-expanded="false" aria-controls="accDebugBody">
+            <span class="settings-acc-caret" data-icon="chevron"></span>
+            <span class="settings-acc-title">Debugging</span>
+            <span id="accDebugSummary" class="settings-acc-summary"></span>
+          </button>
+          <div id="accDebugBody" class="settings-acc-body" hidden>
+            <label class="settings-toggle-row" for="setAutoFix">
+              <span class="settings-toggle-copy">
+                <span class="settings-toggle-label">Auto-fix with my coding agent</span>
+                <span class="settings-toggle-sub">Off: show me a prompt to paste. On: hand the fix to a coding agent (needs the desktop app).</span>
+              </span>
+              <span class="switch">
+                <input id="setAutoFix" class="switch-input" type="checkbox" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </span>
+            </label>
+            <div id="setAutoFixNote" class="settings-note settings-note-warn" hidden>
+              <span class="ico" data-icon="info"></span>
+              <span id="setAutoFixNoteText">Auto-fix needs the desktop app (daemon) running. Install it, then turn this on.</span>
+            </div>
+
+            <div id="connectApp" class="connect-app" hidden>
+              <div class="connect-app-title">Connect the desktop app</div>
+              <div class="connect-app-sub">Run this once in a terminal — the daemon then auto-starts on every login and this panel connects on its own.</div>
+              <div class="connect-app-os">
+                <button class="connect-os-btn is-active" type="button" data-os="win">Windows</button>
+                <button class="connect-os-btn" type="button" data-os="mac">macOS</button>
+                <button class="connect-os-btn" type="button" data-os="linux">Linux</button>
+              </div>
+              <div class="connect-cmd-row">
+                <code id="connectCmd" class="connect-cmd"></code>
+                <button id="connectCopy" class="connect-copy" type="button">Copy</button>
+              </div>
+              <button id="connectNpmToggle" class="connect-alt" type="button">or install without a remote script (npm)</button>
+            </div>
+
+            <div id="setDebugAgentRow" class="settings-agent-row" hidden>
+              <label class="settings-field-label" for="setDebugAgent">Coding agent</label>
+              <select id="setDebugAgent" class="settings-select">
+                <option value="auto">Auto-detect</option>
+                <option value="claude">Claude</option>
+                <option value="codex">Codex</option>
+                <option value="gemini">Gemini</option>
+              </select>
+            </div>
           </div>
         </div>
 
         <div class="settings-actions">
           <button id="settingsSave" class="settings-btn-primary" type="button">Save</button>
-          <button id="settingsCloseBtn" class="settings-btn-secondary" type="button">Close</button>
         </div>
       </div>
     </section>

@@ -95,8 +95,6 @@ const historyList = $('historyList');
 // settings
 const settingsBtn = $('settingsBtn');
 const settingsModal = $('settingsModal');
-const settingsClose = $('settingsClose');
-const settingsCloseBtn = $('settingsCloseBtn');
 const settingsSave = $('settingsSave');
 // Brain card (the smart planner — cfg.planner)
 const setSameAsNav = $('setSameAsNav');
@@ -124,7 +122,43 @@ const setNavNanoNote = $('setNavNanoNote');
 const setNavNanoDownload = $('setNavNanoDownload');
 const setDebugAgentRow = $('setDebugAgentRow');
 const setDebugAgent = $('setDebugAgent');
+const setAutoFix = $('setAutoFix');
+const setAutoFixNote = $('setAutoFixNote');
+const setAutoFixNoteText = $('setAutoFixNoteText');
+const connectApp = $('connectApp');
+const connectCmd = $('connectCmd');
+const connectCopy = $('connectCopy');
+const connectNpmToggle = $('connectNpmToggle');
 const themeBtn = $('themeBtn');
+
+// One-line installer commands per OS. The install scripts are served straight
+// from the repo over GitHub Raw ($0, static, no backend) — the daemon then runs
+// on the user's OWN machine (localhost:9410); nothing is hosted server-side.
+// Swap INSTALL_BASE for a custom domain (Cloudflare/GitHub Pages) later if you
+// want a prettier URL; the raw form works the moment the repo is pushed.
+const INSTALL_BASE = 'https://raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install';
+const INSTALL_CMDS = {
+  win: `irm ${INSTALL_BASE}/install.ps1 | iex`,
+  mac: `curl -fsSL ${INSTALL_BASE}/install.sh | sh`,
+  linux: `curl -fsSL ${INSTALL_BASE}/install.sh | sh`,
+};
+// Fallback shown if you'd rather not pipe a remote script — pure npm, no host.
+const INSTALL_CMDS_NPM = {
+  win: 'npm i -g browser-qa-subagent; qa daemon --install-service',
+  mac: 'npm i -g browser-qa-subagent && qa daemon --install-service',
+  linux: 'npm i -g browser-qa-subagent && qa daemon --install-service',
+};
+let connectOs = 'win';
+// which command set the card is showing: the Raw-script one-liner or the npm form
+let connectUseNpm = false;
+function connectCmds() { return connectUseNpm ? INSTALL_CMDS_NPM : INSTALL_CMDS; }
+
+// settings accordions: head button ↔ body element (+ optional summary chip)
+const ACCORDIONS = [
+  { head: $('accNavHead'), body: $('accNavBody'), summary: $('accNavSummary') },
+  { head: $('accBrainHead'), body: $('accBrainBody'), summary: $('accBrainSummary') },
+  { head: $('accDebugHead'), body: $('accDebugBody'), summary: $('accDebugSummary') },
+];
 
 // Per-card DOM references, so the settings logic runs once per role. `nanoNote`/
 // `nanoDownload` live only on the navigator card (Nano is navigator-only now).
@@ -175,6 +209,9 @@ if (themeBtn) {
 let busy = false;
 let fixing = false;
 let fetchingClip = false;
+// whether the desktop app (daemon) is currently connected — gates auto-fix and
+// the download-clip button, both of which are daemon-only capabilities.
+let bridgeConnected = false;
 
 // settings: the last config returned by the daemon, and the current debug mode
 // (gates the auto-fix button — only shown when the user opted into auto-fix).
@@ -183,6 +220,8 @@ let debugMode = 'prompt';
 
 // the task + verdict of the most recent result (for history persistence)
 let lastResult = null; // { task, verdict, reason }
+// clipPath of the most recent result, if any (drives the daemon-gated clip btn)
+let lastClipPath = null;
 
 // ---- run history (chrome.storage.local) ------------------------------------
 const HISTORY_KEY = 'qaHistory';
@@ -304,9 +343,13 @@ function onPortMessage(msg) {
 
 // ---- header state ----------------------------------------------------------
 function setBridge(connected) {
+  bridgeConnected = !!connected;
   bridgeDot.classList.toggle('dot-on', connected);
   bridgeDot.classList.toggle('dot-off', !connected);
   bridgeDot.title = connected ? 'Daemon connected' : 'Daemon not connected';
+  // daemon-gated UI: the auto-fix toggle warning + the download-clip button
+  refreshAutoFixGate();
+  refreshClipVisibility();
 }
 
 function setNano(availability) {
@@ -408,13 +451,17 @@ nanoDownloadBtn.addEventListener('click', () => {
 });
 
 // ---- busy / run button -----------------------------------------------------
+// Exactly one of Run / Stop is visible at a time: idle → "Run test", running →
+// "Stop test". Run is disabled until a task is typed (and a testable tab is open).
 function setBusy(value) {
   busy = value;
-  refreshRunEnabled();
-  runBtn.textContent = value ? 'Testing…' : 'Run test';
+  // running → hide Run, show Stop; idle → the reverse
+  runBtn.hidden = value;
+  runBtn.textContent = 'Run test';
   stopBtn.hidden = !value;
   stopBtn.disabled = false;
-  stopBtn.textContent = 'Stop';
+  stopBtn.textContent = 'Stop test';
+  refreshRunEnabled();
   suggestions.querySelectorAll('.suggestion-card').forEach((c) => {
     c.disabled = value;
   });
@@ -429,6 +476,9 @@ stopBtn.addEventListener('click', () => {
   addProgressLine('Stopping the test…');
   postToSW({ kind: 'cancel' });
 });
+
+// keep Run enabled/disabled live as the task text changes
+taskInput.addEventListener('input', refreshRunEnabled);
 
 // ---- active-tab tracking ---------------------------------------------------
 function isTestableUrl(url) {
@@ -497,7 +547,9 @@ function refreshConsent() {
 
 function refreshRunEnabled() {
   const testable = activeTab && isTestableUrl(activeTab.url);
-  runBtn.disabled = busy || !testable;
+  const hasTask = (taskInput.value || '').trim().length > 0;
+  // Run stays greyed-out until there's both a testable tab AND a task to run.
+  runBtn.disabled = busy || !testable || !hasTask;
 }
 
 function loadActiveTab() {
@@ -689,14 +741,10 @@ function renderResult(params) {
   const reportText = params.plainReport || params.reason || '(no report)';
   plainReport.textContent = reportText;
 
-  // a saved replay clip (clipPath in the done payload) → offer a download
-  if (params.clipPath) {
-    clipBtn.hidden = false;
-    clipBtn.disabled = false;
-    clipBtn.innerHTML = qaIcon('download') + '<span>Download clip</span>';
-  } else {
-    clipBtn.hidden = true;
-  }
+  // a saved replay clip (clipPath in the done payload) → offer a download, but
+  // ONLY while the desktop app is connected (clips are a daemon-only feature).
+  lastClipPath = params.clipPath || null;
+  refreshClipVisibility();
 
   const fix = (params.fixPrompt || '').trim();
   if (fix) {
@@ -762,6 +810,17 @@ copyBtn.addEventListener('click', async () => {
 });
 
 // ---- download clip ---------------------------------------------------------
+// The clip button only appears when BOTH a clip exists for the last run AND the
+// desktop app is connected (the SW fetches the clip over the daemon bridge).
+function refreshClipVisibility() {
+  const show = !!lastClipPath && bridgeConnected && !fetchingClip;
+  clipBtn.hidden = !show;
+  if (show) {
+    clipBtn.disabled = false;
+    clipBtn.innerHTML = qaIcon('download') + '<span>Download clip</span>';
+  }
+}
+
 clipBtn.addEventListener('click', () => {
   if (fetchingClip) return;
   fetchingClip = true;
@@ -823,6 +882,10 @@ function resetFixUi() {
 
 autoFixBtn.addEventListener('click', () => {
   if (fixing) return;
+  if (!bridgeConnected) {
+    showError('Auto-fix needs the desktop app (daemon) running. Start it, then try again — or use the fix prompt below.');
+    return;
+  }
   fixing = true;
   autoFixBtn.disabled = true;
   autoFixBtn.textContent = 'Fixing…';
@@ -910,10 +973,9 @@ function selectedNavModel() {
   return setNavModel.value.trim();
 }
 
-/** The debug mode currently chosen in the form. */
+/** The debug mode currently chosen in the form (the auto-fix toggle). */
 function selectedDebugMode() {
-  const checked = settingsModal.querySelector('input[name="setDebugMode"]:checked');
-  return checked ? checked.value : 'prompt';
+  return setAutoFix.checked ? 'auto' : 'prompt';
 }
 
 /** Placeholder/default model for a provider, preferring the role-specific default
@@ -1002,9 +1064,72 @@ function refreshSettingsVisibility() {
   refreshCardVisibility(navCardRefs);
   refreshCardVisibility(brainCardRefs);
   refreshSameAsNav();
-
-  // agent select only when auto-fix is chosen
+  refreshAutoFixGate();
+  // agent select only when auto-fix is on
   setDebugAgentRow.hidden = selectedDebugMode() !== 'auto';
+  refreshAccordionSummaries();
+}
+
+/** Auto-fix needs the desktop app (daemon). When it isn't connected, force the
+ * toggle off, show a "install the app" note, and reveal the one-liner connect
+ * block so the user can set it up right there. The toggle is otherwise free. */
+function refreshAutoFixGate() {
+  if (!setAutoFix) return;
+  const wantAuto = setAutoFix.checked;
+  if (wantAuto && !bridgeConnected) {
+    // the user turned it on without the daemon — bounce it back off + explain
+    setAutoFix.checked = false;
+    setAutoFixNote.hidden = false;
+    setAutoFixNoteText.textContent =
+      'Auto-fix needs the desktop app (daemon) running — it hands the fix to your coding agent. Set it up below, then turn this on.';
+    setDebugAgentRow.hidden = true;
+  } else {
+    setAutoFixNote.hidden = !(wantAuto && !bridgeConnected);
+  }
+  // show the connect block whenever the daemon is down (auto-fix is the only
+  // daemon-gated setting in this accordion, so it's the natural home for it)
+  if (connectApp) {
+    connectApp.hidden = bridgeConnected;
+    if (!bridgeConnected) renderConnectCmd();
+  }
+}
+
+/** Reflect the selected OS + command style into the command box + pills. */
+function renderConnectCmd() {
+  if (!connectCmd) return;
+  const cmds = connectCmds();
+  connectCmd.textContent = cmds[connectOs] || cmds.win;
+  if (connectApp) {
+    connectApp.querySelectorAll('.connect-os-btn').forEach((b) => {
+      b.classList.toggle('is-active', b.getAttribute('data-os') === connectOs);
+    });
+  }
+  if (connectNpmToggle) {
+    connectNpmToggle.textContent = connectUseNpm
+      ? 'use the one-line script instead'
+      : 'or install without a remote script (npm)';
+  }
+}
+
+/** Short right-aligned summary chips on each collapsed accordion head. */
+function refreshAccordionSummaries() {
+  const navSum = $('accNavSummary');
+  const brainSum = $('accBrainSummary');
+  const debugSum = $('accDebugSummary');
+  if (navSum) {
+    const info = providerInfo(selectedNavProvider());
+    const label = (info && info.id) || selectedNavProvider();
+    navSum.textContent = selectedNavModel() || defaultModelFor(info, selectedNavMode(), 'navigator') || label;
+  }
+  if (brainSum) {
+    if (setSameAsNav.checked) { brainSum.textContent = 'same as Navigator'; }
+    else {
+      const info = providerInfo(selectedProvider());
+      const label = (info && info.id) || selectedProvider();
+      brainSum.textContent = setModel.value.trim() || defaultModelFor(info, selectedMode(), 'brain') || label;
+    }
+  }
+  if (debugSum) debugSum.textContent = selectedDebugMode() === 'auto' ? 'auto-fix on' : 'paste a prompt';
 }
 
 /** Populate the whole form from a daemon config payload. */
@@ -1046,11 +1171,8 @@ function renderSettings(cfg) {
     (planner.model || '') === (navi.model || ''),
   );
 
-  // debug mode radios
-  const wantDebug = cfg.debugMode || 'prompt';
-  settingsModal.querySelectorAll('input[name="setDebugMode"]').forEach((el) => {
-    el.checked = (el.value === wantDebug);
-  });
+  // debug mode → auto-fix toggle
+  setAutoFix.checked = (cfg.debugMode || 'prompt') === 'auto';
 
   // debug agent
   if (cfg.debugAgent) setDebugAgent.value = cfg.debugAgent;
@@ -1103,21 +1225,69 @@ function closeSettings() {
 }
 
 settingsBtn.addEventListener('click', openSettings);
-settingsClose.addEventListener('click', closeSettings);
-settingsCloseBtn.addEventListener('click', closeSettings);
 // click the dimmed backdrop (outside the card) to dismiss
 settingsModal.addEventListener('click', (ev) => {
   if (ev.target === settingsModal) closeSettings();
 });
+
+// accordions: expand one section at a time (clicking an open head collapses it)
+for (const acc of ACCORDIONS) {
+  if (!acc.head || !acc.body) continue;
+  acc.head.addEventListener('click', () => {
+    const open = acc.head.getAttribute('aria-expanded') === 'true';
+    for (const other of ACCORDIONS) {
+      if (!other.head || !other.body) continue;
+      const willOpen = other === acc ? !open : false;
+      other.head.setAttribute('aria-expanded', String(willOpen));
+      other.body.hidden = !willOpen;
+    }
+  });
+}
 // settings-side "Download on-device AI" (navigator card) — reuses the SW nano-download flow
 if (setNavNanoDownload) {
   setNavNanoDownload.addEventListener('click', () => {
+    nanoDownloading = true;      // keep it hidden across re-renders until ready
     setNavNanoDownload.hidden = true;
     postToSW({ kind: 'nano-download' });
   });
 }
 
+// auto-fix toggle: gate on the daemon, then refresh the agent row + summary
+setAutoFix.addEventListener('change', refreshSettingsVisibility);
+setModel.addEventListener('input', refreshAccordionSummaries);
 setSameAsNav.addEventListener('change', refreshSettingsVisibility);
+
+// connect-desktop-app block: OS switcher + copy the one-liner
+if (connectApp) {
+  connectApp.querySelectorAll('.connect-os-btn').forEach((b) => {
+    b.addEventListener('click', () => {
+      connectOs = b.getAttribute('data-os') || 'win';
+      renderConnectCmd();
+    });
+  });
+}
+if (connectNpmToggle) {
+  connectNpmToggle.addEventListener('click', () => {
+    connectUseNpm = !connectUseNpm;
+    renderConnectCmd();
+  });
+}
+if (connectCopy) {
+  let connectCopyTimer = null;
+  connectCopy.addEventListener('click', async () => {
+    const cmds = connectCmds();
+    const text = cmds[connectOs] || cmds.win;
+    try { await navigator.clipboard.writeText(text); }
+    catch { /* clipboard may be unavailable; the code box is still selectable */ }
+    connectCopy.classList.add('copied');
+    connectCopy.textContent = 'Copied';
+    if (connectCopyTimer) clearTimeout(connectCopyTimer);
+    connectCopyTimer = setTimeout(() => {
+      connectCopy.classList.remove('copied');
+      connectCopy.textContent = 'Copy';
+    }, 2000);
+  });
+}
 setProvider.addEventListener('change', refreshSettingsVisibility);
 setNavProvider.addEventListener('change', refreshSettingsVisibility);
 setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
@@ -1126,11 +1296,9 @@ setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
 setNavModeRow.querySelectorAll('input[name="setNavMode"]').forEach((el) => {
   el.addEventListener('change', refreshSettingsVisibility);
 });
-// live-update the "same as Navigator" summary as the Navigator's model text changes
-setNavModel.addEventListener('input', refreshSameAsNav);
-settingsModal.querySelectorAll('input[name="setDebugMode"]').forEach((el) => {
-  el.addEventListener('change', refreshSettingsVisibility);
-});
+// live-update the "same as Navigator" summary + accordion chip as the Navigator's
+// model text changes
+setNavModel.addEventListener('input', () => { refreshSameAsNav(); refreshAccordionSummaries(); });
 
 // Save key — one handler per card; keys are stored per-provider (shared across cards).
 setKeySave.addEventListener('click', () => {

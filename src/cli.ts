@@ -11,6 +11,7 @@ import { slimReport, type Report } from './report/report.js';
 import { listScripts } from './recorder/script.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
+import { installService, uninstallService } from './service/install-service.js';
 import { buildFixPrompt } from './vibe/fix-prompt.js';
 import { dispatchFix, runWithAutoFix } from './vibe/auto-fix.js';
 import { Vault } from './vault/vault.js';
@@ -219,9 +220,22 @@ program
   .command('daemon')
   .description('start the vibe-mode daemon: a bridge the extension side panel connects to, driving QA runs from the GUI')
   .option('--bridge-port <n>', 'WebSocket port the extension connects to', (v) => parseInt(v, 10))
-  .action((opts: { bridgePort?: number }) => {
+  .option('--install-service', 'register the daemon to auto-start on login (then exit), so the extension connects with no terminal', false)
+  .option('--uninstall-service', 'remove the auto-start service registered by --install-service (then exit)', false)
+  .action((opts: { bridgePort?: number; installService?: boolean; uninstallService?: boolean }) => {
     const cfg = loadConfig();
     const port = opts.bridgePort ?? cfg.bridgePort;
+
+    // --install-service / --uninstall-service are one-shot: register (or remove)
+    // the OS autostart entry and exit, rather than running the daemon inline.
+    if (opts.installService || opts.uninstallService) {
+      const res = opts.uninstallService
+        ? uninstallService()
+        : installService({ bridgePort: port });
+      console.log(res.message);
+      process.exit(res.ok ? 0 : 1);
+    }
+
     const bridge = new BridgeServer(port);
     const vibe = new VibeService(bridge);
     vibe.start();
