@@ -94,43 +94,54 @@
           <div class="settings-group-title">Brain — makes the plan (smart)</div>
           <div class="settings-group-sub">The smarter model, called only to plan and when the navigator gets stuck — so it barely affects cost.</div>
 
-          <label class="settings-field-label" for="setProvider">Provider</label>
-          <select id="setProvider" class="settings-select">
-            <option value="gemini">Gemini</option>
-            <option value="claude">Claude</option>
-            <option value="gpt">GPT</option>
-            <option value="ollama">Ollama — Advanced</option>
-            <option value="openrouter">OpenRouter</option>
-            <option value="glm">GLM (z.ai)</option>
-          </select>
-
-          <div id="setModeRow" class="settings-radio-row">
-            <label class="settings-radio">
-              <input type="radio" name="setMode" value="api" />
-              <span>API key</span>
-            </label>
-            <label class="settings-radio">
-              <input type="radio" name="setMode" value="cli" />
-              <span>CLI</span>
-              <span class="badge-adv">Advanced</span>
-            </label>
+          <label class="settings-same-row" for="setSameAsNav">
+            <input id="setSameAsNav" class="consent-check" type="checkbox" />
+            <span>Use the same provider, model &amp; key as the Navigator</span>
+          </label>
+          <div id="setSameAsNavNote" class="settings-note" hidden>
+            <span class="ico" data-icon="info"></span>
+            <span id="setSameAsNavNoteText">Brain will use the Navigator's provider, mode, model and API key.</span>
           </div>
 
-          <label class="settings-field-label" for="setModel">Model</label>
-          <input id="setModel" class="settings-input" type="text" placeholder="default model" />
+          <div id="setBrainFields" class="settings-brain-fields">
+            <label class="settings-field-label" for="setProvider">Provider</label>
+            <select id="setProvider" class="settings-select">
+              <option value="gemini">Gemini</option>
+              <option value="claude">Claude</option>
+              <option value="gpt">GPT</option>
+              <option value="ollama">Ollama — Advanced</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="glm">GLM (z.ai)</option>
+            </select>
 
-          <div id="setKeyRow" class="settings-key-row" hidden>
-            <label class="settings-field-label" for="setKey">API key</label>
-            <div class="settings-key-line">
-              <div class="settings-key-input-wrap">
-                <input id="setKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
-                <button id="setKeyToggle" class="settings-key-toggle" type="button" title="Show / hide key" aria-label="Show or hide the API key">
-                  <span class="ico" data-icon="eye"></span>
-                </button>
-              </div>
-              <button id="setKeySave" class="settings-btn-secondary" type="button">Save key</button>
+            <div id="setModeRow" class="settings-radio-row">
+              <label class="settings-radio">
+                <input type="radio" name="setMode" value="api" />
+                <span>API key</span>
+              </label>
+              <label class="settings-radio">
+                <input type="radio" name="setMode" value="cli" />
+                <span>CLI</span>
+                <span class="badge-adv">Advanced</span>
+              </label>
             </div>
-            <span id="setKeyStatus" class="settings-key-status"></span>
+
+            <label class="settings-field-label" for="setModel">Model</label>
+            <input id="setModel" class="settings-input" type="text" placeholder="default model" />
+
+            <div id="setKeyRow" class="settings-key-row" hidden>
+              <label class="settings-field-label" for="setKey">API key</label>
+              <div class="settings-key-line">
+                <div class="settings-key-input-wrap">
+                  <input id="setKey" class="settings-input" type="password" placeholder="Paste API key" autocomplete="off" />
+                  <button id="setKeyToggle" class="settings-key-toggle" type="button" title="Show / hide key" aria-label="Show or hide the API key">
+                    <span class="ico" data-icon="eye"></span>
+                  </button>
+                </div>
+                <button id="setKeySave" class="settings-btn-secondary" type="button">Save key</button>
+              </div>
+              <span id="setKeyStatus" class="settings-key-status"></span>
+            </div>
           </div>
         </div>
 

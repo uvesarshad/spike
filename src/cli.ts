@@ -84,7 +84,7 @@ program
   .requiredOption('--url <url>', 'page to start on')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
   .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
-  .option('--allow-host <host>', 'permit clicks/typing on this host (repeatable; outside allowedHosts is read-only)', collectHost, [])
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically', collectHost, [])
   .option('--no-record', 'do not record a passing run to generated-tests/')
   .option('--fix', 'on failure, hand the fix prompt to your coding agent (claude/codex/gemini) and re-test', false)
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
@@ -193,7 +193,7 @@ program
   .option('--all', 'replay every script in generated-tests/ (the regression suite)', false)
   .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
   .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
-  .option('--allow-host <host>', 'permit clicks/typing on this host (repeatable; outside allowedHosts is read-only)', collectHost, [])
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically', collectHost, [])
   .option('--json', 'print slim JSON verdicts only', false)
   .action(async (name: string | undefined, opts: { all: boolean; heal: boolean; via?: 'cdp' | 'extension'; allowHost: string[]; json: boolean }) => {
     const targets = opts.all ? listScripts() : name ? [name] : [];

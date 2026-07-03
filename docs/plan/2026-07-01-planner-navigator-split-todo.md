@@ -8,7 +8,7 @@
 
 ## Phase A — Nano-nav spike (GO/NO-GO)
 - [x] Create `spikes/nano-nav/` spike: standalone Node+CDP harness feeding Nano `{task + sub-goal + a11y text}` with a single-action JSON schema (Prompt API `responseConstraint`, text-only). 6 login→cart→checkout cases + goal_complete/blocked detection; prints per-case pick-vs-expected + GO/NO-GO.
-- [ ] **← USER RUNS:** `cd spikes/nano-nav && npm install && node spike-nano-nav.js` (needs your Chrome + on-device Nano). Result decides whether Nano navigator is the default or an "Experimental" toggle.
+- [x] **RAN 2026-07-03 → NO-GO (4/6, threshold 5).** Latency excellent (avg 2.8s). Nano is a strong ACTION-picker (4/4: type/click/discriminate) but a poor STATE-detector (0/2: didn't emit `goal_complete` on a confirmation page or `blocked` on a payment-declined alert — clicked a button instead). Matches the live mapleandsand loop-on-stuck. Per the plan's NO-GO branch → default navigator should be a cheap cloud model; Nano ships as an "Experimental (free)" toggle. *(Profile-lock gotcha: kill leftover `qa-spike-chrome-profile` Chrome from prior daemon runs before running, or CDP never comes up.)*
 
 ## Phase B — Router + capability + prompts + actions ✅
 - [x] `adapter.ts`: `Capability` += `'plan-goals'`.

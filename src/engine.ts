@@ -64,6 +64,18 @@ export interface QaRunOptions {
   /** Cooperative cancellation, threaded into the driver loop: when aborted the
    * run ends 'uncertain' / 'cancelled by user'. (vibe.cancel depends on this.) */
   signal?: AbortSignal;
+  /** Trust the explicit `url` the caller named as a target worth interacting
+   * with — its host (plus the www./bare-domain variant, since apex↔www
+   * redirects are common) is added to the Tier-4 allowedHosts guard for this
+   * run, so `qa run "..." --url <anything>` can click/type end-to-end against
+   * any site/app/no-code builder without a separate --allow-host flag. Default
+   * true for CLI/MCP callers, where naming the URL on the command line already
+   * IS the consent. The vibe panel (an unattended browser extension driving
+   * whatever tab happens to be open) sets this false unless the user has
+   * checked its own "allow click/type on this site" consent toggle. Hosts
+   * OTHER than the named target (ad iframes, unexpected redirects) still stay
+   * read-only unless separately allow-listed. */
+  trustTargetHost?: boolean;
 }
 
 export interface QaRunResult extends Report {
@@ -302,6 +314,20 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; n
   return { adapters: [...byKey.values()], navigatorName, plannerName };
 }
 
+/** The host of `url` plus its www./bare-domain sibling (apex↔www redirects are
+ * common — e.g. mapleandsand.com → www.mapleandsand.com — and the guard's
+ * subdomain check only covers one direction). '' / unparseable url → []. */
+function targetHostCandidates(url: string): string[] {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    return [];
+  }
+  if (!host) return [];
+  return host.startsWith('www.') ? [host, host.slice(4)] : [host, `www.${host}`];
+}
+
 export async function qaRun(task: string, url: string, opts: QaRunOptions = {}): Promise<QaRunResult> {
   const progress = opts.onProgress ?? (() => {});
   const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId });
@@ -354,10 +380,14 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
       }
     }
 
+    const allowedHosts = (opts.trustTargetHost ?? true)
+      ? [...cfg.allowedHosts, ...targetHostCandidates(url)]
+      : cfg.allowedHosts;
+
     const report: QaRunResult = await runDriverLoop(browser, router, artifacts, task, url, {
       maxSteps: opts.maxSteps ?? cfg.maxSteps,
       onStep: opts.onStep,
-      allowedHosts: cfg.allowedHosts,
+      allowedHosts,
       vault,
       signal: opts.signal,
     });

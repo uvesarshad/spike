@@ -99,6 +99,10 @@ const settingsClose = $('settingsClose');
 const settingsCloseBtn = $('settingsCloseBtn');
 const settingsSave = $('settingsSave');
 // Brain card (the smart planner — cfg.planner)
+const setSameAsNav = $('setSameAsNav');
+const setBrainFields = $('setBrainFields');
+const setSameAsNavNote = $('setSameAsNavNote');
+const setSameAsNavNoteText = $('setSameAsNavNoteText');
 const setProvider = $('setProvider');
 const setModeRow = $('setModeRow');
 const setModel = $('setModel');
@@ -966,11 +970,38 @@ function refreshCardVisibility(refs) {
   }
 }
 
+/** Show/hide the Brain card's own provider/mode/model/key fields vs. the "same
+ * as Navigator" summary note, and keep that note's text current. The key is
+ * ALREADY shared across cards when both pick the same provider (the vault
+ * stores it by provider, not by role — see onKeySaved) — this toggle just
+ * saves the user from picking the same provider/mode/model twice.
+ *
+ * Nano (on-device) is navigator-only — it never plans goals (see CLAUDE.md) —
+ * so the shortcut is disabled while the Navigator is set to Nano, since
+ * copying it onto the Brain card would silently do nothing useful. */
+function refreshSameAsNav() {
+  const navIsNano = selectedNavProvider() === 'nano';
+  setSameAsNav.disabled = navIsNano;
+  if (navIsNano) setSameAsNav.checked = false;
+
+  const same = setSameAsNav.checked;
+  setBrainFields.hidden = same;
+  setSameAsNavNote.hidden = !same;
+  if (same) {
+    const info = providerInfo(selectedNavProvider());
+    const providerLabel = (info && info.id) || selectedNavProvider();
+    const modelLabel = selectedNavModel() || defaultModelFor(info, selectedNavMode(), 'navigator');
+    setSameAsNavNoteText.textContent =
+      `Brain will use the Navigator's setup: ${providerLabel} (${selectedNavMode()}, ${modelLabel}).`;
+  }
+}
+
 /** Refresh BOTH settings cards + the debug agent row. Called on open and whenever
  * provider/mode/debug-mode change. */
 function refreshSettingsVisibility() {
   refreshCardVisibility(navCardRefs);
   refreshCardVisibility(brainCardRefs);
+  refreshSameAsNav();
 
   // agent select only when auto-fix is chosen
   setDebugAgentRow.hidden = selectedDebugMode() !== 'auto';
@@ -1005,6 +1036,15 @@ function renderSettings(cfg) {
 
   // Navigator card: model value
   setNavModel.value = navi.model || '';
+
+  // "same as Navigator": auto-detected from the saved config (Brain's provider/
+  // mode/model exactly match the Navigator's) rather than a separate stored
+  // flag — the user can still flip it either way.
+  setSameAsNav.checked = Boolean(
+    planner.provider && planner.provider === navi.provider &&
+    (planner.mode || 'api') === (navi.mode || 'ondevice') &&
+    (planner.model || '') === (navi.model || ''),
+  );
 
   // debug mode radios
   const wantDebug = cfg.debugMode || 'prompt';
@@ -1077,6 +1117,7 @@ if (setNavNanoDownload) {
   });
 }
 
+setSameAsNav.addEventListener('change', refreshSettingsVisibility);
 setProvider.addEventListener('change', refreshSettingsVisibility);
 setNavProvider.addEventListener('change', refreshSettingsVisibility);
 setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
@@ -1085,6 +1126,8 @@ setModeRow.querySelectorAll('input[name="setMode"]').forEach((el) => {
 setNavModeRow.querySelectorAll('input[name="setNavMode"]').forEach((el) => {
   el.addEventListener('change', refreshSettingsVisibility);
 });
+// live-update the "same as Navigator" summary as the Navigator's model text changes
+setNavModel.addEventListener('input', refreshSameAsNav);
 settingsModal.querySelectorAll('input[name="setDebugMode"]').forEach((el) => {
   el.addEventListener('change', refreshSettingsVisibility);
 });
@@ -1106,13 +1149,15 @@ setNavKeySave.addEventListener('click', () => {
 });
 
 settingsSave.addEventListener('click', () => {
+  // "same as Navigator": ship the Brain an EXACT copy of the Navigator's
+  // provider/mode/model. Since the vault stores API keys per-provider (not
+  // per-role), matching provider is all it takes to also share the key.
+  const planner = setSameAsNav.checked
+    ? { provider: selectedNavProvider(), mode: selectedNavMode(), model: selectedNavModel() }
+    : { provider: selectedProvider(), mode: selectedMode(), model: setModel.value.trim() };
   postToSW({
     kind: 'config-set',
-    planner: {
-      provider: selectedProvider(),
-      mode: selectedMode(),
-      model: setModel.value.trim(),
-    },
+    planner,
     navigator: {
       provider: selectedNavProvider(),
       mode: selectedNavMode(),

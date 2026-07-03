@@ -286,7 +286,11 @@ export class VibeService {
       // Consent: only when the panel passed allowHost do we widen allowedHosts.
       // Unchecked → the default allowedHosts (localhost/127.0.0.1) stand, so the
       // read-only guard applies on third-party hosts and the run ends with the
-      // guard message (which the panel surfaces).
+      // guard message (which the panel surfaces). qaRun's own trustTargetHost
+      // default (true, for CLI/MCP callers who named the URL as a deliberate
+      // target) is explicitly turned off here unless the checkbox was on — the
+      // panel drives whatever tab happens to be open, so naming a URL is not
+      // itself consent the way typing it on a command line is.
       const config = allowHost
         ? { via: 'extension' as const, allowedHosts: [...loadConfig().allowedHosts, allowHost] }
         : { via: 'extension' as const };
@@ -295,6 +299,7 @@ export class VibeService {
         tabId,
         clientId,
         config,
+        trustTargetHost: Boolean(allowHost),
         record: false,
         onProgress: progress,
         onStep: (info) => this.bridge.sendEvent('vibe.step', info as unknown as Record<string, unknown>, target),
