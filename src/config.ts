@@ -14,6 +14,7 @@ import {
   type ProviderId,
   type PlannerMode,
 } from './vibe/settings.js';
+import type { AssertionPolicy } from './assertions/policy.js';
 
 /** Repo's extension/ dir, resolved relative to this source file (src/ → up → extension). */
 const DEFAULT_EXTENSION_DIR = path.resolve(
@@ -47,6 +48,9 @@ export interface QaConfig {
   googleCliEnv: Record<string, string>;
   /** Where run artifacts (report.json, screenshots) are written. */
   artifactsDir: string;
+  /** File-backed verified action cache. Disabled by default until explicitly enabled. */
+  actionCache: boolean;
+  actionCacheDir: string;
   /** Default driver-loop step budget. */
   maxSteps: number;
   /** Auto-fix: coding-agent CLI that receives the fix prompt headlessly
@@ -61,6 +65,9 @@ export interface QaConfig {
   allowedHosts: string[];
   /** Record a replay GIF (ghost cursor + captions are in-page, so they're in frame). */
   recordClip: boolean;
+  /** Visual assertion policy. single-ladder preserves the cheap existing path;
+   * stricter modes can require multi-model agreement when enough visual adapters are configured. */
+  assertionPolicy: AssertionPolicy;
   /** Keep the FREE rung-1 Google CLI as the first planner even when a BYOK key is
    * present. Default false: providing a key IS the opt-in to spend it for ~3×
    * faster planning (rung-2 HTTP beats the CLI cold-spawn). Set true to keep free
@@ -91,6 +98,8 @@ const DEFAULTS: QaConfig = {
   googleCliModel: 'gemini-3-flash-preview',
   googleCliEnv: { NODE_OPTIONS: '--use-system-ca' },
   artifactsDir: path.resolve('artifacts'),
+  actionCache: false,
+  actionCacheDir: path.resolve('.qa-action-cache'),
   maxSteps: 12,
   allowedHosts: ['localhost', '127.0.0.1'],
   // opt-in (QA_RECORD_CLIP=1): GIF capture works over raw CDP (test/v14) but
@@ -98,6 +107,7 @@ const DEFAULTS: QaConfig = {
   // one cdp-mode run showed an unexplained input interaction — see TODO.md.
   // Vibe-mode clips need a chrome.tabCapture recorder (planned).
   recordClip: false,
+  assertionPolicy: 'single-ladder',
   preferFreePlanner: false,
   // BRAIN default: claude CLI — the daemon HAS cli rungs and the former gemini:cli
   // free tier is dead (see settings.ts). (This intentionally differs from
@@ -112,6 +122,7 @@ const DEFAULTS: QaConfig = {
 /** Valid enum values for env-override parsing (silently ignore garbage). */
 const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter', 'glm'];
 const DEBUG_AGENTS: DebugAgent[] = ['auto', 'claude', 'codex', 'gemini'];
+const ASSERTION_POLICIES: AssertionPolicy[] = ['single-ladder', 'fail-on-disagreement', 'arbiter-on-disagreement'];
 
 function fromFile(cwd: string): Partial<QaConfig> {
   const p = path.join(cwd, 'qa.config.json');
@@ -133,6 +144,8 @@ function fromEnv(): Partial<QaConfig> {
   if (e.QA_GOOGLE_CLI_MODEL) out.googleCliModel = e.QA_GOOGLE_CLI_MODEL;
   if (e.GEMINI_API_KEY) out.geminiApiKey = e.GEMINI_API_KEY;
   if (e.QA_ARTIFACTS_DIR) out.artifactsDir = e.QA_ARTIFACTS_DIR;
+  if (e.QA_ACTION_CACHE) out.actionCache = e.QA_ACTION_CACHE !== '0' && e.QA_ACTION_CACHE !== 'false';
+  if (e.QA_ACTION_CACHE_DIR) out.actionCacheDir = e.QA_ACTION_CACHE_DIR;
   if (e.QA_MAX_STEPS) out.maxSteps = Number(e.QA_MAX_STEPS);
   if (e.QA_FIX_AGENT_BIN) out.fixAgentBin = e.QA_FIX_AGENT_BIN;
   if (e.QA_FIX_AGENT_ARGS) {
@@ -141,6 +154,9 @@ function fromEnv(): Partial<QaConfig> {
   if (e.QA_FIX_AGENT_CWD) out.fixAgentCwd = e.QA_FIX_AGENT_CWD;
   if (e.QA_ALLOWED_HOSTS) out.allowedHosts = e.QA_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
   if (e.QA_RECORD_CLIP) out.recordClip = e.QA_RECORD_CLIP !== '0' && e.QA_RECORD_CLIP !== 'false';
+  if (e.QA_ASSERTION_POLICY && ASSERTION_POLICIES.includes(e.QA_ASSERTION_POLICY as AssertionPolicy)) {
+    out.assertionPolicy = e.QA_ASSERTION_POLICY as AssertionPolicy;
+  }
   if (e.QA_PREFER_FREE_PLANNER) out.preferFreePlanner = e.QA_PREFER_FREE_PLANNER !== '0' && e.QA_PREFER_FREE_PLANNER !== 'false';
   // planner (BRAIN) selection — env wins over the SettingsStore (power-users / tests).
   const planner: Partial<PlannerSelection> = {};

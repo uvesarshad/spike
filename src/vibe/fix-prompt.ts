@@ -39,6 +39,8 @@ export function humanizeStep(step: StepRecord): string {
       return `checked the page looked right: ${a.expectation}`;
     case 'assert_dom':
       return `checked ${targetPhrase ?? 'the page'} contained ${JSON.stringify(a.contains)}`;
+    case 'extract':
+      return `extracted ${a.key} from ${targetPhrase ?? 'the page'}`;
     case 'wait':
       return `waited ${Math.round(a.ms / 100) / 10}s for the page to settle`;
     case 'finish':

@@ -14,6 +14,7 @@ import { firstError } from '../capture/console-network.js';
 import type { ArtifactStore } from '../report/artifacts.js';
 import type { FailingStep, Report, RunVerdict, StepRecord } from '../report/report.js';
 import type { QaScript, ScriptStep, ScriptTarget } from './script.js';
+import { createRunDataState, recordExtraction, resolveRunPlaceholders } from '../run-data/index.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const FIND_TIMEOUT_MS = 5_000;
@@ -36,6 +37,7 @@ export async function replayScript(
   let reason = `replayed ${script.steps.length} recorded steps without drift`;
   let failingStep: FailingStep | null = null;
   let visualsSkipped = 0;
+  const runData = createRunDataState();
 
   const nanoReady = nano !== null && (await nano.availability().catch(() => 'unavailable')) === 'available';
   if (nano && !nanoReady) progress('warning: Gemini Nano unavailable — visual assertions will be SKIPPED (replays never spend paid tokens)');
@@ -72,7 +74,7 @@ export async function replayScript(
         }
         case 'type': {
           const node = await findByTarget(browser, s.target);
-          await browser.type(node.id, s.text);
+          await browser.type(node.id, resolveRunPlaceholders(s.text, runData).text);
           break;
         }
         case 'hover': {
@@ -102,6 +104,15 @@ export async function replayScript(
           if (!hay.includes(s.contains.toLowerCase())) {
             throw new Error(`expected ${JSON.stringify(s.contains)} in ${s.target.role} "${s.target.name ?? ''}", found: ${hay.slice(0, 150)}`);
           }
+          break;
+        }
+        case 'extract': {
+          const node = await findByTarget(browser, s.target);
+          const ax = await browser.axTree();
+          const fresh = findNodeById(ax.root, node.id) ?? node;
+          const value = extractValue(subtreeText(fresh).trim(), s.pattern);
+          if (!value) throw new Error(`could not extract ${s.key} from ${s.target.role} "${s.target.name ?? ''}"`);
+          recordExtraction(runData, { key: s.key, value, source: 'dom', label: s.target.name });
           break;
         }
         case 'assert_visual': {
@@ -184,6 +195,7 @@ export async function replayScript(
     url: script.url,
     steps,
     model_trace: [], // the whole point: no planner in the trace
+    run_data: runData,
     durationMs: Date.now() - t0,
     tokenEstimate: 0,
   };
@@ -215,8 +227,10 @@ function toAction(s: ScriptStep): StepRecord['action'] {
       return { type: 'go_back' };
     case 'assert_dom':
       return { type: 'assert_dom', nodeId: `<${s.target.role}:${s.target.name ?? ''}>`, contains: s.contains };
+    case 'extract':
+      return { type: 'extract', nodeId: `<${s.target.role}:${s.target.name ?? ''}>`, key: s.key, ...(s.pattern && { pattern: s.pattern }) };
     case 'assert_visual':
-      return { type: 'assert_visual', expectation: s.expectation };
+      return { type: 'assert_visual', expectation: s.expectation, ...(s.mode && { mode: s.mode }) };
     case 'wait':
       return { type: 'wait', ms: s.ms };
   }
@@ -242,8 +256,10 @@ function describeScriptStep(s: ScriptStep): string {
       return 'go back';
     case 'assert_dom':
       return `dom check: ${s.target.role} "${s.target.name ?? ''}" contains ${JSON.stringify(s.contains)}`;
+    case 'extract':
+      return `extract ${s.key} from ${s.target.role} "${s.target.name ?? ''}"`;
     case 'assert_visual':
-      return `visual check: ${s.expectation.slice(0, 80)}`;
+      return `${s.mode === 'video' ? 'video' : 'visual'} check: ${s.expectation.slice(0, 80)}`;
     case 'wait':
       return `wait ${s.ms}ms`;
   }
@@ -338,4 +354,18 @@ function subtreeText(node: AxNode): string {
   };
   walk(node);
   return parts.join(' ');
+}
+
+function extractValue(text: string, pattern?: string): string | null {
+  const trimmed = text.trim();
+  if (!pattern) return trimmed || null;
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern);
+  } catch {
+    return null;
+  }
+  const match = re.exec(trimmed);
+  if (!match) return null;
+  return (match[1] ?? match[0]).trim() || null;
 }

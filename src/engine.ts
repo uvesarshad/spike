@@ -31,6 +31,7 @@ import { OllamaAdapter } from './router/adapters/ollama.js';
 import { AnthropicAdapter } from './router/adapters/anthropic.js';
 import { OpenAiCompatibleAdapter } from './router/adapters/openai-compatible.js';
 import { CliPlannerAdapter } from './router/adapters/cli-planner.js';
+import { openAiGatewayOptions } from './router/gateway.js';
 import { defaultModelFor, type PlannerMode, type ProviderId } from './vibe/settings.js';
 import { ArtifactStore } from './report/artifacts.js';
 import { runDriverLoop } from './driver/loop.js';
@@ -39,6 +40,7 @@ import type { Report } from './report/report.js';
 import { diffScripts, loadScript, saveScript, scriptFromReport, type QaScript } from './recorder/script.js';
 import { replayScript } from './recorder/replay.js';
 import { startClipRecorder, type ClipRecorder } from './clip/screencast.js';
+import { FileActionCache } from './cache/action-cache.js';
 
 export interface QaRunOptions {
   maxSteps?: number;
@@ -49,7 +51,7 @@ export interface QaRunOptions {
   onProgress?: (line: string) => void;
   /** Structured per-step hook (vibe panel animates these). Threaded into the
    * driver loop by the planner-side work; forwarded as vibe.step events. */
-  onStep?: (info: { index: number; kind: 'plan' | 'click' | 'type' | 'hover' | 'key' | 'select' | 'navigate' | 'assert' | 'wait' | 'finish'; text: string; ok?: boolean }) => void;
+  onStep?: (info: { index: number; kind: 'plan' | 'click' | 'type' | 'hover' | 'key' | 'select' | 'navigate' | 'assert' | 'extract' | 'wait' | 'finish'; text: string; ok?: boolean }) => void;
   /** Caller-owned bridge (extension mode). When the panel already drives an
    * attached Chrome, the daemon reuses this bridge instead of spawning its own;
    * ownership (and close()) stays with the caller. */
@@ -286,7 +288,6 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; n
   // GLM_THINKING=enabled turns reasoning on (slower/costlier, sharper plans);
   // default 'disabled' keeps the planner fast and cheap — the ladder's whole point.
   const glmKey = vault.get('glm') ?? process.env.GLM_API_KEY ?? process.env.ZAI_API_KEY;
-  const glmBaseUrl = process.env.GLM_BASE_URL ?? 'https://api.z.ai/api/paas/v4';
   const glmThinking = process.env.GLM_THINKING === 'enabled' ? 'enabled' : 'disabled';
 
   const byKey = new Map<string, ModelAdapter>();
@@ -295,15 +296,15 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; n
   byKey.set('gemini:api', new ByokGeminiAdapter({ apiKey: geminiKey, model: modelFor('gemini', 'api', cfg.googleCliModel) }));
   byKey.set('claude:api', new AnthropicAdapter({ apiKey: anthropicKey, model: modelFor('claude', 'api') }));
   byKey.set('claude:cli', new CliPlannerAdapter({ bin: 'claude', model: modelFor('claude', 'cli') }));
-  byKey.set('gpt:api', new OpenAiCompatibleAdapter({ apiKey: openaiKey, baseUrl: 'https://api.openai.com/v1', label: 'gpt', model: modelFor('gpt', 'api') }));
+  byKey.set('gpt:api', new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: openaiKey, defaultBaseUrl: 'https://api.openai.com/v1', label: 'gpt', model: modelFor('gpt', 'api') })));
   // codex uses its own configured model when none is given (default is blank)
   const codexModel = modelFor('gpt', 'cli');
   byKey.set('gpt:cli', new CliPlannerAdapter({ bin: 'codex', model: codexModel || undefined }));
-  byKey.set('openrouter:api', new OpenAiCompatibleAdapter({ apiKey: openrouterKey, baseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter', 'api') }));
+  byKey.set('openrouter:api', new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: openrouterKey, defaultBaseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter', 'api') })));
   // GLM-5.2 is a text-only reasoning model: supportsVision:false → it joins the
   // plan-step ladder only (Nano/Gemini still own visual verdicts). thinking is
   // disabled by default (GLM_THINKING=enabled to flip) so the planner stays fast.
-  byKey.set('glm:api', new OpenAiCompatibleAdapter({ apiKey: glmKey, baseUrl: glmBaseUrl, label: 'glm', model: modelFor('glm', 'api'), supportsVision: false, extraBody: { thinking: { type: glmThinking } } }));
+  byKey.set('glm:api', new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: glmKey, defaultBaseUrl: 'https://api.z.ai/api/paas/v4', label: 'glm', model: modelFor('glm', 'api'), supportsVision: false, extraBody: { thinking: { type: glmThinking } } })));
   byKey.set('ollama:api', new OllamaAdapter({ model: modelFor('ollama', 'api') }));
 
   // Two pins, same lookup for each: nano resolves to name 'nano' (the router won't
@@ -355,6 +356,7 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
   });
 
   const artifacts = new ArtifactStore(cfg.artifactsDir);
+  const actionCache = cfg.actionCache ? new FileActionCache(cfg.actionCacheDir) : undefined;
   progress(`run ${artifacts.runId}: "${task}" on ${url}`);
 
   try {
@@ -390,6 +392,8 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
       allowedHosts,
       vault,
       signal: opts.signal,
+      assertionPolicy: cfg.assertionPolicy,
+      actionCache,
     });
     if (clip) {
       const gif = await clip.stop().catch(() => null);

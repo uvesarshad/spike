@@ -38,7 +38,8 @@ export type ScriptStep =
   | { type: 'reload' }
   | { type: 'go_back' }
   | { type: 'assert_dom'; target: ScriptTarget; contains: string }
-  | { type: 'assert_visual'; expectation: string }
+  | { type: 'extract'; target: ScriptTarget; key: string; pattern?: string }
+  | { type: 'assert_visual'; expectation: string; mode?: 'screenshot' | 'video' }
   | { type: 'wait'; ms: number };
 
 export interface QaScript {
@@ -100,8 +101,11 @@ export function scriptFromReport(report: Report): QaScript {
       case 'assert_dom':
         if (s.target) steps.push({ type: 'assert_dom', target: s.target, contains: a.contains });
         break;
+      case 'extract':
+        if (s.target) steps.push({ type: 'extract', target: s.target, key: a.key, ...(a.pattern && { pattern: a.pattern }) });
+        break;
       case 'assert_visual':
-        steps.push({ type: 'assert_visual', expectation: a.expectation });
+        steps.push({ type: 'assert_visual', expectation: a.expectation, ...(a.mode && { mode: a.mode }) });
         break;
       case 'wait':
         steps.push({ type: 'wait', ms: a.ms });
@@ -214,8 +218,10 @@ function stepSig(s: ScriptStep): string {
       return 'go_back';
     case 'assert_dom':
       return `assert_dom ${targetSig(s.target)} contains ${JSON.stringify(s.contains)}`;
+    case 'extract':
+      return `extract ${s.key} from ${targetSig(s.target)}${s.pattern ? ` matching ${JSON.stringify(s.pattern)}` : ''}`;
     case 'assert_visual':
-      return `assert_visual ${JSON.stringify(s.expectation.slice(0, 60))}`;
+      return `assert_visual${s.mode ? `:${s.mode}` : ''} ${JSON.stringify(s.expectation.slice(0, 60))}`;
     case 'wait':
       return `wait ${s.ms}ms`;
   }
@@ -248,8 +254,8 @@ function locator(target: ScriptTarget): string {
   }
   const role = ROLE_MAP[target.role] ?? target.role;
   const base = target.name
-    ? `page.getByRole('${role}', { name: ${JSON.stringify(target.name)} })`
-    : `page.getByRole('${role}')`;
+    ? `page.getByRole(${JSON.stringify(role)}, { name: ${JSON.stringify(target.name)} })`
+    : `page.getByRole(${JSON.stringify(role)})`;
   return typeof target.nth === 'number' ? `${base}.nth(${target.nth})` : base;
 }
 
@@ -284,8 +290,11 @@ export function toPlaywrightSpec(script: QaScript): string {
       case 'assert_dom':
         lines.push(`  await expect(${locator(s.target)}).toContainText(${JSON.stringify(s.contains)});`);
         break;
+      case 'extract':
+        lines.push(`  // extract ${s.key} from ${locator(s.target)}${s.pattern ? ` using ${JSON.stringify(s.pattern)}` : ''}`);
+        break;
       case 'assert_visual':
-        lines.push(`  // visual check (judged by the QA subagent's vision model when replayed via \`qa replay\`):`);
+        lines.push(`  // ${s.mode === 'video' ? 'video' : 'visual'} check (judged by the QA subagent when replayed via \`qa replay\`):`);
         lines.push(`  // ${s.expectation.replace(/\n/g, ' ')}`);
         lines.push(`  await expect(page.locator('body')).toBeVisible();`);
         break;

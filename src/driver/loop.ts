@@ -32,6 +32,19 @@ import {
 } from './actions.js';
 import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
 import type { Vault } from '../vault/vault.js';
+import { runVisualAssertion, type AssertionPolicy, type AssertionTraceEntry } from '../assertions/policy.js';
+import { createRunDataState, recordExtraction, resolveRunPlaceholders, RunDataNotFoundError } from '../run-data/index.js';
+import {
+  ActionCacheRejectedError,
+  FileActionCache,
+  actionFromCachedValue,
+  buildActionCacheKey,
+  captureActionEffectState,
+  toCachedActionValue,
+  verifyActionEffect,
+  type CachedActionValue,
+} from '../cache/action-cache.js';
+import { startClipRecorder, type CdpClientLike } from '../clip/screencast.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -90,7 +103,7 @@ function hostAllowed(host: string, allowedHosts: string[]): boolean {
 }
 
 /** Step-progress callback shape — VibeService forwards these verbatim to the UI. */
-export type StepKind = 'plan' | 'click' | 'type' | 'hover' | 'key' | 'select' | 'navigate' | 'assert' | 'wait' | 'finish';
+export type StepKind = 'plan' | 'click' | 'type' | 'hover' | 'key' | 'select' | 'navigate' | 'assert' | 'extract' | 'wait' | 'finish';
 export interface StepInfo {
   index: number;
   kind: StepKind;
@@ -117,6 +130,9 @@ export interface LoopOptions {
   /** Cooperative cancellation — checked before each planner call and each
    * action; aborting ends the run 'uncertain' with reason 'cancelled by user'. */
   signal?: AbortSignal;
+  /** Visual assertion policy. Defaults to the existing cheap single-ladder behavior. */
+  assertionPolicy?: AssertionPolicy;
+  actionCache?: FileActionCache;
 }
 
 /** Map an action to its onStep kind. */
@@ -143,6 +159,8 @@ function stepKind(action: Action): StepKind {
     case 'assert_visual':
     case 'assert_dom':
       return 'assert';
+    case 'extract':
+      return 'extract';
   }
 }
 
@@ -175,6 +193,8 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
       return `Visual check: ${action.expectation}`;
     case 'assert_dom':
       return `Check ${tgt ?? action.nodeId} contains "${action.contains}"`;
+    case 'extract':
+      return `Extract ${action.key} from ${tgt ?? action.nodeId}`;
   }
 }
 
@@ -225,6 +245,11 @@ export async function runDriverLoop(
   const signal = opts.signal;
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const perGoalMaxSteps = opts.perGoalMaxSteps ?? Math.min(maxSteps, DEFAULT_PER_GOAL_STEPS);
+  const assertionPolicy = opts.assertionPolicy ?? 'single-ladder';
+  const assertionTrace: AssertionTraceEntry[] = [];
+  const runData = createRunDataState();
+  const actionCache = opts.actionCache;
+  const actionCacheStats = { enabled: Boolean(actionCache), hits: 0, misses: 0, stale: 0, stored: 0 };
 
   await browser.navigate(url);
   browser.drainConsole();
@@ -348,13 +373,16 @@ export async function runDriverLoop(
   ): Promise<'pass' | 'end' | 'continue'> => {
     const png = await browser.screenshot();
     record.screenshot = artifacts.saveScreenshot(i, png);
-    const confirm = await router.visualVerdict(
+    const confirm = await runVisualAssertion(
+      router,
       png,
       `The task "${task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
       i,
+      assertionPolicy,
     );
-    record.visual = confirm;
-    if (confirm.verdict === 'pass') {
+    assertionTrace.push(confirm.trace);
+    record.visual = confirm.verdict;
+    if (confirm.verdict.verdict === 'pass') {
       verdict = 'pass';
       reason = reasonText;
       return 'pass';
@@ -362,17 +390,17 @@ export async function runDriverLoop(
     // navigator-only mode: no brain to arbitrate — honour the visual directly (a
     // failing confirmation = a broken end state), exactly as the old loop did.
     if (!brainAvailable) {
-      verdict = confirm.verdict === 'fail' ? 'fail' : 'uncertain';
+      verdict = confirm.verdict.verdict === 'fail' ? 'fail' : 'uncertain';
       reason =
-        `navigator declared success but the confirmation visual was ${confirm.verdict}: ${confirm.summary}` +
-        (confirm.issues.length ? ` — ${confirm.issues.join('; ')}` : '');
+        `navigator declared success but the confirmation visual was ${confirm.verdict.verdict}: ${confirm.verdict.summary}` +
+        (confirm.verdict.issues.length ? ` — ${confirm.verdict.issues.join('; ')}` : '');
       if (verdict === 'fail') failingStep = { index: i, action: record.action, description: record.description };
       return 'end';
     }
     // navigator claimed success but the visual disagrees/uncertain — brain decides
     return escalate(
-      `navigator declared success but the confirmation visual was ${confirm.verdict}: ${confirm.summary}` +
-        (confirm.issues.length ? ` — ${confirm.issues.join('; ')}` : ''),
+      `navigator declared success but the confirmation visual was ${confirm.verdict.verdict}: ${confirm.verdict.summary}` +
+        (confirm.verdict.issues.length ? ` — ${confirm.verdict.issues.join('; ')}` : ''),
     );
   };
 
@@ -483,6 +511,76 @@ export async function runDriverLoop(
     const ax = await browser.axTree();
     lastSnapshotAx = ax;
     const batchUrl = await browser.url();
+
+    if (actionCache && stepIndex < maxSteps) {
+      const cachedRecords = actionCache.findForContext({ url: batchUrl, goal: goals[currentGoal], page: ax });
+      if (cachedRecords.length === 0) actionCacheStats.misses++;
+      let acceptedCacheHit = false;
+      const recordsToTry = cachedRecords.length === 1 ? cachedRecords : [];
+      if (cachedRecords.length > 1) actionCacheStats.misses++;
+      for (const cached of recordsToTry) {
+        const cachedAction = await actionFromCachedValue(cached.value, ax, browser);
+        if (!cachedAction || cachedAction.type === 'assert_visual' || cachedAction.type === 'finish' || cachedAction.type === 'wait') {
+          actionCacheStats.stale++;
+          continue;
+        }
+        const i = stepIndex++;
+        stepsInGoal++;
+        const target = cachedTargetForRecord(cached.value);
+        const record: StepRecord = {
+          index: i,
+          thought: 'cached action',
+          action: cachedAction,
+          description: `cached: ${describeAction(cachedAction)}`,
+          ...(target && { target }),
+          ok: true,
+          console: [],
+          network: [],
+          ts: Date.now(),
+        };
+        steps.push(record);
+        try {
+          const before = await captureActionEffectState(browser);
+          await executeCacheAction(browser, cachedAction, ax.root, runData, vault);
+          await sleep(150);
+          const after = await captureActionEffectState(browser);
+          const effect = verifyActionEffect(before, after, cachedAction, target);
+          if (!effect.ok) {
+            record.ok = false;
+            record.error = `stale cached action: ${effect.reason}`;
+            actionCacheStats.stale++;
+            actionCache.delete(cached.key);
+          } else {
+            actionCacheStats.hits++;
+            actionCache.markHit(cached);
+            acceptedCacheHit = true;
+          }
+        } catch (e) {
+          record.ok = false;
+          record.error = e instanceof Error ? e.message : String(e);
+          actionCacheStats.stale++;
+          actionCache.delete(cached.key);
+        }
+        record.console = browser.drainConsole();
+        record.network = browser.drainNetwork();
+        artifacts.appendAudit({
+          ts: record.ts,
+          runId: artifacts.runId,
+          action: cachedAction.type,
+          target: auditTarget(cachedAction, record.target),
+          url: await browser.url(),
+          ok: record.ok,
+        });
+        onStep({
+          index: i,
+          kind: stepKind(cachedAction),
+          text: record.ok ? `Cached ${humanizeAction(cachedAction, record.target)}` : `Stale cache: ${humanizeAction(cachedAction, record.target)}`,
+          ok: record.ok,
+        });
+        if (acceptedCacheHit) break;
+      }
+      if (acceptedCacheHit) continue;
+    }
 
     // ---- navigate (cheap NAVIGATOR: one call per step) ----
     onStep({
@@ -635,6 +733,10 @@ export async function runDriverLoop(
       steps.push(record);
 
       // ---- execute ----
+      const cacheBefore =
+        actionCache && a === actions.length - 1 && action.type !== 'finish' && action.type !== 'assert_visual' && action.type !== 'wait'
+          ? await captureActionEffectState(browser).catch(() => null)
+          : null;
       try {
         if (action.type === 'finish') {
           // trust a fail immediately; confirm a pass with one visual check
@@ -648,13 +750,21 @@ export async function runDriverLoop(
             if (outcome === 'continue') finishReplan = true;
           }
         } else if (action.type === 'assert_visual') {
+          const videoRecorder =
+            action.mode === 'video' && browser.cdpClient
+              ? await startAssertionClip(browser.cdpClient(), artifacts)
+              : null;
+          if (videoRecorder) await sleep(500);
           const png = await browser.screenshot();
           record.screenshot = artifacts.saveScreenshot(i, png);
-          const v = await router.visualVerdict(png, action.expectation, i);
-          record.visual = v;
-          if (v.verdict === 'fail') {
+          const videoPath = videoRecorder ? await videoRecorder.stop().catch(() => null) : null;
+          if (videoPath) record.video = videoPath;
+          const v = await runVisualAssertion(router, png, action.expectation, i, assertionPolicy);
+          assertionTrace.push(v.trace);
+          record.visual = v.verdict;
+          if (v.verdict.verdict === 'fail') {
             verdict = 'fail';
-            reason = `visual assertion failed: ${v.summary}${v.issues.length ? ` — ${v.issues.join('; ')}` : ''}`;
+            reason = `visual assertion failed: ${v.verdict.summary}${v.verdict.issues.length ? ` - ${v.verdict.issues.join('; ')}` : ''}`;
             failingStep = { index: i, action, description: record.description };
           }
         } else if (action.type === 'assert_dom') {
@@ -671,19 +781,63 @@ export async function runDriverLoop(
           // resolve {{secret:NAME}} AT EXECUTE TIME ONLY — the record keeps the
           // PLACEHOLDER (action is unchanged), so history/report/recorder/audit
           // never hold the real value. Missing secret → step fails.
-          const resolved = resolveSecrets(action.text, vault);
+          const resolvedRun = resolveRunPlaceholders(action.text, runData).text;
+          const resolved = resolveSecrets(resolvedRun, vault);
           await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
+        } else if (action.type === 'extract') {
+          const t = findNode(ax.root, action.nodeId);
+          if (!t) {
+            record.ok = false;
+            record.error = `nodeId ${action.nodeId} not in current tree`;
+          } else {
+            const hay = subtreeText(t).trim();
+            const value = extractValue(hay, action.pattern);
+            if (!value) {
+              record.ok = false;
+              record.error = `could not extract ${action.key} from ${action.nodeId}`;
+            } else {
+              recordExtraction(runData, { key: action.key, value, source: 'dom', label: record.target?.name });
+            }
+          }
         } else {
           await executeWithRetry(browser, action, ax.root);
         }
       } catch (e) {
-        record.ok = false;
-        record.error = e instanceof Error ? e.message : String(e);
+        if (e instanceof RunDataNotFoundError) {
+          record.ok = false;
+          record.error = `run data "${e.key}" not found`;
+        } else {
+          record.ok = false;
+          record.error = e instanceof Error ? e.message : String(e);
+        }
       }
 
       await sleep(150); // let async fallout (fetches, navigations) land
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
+
+      if (actionCache && cacheBefore && record.ok) {
+        try {
+          const cacheAfter = await captureActionEffectState(browser);
+          const effect = verifyActionEffect(cacheBefore, cacheAfter, action, record.target);
+          if (effect.ok) {
+            const key = buildActionCacheKey({
+              url: batchUrl,
+              goal: goals[currentGoal] ?? task,
+              action,
+              page: ax,
+              target: record.target,
+            });
+            const value = toCachedActionValue(action, record.target);
+            actionCache.put(key, value, { sourceRunId: artifacts.runId, sourceStepIndex: record.index });
+            actionCacheStats.stored++;
+          }
+        } catch (e) {
+          if (!(e instanceof ActionCacheRejectedError)) {
+            /* cache write failures must not fail a QA step */
+          }
+        }
+      }
 
       // ---- audit trail: one redacted JSON line per EXECUTED action. target is
       // role+name or url (placeholders, never resolved secrets). ----
@@ -798,6 +952,9 @@ export async function runDriverLoop(
     url,
     steps,
     model_trace: router.trace,
+    assertion_trace: assertionTrace,
+    run_data: runData,
+    action_cache: actionCacheStats,
     durationMs: Date.now() - t0,
     tokenEstimate: 0,
     tokens: {
@@ -814,6 +971,7 @@ export async function runDriverLoop(
   };
   report.evidence_paths = [
     ...steps.filter((s) => s.screenshot).map((s) => s.screenshot!),
+    ...steps.filter((s) => s.video).map((s) => s.video!),
   ];
   const reportPath = artifacts.saveReport(report);
   report.evidence_paths.unshift(reportPath);
@@ -973,6 +1131,49 @@ async function executeOnce(browser: BrowserPort, action: Action): Promise<void> 
   }
 }
 
+async function executeCacheAction(
+  browser: BrowserPort,
+  action: Action,
+  planTree: AxNode,
+  runData: ReturnType<typeof createRunDataState>,
+  vault: Vault | undefined,
+): Promise<void> {
+  if (action.type === 'type') {
+    const resolvedRun = resolveRunPlaceholders(action.text, runData).text;
+    const resolved = resolveSecrets(resolvedRun, vault);
+    await executeWithRetry(browser, { ...action, text: resolved }, planTree);
+    return;
+  }
+  if (action.type === 'assert_dom') {
+    const t = findNode(planTree, action.nodeId);
+    const hay = t ? subtreeText(t) : '';
+    if (!t || !hay.toLowerCase().includes(action.contains.toLowerCase())) {
+      throw new Error(`cached DOM assertion failed for ${action.nodeId}`);
+    }
+    return;
+  }
+  if (action.type === 'extract') {
+    const t = findNode(planTree, action.nodeId);
+    if (!t) throw new Error(`cached extract target ${action.nodeId} not in current tree`);
+    const value = extractValue(subtreeText(t).trim(), action.pattern);
+    if (!value) throw new Error(`cached extract ${action.key} produced no value`);
+    recordExtraction(runData, { key: action.key, value, source: 'dom', label: t.name });
+    return;
+  }
+  if (action.type === 'assert_visual' || action.type === 'finish') {
+    throw new Error(`cached ${action.type} is not executable through the action cache`);
+  }
+  await executeWithRetry(browser, action, planTree);
+}
+
+async function startAssertionClip(cdpClient: unknown, artifacts: ArtifactStore) {
+  try {
+    return await startClipRecorder(cdpClient as CdpClientLike, artifacts, { maxFps: 4, maxWidth: 800 });
+  } catch {
+    return null;
+  }
+}
+
 /* ---------- tree helpers ---------- */
 
 function findNode(root: AxNode, id: string): AxNode | undefined {
@@ -1027,6 +1228,30 @@ function subtreeText(node: AxNode): string {
   return parts.join(' ');
 }
 
+function extractValue(text: string, pattern?: string): string | null {
+  const trimmed = text.trim();
+  if (!pattern) return trimmed || null;
+  let re: RegExp;
+  try {
+    re = new RegExp(pattern);
+  } catch {
+    return null;
+  }
+  const match = re.exec(trimmed);
+  if (!match) return null;
+  return (match[1] ?? match[0]).trim() || null;
+}
+
+function cachedTargetForRecord(value: CachedActionValue): { role: string; name?: string; nth?: number; qaId?: string } | undefined {
+  if (!('target' in value)) return undefined;
+  return {
+    role: value.target.role,
+    ...(value.target.name && { name: value.target.name }),
+    ...(value.target.nth !== undefined && { nth: value.target.nth }),
+    ...(value.target.qaId && { qaId: value.target.qaId }),
+  };
+}
+
 /** A redacted target string for the audit log: the touched node's role+name,
  * or the navigate url, or undefined. NEVER includes resolved secret values
  * (a type action's text — which may carry the {{secret:…}} placeholder — is
@@ -1037,6 +1262,7 @@ function auditTarget(action: Action, target?: { role: string; name?: string }): 
   if (action.type === 'press_key') return action.key;
   if (action.type === 'reload') return 'reload';
   if (action.type === 'go_back') return 'go_back';
+  if (action.type === 'extract') return action.key;
   return undefined;
 }
 

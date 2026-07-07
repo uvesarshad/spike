@@ -69,7 +69,9 @@ Decide the next 1-3 actions. Rules:
 - typing into a field REPLACES its content; no need to clear first.
 - Use select_option for native select/combobox controls when the desired value or visible option text is known.
 - Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
+- Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
+- Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode.
 - Console errors / failed network requests after an action are strong evidence the app is broken — investigate or finish with verdict "fail" and cite them.
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input — the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
@@ -94,7 +96,8 @@ Action types:
 - {"type":"reload"}
 - {"type":"go_back"}
 - {"type":"assert_dom","nodeId":string,"contains":string}   // cheap text check
-- {"type":"assert_visual","expectation":string}             // screenshot judged by a vision model
+- {"type":"assert_visual","expectation":string,"mode":"screenshot"|"video"} // visual check; video mode falls back to screenshot if no clip route is available
+- {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}
 - {"type":"wait","ms":number}
 - {"type":"finish","verdict":"pass"|"fail","reason":string}
 
@@ -208,7 +211,9 @@ Work on the CURRENT GOAL. Decide the next 1-3 actions. Rules:
 - typing into a field REPLACES its content; no need to clear first.
 - Use select_option for native select/combobox controls when the desired value or visible option text is known.
 - Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
+- Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
+- Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode.
 - Console errors / failed network requests after an action are strong evidence the app is broken — investigate or finish with verdict "fail" and cite them.
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input — the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
@@ -235,7 +240,8 @@ Action types:
 - {"type":"reload"}
 - {"type":"go_back"}
 - {"type":"assert_dom","nodeId":string,"contains":string}   // cheap text check
-- {"type":"assert_visual","expectation":string}             // screenshot judged by a vision model
+- {"type":"assert_visual","expectation":string,"mode":"screenshot"|"video"} // visual check; video mode falls back to screenshot if no clip route is available
+- {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}
 - {"type":"wait","ms":number}
 - {"type":"finish","verdict":"pass"|"fail","reason":string}
 

@@ -66,6 +66,7 @@ Key design decisions:
 - **CDP logpoints** (the spike-B trick): when diagnosing, the daemon can inject `console.log`s at any file:line of a *running* page with **zero source edits** — `Debugger.setBreakpointByUrl` with a condition that logs and returns `false`. No dirty diffs, no cleanup, works on sites you don't own.
 - **CDP and extension transports**: the engine only talks to a `BrowserPort` interface. `CdpBrowser` drives a daemon-owned Chrome over `--remote-debugging-port`; `ExtensionBrowser` drives the user's existing Chrome tab through the MV3 bridge and `chrome.debugger`, so vibe mode can use real logged-in sessions without rewriting the engine.
 - **Evidence per step**: console and network buffers are drained between steps, so each step record carries exactly the fallout it caused.
+- **Durability features**: optional consensus visual assertions (`QA_ASSERTION_POLICY`), verified action reuse (`qa run --action-cache`), runtime data placeholders such as `{{run.email}}`, extraction into `{{run.*}}`, and `qa replay --all --json` for CI summaries.
 
 ## Tech stack
 
@@ -98,6 +99,9 @@ node dist/cli.js nano --download
 node dist/cli.js fixture --bug on        # terminal 1: intentionally broken shop
 node dist/cli.js run "log in as test@test.com with password pw and complete checkout" `
   --url http://localhost:9401/login      # terminal 2: watch the verdict
+
+# CI replay-first workflow after committing or restoring generated-tests/
+node dist/cli.js replay --all --json
 ```
 
 Register as an MCP tool in Claude Code:

@@ -21,7 +21,7 @@ fixture/ — The dogfood shop app. A single Express server (fixture/server.ts) w
 
 spikes/ — Frozen de-risking proof-of-concept code. Never imported by src/. Two sub-spikes: cdp-logpoint (Spike B: CDP logpoint injection) and spike-a-web.js (Spike A: Nano visual verdicts). spikes/.chrome-profile/ holds a dedicated headless/headed Chrome profile for the spikes, avoiding collision with the daemon profile.
 
-test/ — Test suites. Named m1–m6 (contract tests) and e2e.* (end-to-end), plus numbered v1–v25 integration spikes (reference, not imported). port-contract.ts holds shared BrowserPort interface assertions.
+test/ — Test suites. Named m1–m6 (contract tests) and e2e.* (end-to-end), plus numbered v1–v29 integration spikes (reference, not imported). port-contract.ts holds shared BrowserPort interface assertions.
 
 artifacts/ — Generated run output: one subdirectory per runId containing report.json, screenshots/step-NN.png, audit.jsonl, and optionally replay.gif. Git-ignored.
 
@@ -37,15 +37,25 @@ docs/ — All documentation. Subdirectories: architecture/, modules/, api/, stat
 
 src/ports/ — Browser and Nano port interfaces and implementations. browser-port.ts is the abstract interface; cdp-browser.ts is the CDP implementation; extension-browser.ts is the vibe-mode stub; nano-port.ts, nano-runner-page.ts, extension-nano.ts handle Gemini Nano access in both transport modes; runner-assets.ts holds the runner page HTML/JS as string literals.
 
-src/router/ — Model ladder. adapter.ts defines the ModelAdapter interface; model-router.ts walks the ladder and builds the model_trace; verdict.ts defines the NanoVerdict schema. adapters/ holds one file per rung: nano.ts, google-cli.ts, cli-planner.ts, byok-gemini.ts, anthropic.ts, openai-compatible.ts, ollama.ts.
+src/router/ — Model ladder. adapter.ts defines the ModelAdapter interface; model-router.ts walks the ladder and builds the model_trace; gateway.ts normalizes OpenAI-compatible gateway endpoints; verdict.ts defines the NanoVerdict schema. adapters/ holds one file per rung: nano.ts, google-cli.ts, cli-planner.ts, byok-gemini.ts, anthropic.ts, openai-compatible.ts, ollama.ts.
+
+src/telemetry/ — Optional tracing helpers. The default tracer is no-op; exporting tracers redact API keys, bearer tokens, cookies, passwords, secret placeholders, known secret values, and buffers before handing spans to a caller-provided exporter.
+
+src/assertions/ — Assertion policy helpers. visual-policy.ts defines standalone visual verdict policies (`single-ladder`, `fail-on-disagreement`, `arbiter-on-disagreement`); policy.ts adapts those policies to ModelRouter and writes assertion_trace records for driver assertions.
 
 src/driver/ — The a11y-tree-first test loop. loop.ts is the main orchestrator (runDriverLoop); planner-prompt.ts builds the system prompt; actions.ts defines the Action union type and JSON schema.
+
+src/cache/ — Verified action-cache helpers. action-cache.ts builds normalized URL/goal/action/page-signature keys, stores redacted file-backed action values, rehydrates cached targets, and verifies action effects for runDriverLoop action reuse.
 
 src/capture/ — Page introspection utilities. axtree.ts extracts and prunes the accessibility tree; console-network.ts drains and formats console errors and network failures; logpoints.ts injects CDP logpoints.
 
 src/report/ — Output contract. report.ts defines the Report interface, StepRecord, FailingStep, and slimReport(); artifacts.ts manages the artifacts/<runId>/ directory, saves screenshots and report.json, and appends to audit.jsonl.
 
 src/recorder/ — Run recording and replay. script.ts defines QaScript, serializes a passing run to generated-tests/, and emits the Playwright .spec.ts twin; replay.ts re-runs a script over CDP at $0.
+
+src/run-data/ — In-memory non-secret runtime data. Generates {{run.email}}, {{run.shortid}}, {{run.name}}, and {{run.phone}}, resolves {{run.*}} placeholders, and stores extracted values for later same-run references.
+
+src/email/ — Email provider contracts and local test doubles. fake-local.ts is an in-memory provider for OTP/signup tests; real external providers are deferred.
 
 src/bridge/ — Extension↔daemon WebSocket transport. bridge-server.ts is the WS server; cdp-shim.ts proxies CDP over chrome.debugger for the extension path.
 

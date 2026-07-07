@@ -26,7 +26,7 @@ AGENT NOTE: ScriptStep locators use role+name, not nodeId. NodeIds are per-snaps
 
 ## Recording Flow
 
-scriptFromReport(report) - called by qaRun after a passing run. Iterates StepRecord[], extracts each step's target (role+name+nth+qaId), action type, and payload. Type steps carry text placeholders, select_option carries the selected value, press_key carries the key, assert_visual carries the expectation string, and navigate steps carry the URL.
+scriptFromReport(report) - called by qaRun after a passing run. Iterates StepRecord[], extracts each step's target (role+name+nth+qaId), action type, and payload. Type steps carry text placeholders, extract steps carry key/pattern, select_option carries the selected value, press_key carries the key, assert_visual carries expectation plus optional mode, and navigate steps carry the URL.
 
 saveScript(script) - writes generated-tests/<slug>.json and generates the Playwright .spec.ts twin via buildPlaywrightSpec(). Returns both paths.
 
@@ -34,12 +34,14 @@ loadScript(nameOrPath) - resolves a script by name (generated-tests/<name>.json)
 
 diffScripts(oldScript, newScript) - returns a human-readable summary of what changed between two versions of the same script (used by the self-heal progress line).
 
+AGENT NOTE: Runtime data placeholders are replay-aware. Replay preserves `{{run.*}}` expressions in ScriptStep.text, creates a fresh RunDataState at replay start, resolves placeholders immediately before browser.type(), and keeps the JSON script unchanged. Extract steps call recordExtraction() so later replay steps can use values like `{{run.orderId}}`.
+
 ## Replay Flow (src/recorder/replay.ts)
 
 replayScript(browser, nano, artifacts, script, opts) - replays the script without a planner. For each ScriptStep:
 
 1. Resolve the target node by role+name (using findByRoleName on a fresh axTree). If nth is set, use the nth match. If role+name fails, fall back to qaId (browser.findByQaId if available).
-2. Execute the action: navigate, click, hover, type, press_key, select_option, reload, go_back, assert_dom check, or assert_visual via nano.verdict.
+2. Execute the action: navigate, click, hover, type with runtime placeholder resolution, press_key, select_option, reload, go_back, extract, assert_dom check, or assert_visual via nano.verdict.
 3. Drain console and network; record in a StepRecord.
 
 No model calls are made for planning - only Nano for assert_visual steps. This makes a replay cost $0 (plus minimal Nano cycles if visual asserts are present).
@@ -48,7 +50,7 @@ Returns a Report with verdict, steps, and evidence_paths. If replay fails and he
 
 ## Playwright Twin
 
-buildPlaywrightSpec() emits a .spec.ts file co-located with the JSON script. Each ScriptStep becomes a Playwright call: page.goto(url), page.getByRole(role, { name }).click(), .hover(), .fill(text), .selectOption(value), page.keyboard.press(key), page.reload(), page.goBack(), or expect(...).toBeVisible() for assert_dom.
+buildPlaywrightSpec() emits a .spec.ts file co-located with the JSON script. Each ScriptStep becomes a Playwright call where possible: page.goto(url), page.getByRole(role, { name }).click(), .hover(), .fill(text), .selectOption(value), page.keyboard.press(key), page.reload(), page.goBack(), or expect(...).toBeVisible() for assert_dom. Extract and visual/video assertions are emitted as comments because the QA subagent owns those semantics during `qa replay`.
 
 AGENT NOTE: The .spec.ts twin is a best-effort translation. It is not kept in sync after the JSON script is modified manually. Regenerate it by running qa replay <name> --heal or by re-recording.
 
@@ -57,6 +59,7 @@ AGENT NOTE: The .spec.ts twin is a best-effort translation. It is not kept in sy
 - When StepRecord.target gains or loses fields (nth, qaId, new locator strategies).
 - When new action types are added to the Action union (they must be handled in scriptFromReport and replayScript).
 - When the Playwright spec generation rules change.
+- When runtime placeholder or extract replay semantics change.
 - When the generated-tests/ directory path changes (loadScript would need updating).
 
 ## Related Docs

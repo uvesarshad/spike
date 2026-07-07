@@ -71,10 +71,12 @@ function collectHost(value: string, previous: string[]): string[] {
 function mergeConfig(
   via: 'cdp' | 'extension' | undefined,
   hosts: string[],
+  actionCache?: boolean,
 ): Partial<QaConfig> | undefined {
   const config: Partial<QaConfig> = {};
   if (via) config.via = via;
   if (hosts.length) config.allowedHosts = [...loadConfig().allowedHosts, ...hosts];
+  if (actionCache !== undefined) config.actionCache = actionCache;
   return Object.keys(config).length ? config : undefined;
 }
 
@@ -86,13 +88,15 @@ program
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
   .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
   .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically', collectHost, [])
+  .option('--action-cache', 'enable the verified file-backed action cache for this run')
+  .option('--no-action-cache', 'bypass the verified action cache for this run')
   .option('--no-record', 'do not record a passing run to generated-tests/')
   .option('--fix', 'on failure, hand the fix prompt to your coding agent (claude/codex/gemini) and re-test', false)
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension'; allowHost: string[]; record: boolean; fix: boolean; maxFixAttempts?: number; json: boolean }) => {
+  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension'; allowHost: string[]; actionCache?: boolean; record: boolean; fix: boolean; maxFixAttempts?: number; json: boolean }) => {
     const onProgress = opts.json ? undefined : (l: string) => console.log(l);
-    const config = mergeConfig(opts.via, opts.allowHost);
+    const config = mergeConfig(opts.via, opts.allowHost, opts.actionCache);
     const qaRunOpts = {
       maxSteps: opts.maxSteps,
       record: opts.record,
@@ -204,15 +208,19 @@ program
     }
     const config = mergeConfig(opts.via, opts.allowHost);
     let worst = 0;
+    const jsonResults: unknown[] = [];
     for (const t of targets) {
       const report = await qaReplay(t, {
         heal: opts.heal,
         ...(config && { config }),
         onProgress: opts.json ? undefined : (l) => console.log(l),
       });
-      console.log(JSON.stringify({ script: t, healed: report.healed, ...slimReport(report) }, null, 2));
+      const out = { script: t, healed: report.healed, ...slimReport(report) };
+      if (opts.json && opts.all) jsonResults.push(out);
+      else console.log(JSON.stringify(out, null, 2));
       worst = Math.max(worst, report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
     }
+    if (opts.json && opts.all) console.log(JSON.stringify(jsonResults, null, 2));
     process.exit(worst);
   });
 

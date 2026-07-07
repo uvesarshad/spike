@@ -15,7 +15,7 @@ AGENT OWNER: src/config.ts
 
 qa.config.json keys mirror QaConfig camelCase fields:
 
-via, bridgePort, extensionDir, cdpPort, runnerPort, fixturePort, chromeProfile, googleCliBin, googleCliModel, geminiApiKey, googleCliEnv, artifactsDir, maxSteps, fixAgentBin, fixAgentArgs, fixAgentCwd, allowedHosts, recordClip, preferFreePlanner, planner, navigator, debugMode, debugAgent.
+via, bridgePort, extensionDir, cdpPort, runnerPort, fixturePort, chromeProfile, googleCliBin, googleCliModel, geminiApiKey, googleCliEnv, artifactsDir, actionCache, actionCacheDir, maxSteps, fixAgentBin, fixAgentArgs, fixAgentCwd, allowedHosts, recordClip, assertionPolicy, preferFreePlanner, planner, navigator, debugMode, debugAgent.
 
 planner is the Brain selection: `{ "provider": "...", "mode": "...", "model": "..." }`. It leads the `plan-goals` ladder for initial planning and re-plans. navigator is the Navigator selection with the same shape. It leads the `plan-step` ladder for per-step actions.
 
@@ -57,14 +57,20 @@ Consumed by: src/router/adapters/anthropic.ts.
 OPENAI_API_KEY - String. OpenAI API key (rung 2). Absent means rung 2 OpenAI unavailable. Vault key 'openai' takes precedence.
 Consumed by: src/router/adapters/openai-compatible.ts (label: 'gpt').
 
+OPENAI_BASE_URL - String. Override the OpenAI-compatible endpoint for gpt:api. Default: https://api.openai.com/v1. Useful for Vercel AI Gateway, Cloudflare AI Gateway, or any gateway that exposes `/chat/completions`.
+Consumed by: src/router/gateway.ts via engine.ts buildLadder.
+
 OPENROUTER_API_KEY - String. OpenRouter API key (rung 2). Absent means rung 2 OpenRouter unavailable. Vault key 'openrouter' takes precedence.
 Consumed by: src/router/adapters/openai-compatible.ts (label: 'openrouter').
+
+OPENROUTER_BASE_URL - String. Override the OpenRouter-compatible endpoint. Default: https://openrouter.ai/api/v1.
+Consumed by: src/router/gateway.ts via engine.ts buildLadder.
 
 GLM_API_KEY - String. z.ai GLM API key (rung 2). Absent means rung 2 GLM unavailable. Vault key 'glm' takes precedence. ZAI_API_KEY is accepted as an alias.
 Consumed by: src/router/adapters/openai-compatible.ts (label: 'glm') via engine.ts buildLadder.
 
 GLM_BASE_URL - String. Override the z.ai endpoint. Default: https://api.z.ai/api/paas/v4. Use for the GLM Coding Plan endpoint or the mainland BigModel host (https://open.bigmodel.cn/api/paas/v4).
-Consumed by: engine.ts buildLadder.
+Consumed by: src/router/gateway.ts via engine.ts buildLadder.
 
 GLM_THINKING - String. 'enabled' turns on GLM-5.2 reasoning (sharper plans, slower/costlier); any other value (default 'disabled') keeps the planner fast and cheap.
 Consumed by: engine.ts buildLadder (passed as extraBody.thinking.type to the GLM adapter).
@@ -115,10 +121,19 @@ Consumed by: src/driver/loop.ts.
 QA_RECORD_CLIP - Boolean. Enable GIF screencast recording. Default: false (0 or 'false' to disable).
 Consumed by: engine.ts (startClipRecorder).
 
+QA_ASSERTION_POLICY - String. `single-ladder` (default), `fail-on-disagreement`, or `arbiter-on-disagreement`. Controls assert_visual and final pass confirmation. Strict modes use multiple visual-capable adapters when available and write assertion_trace in the full report.
+Consumed by: src/config.ts, src/assertions/, src/driver/loop.ts.
+
 ## Artifact Output
 
 QA_ARTIFACTS_DIR - String (directory path). Where run artifacts are written. Default: ./artifacts.
 Consumed by: src/report/artifacts.ts.
+
+QA_ACTION_CACHE - Boolean. Enable the verified file-backed action cache. Default: false. CLI `--action-cache` and `--no-action-cache` override this for one run.
+Consumed by: src/config.ts, engine.ts, src/driver/loop.ts.
+
+QA_ACTION_CACHE_DIR - String (directory path). Where verified action-cache records are written. Default: ./.qa-action-cache.
+Consumed by: src/cache/action-cache.ts via engine.ts.
 
 ## Auto-Fix
 

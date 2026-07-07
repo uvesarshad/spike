@@ -40,14 +40,16 @@ runDriverLoop (src/driver/loop.ts) starts by navigating to the URL and draining 
 Each Navigator step follows this sequence:
 
 1. browser.axTree() serializes Chrome's accessibility tree via Accessibility.getFullAXTree, pruned to compact indented text with stable per-snapshot node IDs (e.g., n7 button "Place order"). This is the primary page representation.
-2. buildNavigatorPrompt() assembles the task, current URL, axTree text, step history, current goal, goal list, optional Brain hint, and remaining budget.
-3. router.planJson() sends the prompt to the `plan-step` ladder led by the configured Navigator. The response validates as PlanResult: actions, goalComplete, or blocked. Invalid JSON is retried once with the validation error.
-4. goalComplete advances to the next goal. blocked escalates to the Brain if one is available, or ends honestly in navigator-only mode.
-5. Action batches contain 1-3 actions. finish, assert_visual, and assert_dom run alone even if the model bundled more actions.
-6. Each action executes through BrowserPort (navigate, click, hover, type, press_key, select_option, wait, reload, go_back) or inline handling (assert_visual, assert_dom, finish). Type actions resolve {{secret:NAME}} at execute time only.
-7. browser.drainConsole() / browser.drainNetwork() pull buffered console errors and network failures into the StepRecord after each action, not just after the batch.
-8. artifacts.appendAudit() writes one redacted JSON line per executed action (never includes resolved secret values).
-9. onStep() callback is used by vibe mode to animate the side panel.
+2. If cfg.actionCache is enabled, FileActionCache searches for records matching current URL, goal, and page signature. A cached action executes only when that context has a single unambiguous record and its effect verifies; ambiguous or stale hits fall back to the Navigator.
+3. buildNavigatorPrompt() assembles the task, current URL, axTree text, step history, current goal, goal list, optional Brain hint, and remaining budget.
+4. router.planJson() sends the prompt to the `plan-step` ladder led by the configured Navigator. The response validates as PlanResult: actions, goalComplete, or blocked. Invalid JSON is retried once with the validation error.
+5. goalComplete advances to the next goal. blocked escalates to the Brain if one is available, or ends honestly in navigator-only mode.
+6. Action batches contain 1-3 actions. finish, assert_visual, and assert_dom run alone even if the model bundled more actions.
+7. Each action executes through BrowserPort (navigate, click, hover, type, press_key, select_option, wait, reload, go_back) or inline handling (assert_visual, assert_dom, extract, finish). Type actions resolve {{run.*}} first, then {{secret:NAME}} at execute time only.
+8. browser.drainConsole() / browser.drainNetwork() pull buffered console errors and network failures into the StepRecord after each action, not just after the batch.
+9. Successful final actions in a batch can be written back to the action cache after effect verification; raw resolved secrets are never cached.
+10. artifacts.appendAudit() writes one redacted JSON line per executed action (never includes resolved secret values).
+11. onStep() callback is used by vibe mode to animate the side panel.
 
 AGENT NOTE: The Brain is re-consulted on Navigator `blocked`, same single action repeated 3 times, invalid Navigator JSON twice, per-goal step overflow, or finish:pass when the confirmation visual disagrees. Brain recovery may replace remaining goals, provide a one-shot Navigator hint, or return a final verdict. Consecutive Brain escalations without Navigator progress are capped.
 
@@ -55,14 +57,21 @@ The loop exits when: verdict is settled, global step budget is exhausted, the Ab
 
 AGENT NOTE: {{secret:NAME}} placeholders in type actions are resolved at execute time via the Vault. The placeholder, never the resolved value, is stored in StepRecord.action.text, audit.jsonl, and all report surfaces.
 
+AGENT NOTE: Action-cache writes must receive the original redacted Action, never the resolved type text after Vault substitution. Cache values may store `{{secret:NAME}}` placeholders but must reject raw secret-like strings.
+
+## Runtime Data Hook Points
+
+src/run-data/ owns non-secret same-run values and placeholder resolution for `{{run.email}}`, `{{run.shortid}}`, `{{run.name}}`, `{{run.phone}}`, and extracted keys such as `{{run.orderId}}`. runDriverLoop creates RunDataState at run start, resolves `{{run.*}}` immediately before type actions, and keeps the original placeholder-bearing action in StepRecord, reports, and scripts. `extract` reads visible node text, optionally applies a regex capture, and stores the value for later same-run placeholders. src/email/ owns the EmailProvider interface plus FakeLocalEmailProvider for local OTP-style tests; real email providers are intentionally deferred.
+
 ## Visual Assessment Path
 
 Visual assertions (assert_visual) and the pass-confirmation check both take this path:
 
-1. browser.screenshot() - PNG from Chrome via Page.captureScreenshot.
-2. router.visualVerdict(png, expectation, step) - tries rung 0 (Nano) first. On 'uncertain' or error, escalates to the next rung. Each call appends a ModelTraceEntry with capability `visual-verdict` to router.trace.
-3. The NanoVerdict (verdict, summary, issues) is stored in StepRecord.visual.
-4. Screenshots are saved to artifacts/<runId>/screenshots/step-NN.png and paths appended to evidence_paths.
+1. browser.screenshot() - PNG from Chrome via Page.captureScreenshot. `assert_visual.mode: "video"` attempts a short per-step CDP GIF clip when the transport exposes cdpClient(), stores it on StepRecord.video/evidence_paths when available, and falls back to screenshot judging when no video-capable model route is available.
+2. runVisualAssertion() applies cfg.assertionPolicy: single ladder, fail-on-disagreement, or arbiter-on-disagreement.
+3. Model calls append ModelTraceEntry records with capability `visual-verdict`; assertion policy groups append assertion_trace records to the full report.
+4. The NanoVerdict-compatible result is stored in StepRecord.visual.
+5. Screenshots are saved to artifacts/<runId>/screenshots/step-NN.png and paths appended to evidence_paths.
 
 finish:pass is accepted only after one confirmation visual passes. If confirmation fails or is uncertain, the Brain arbitrates when available; navigator-only mode honors the visual result directly.
 
@@ -74,7 +83,7 @@ At run end, runDriverLoop assembles the Report:
 
 - verdict, failing_step, console_error, reason - the slim contract fields.
 - evidence_paths - paths to report.json and all screenshots.
-- steps[], model_trace[] - full evidence for humans and debugging.
+- steps[], model_trace[], assertion_trace[], run_data, action_cache - full evidence for humans and debugging.
 - tokens - real accounting: cheapModelTotal (what the cheap rungs spent), cheapModelCached, callsByRung, verdictPayloadTokens (what the calling agent pays: ~chars/4 of the slim report), navigatorCalls, brainCalls, visualCalls, navigatorTokens, brainTokens.
 
 The role split is derived from model_trace capability: `plan-step` = Navigator, `plan-goals` = Brain, and `visual-verdict` = visual checks. Brain calls should scale with stuck/re-plan events, not with total step count.
@@ -109,6 +118,7 @@ qaRun() returns a QaRunResult (extends Report, adds recordedScript path when app
 
 - When a new entry point (transport) is added to the engine.
 - When the driver loop adds a new step phase or changes the per-step cycle.
+- When the action cache is wired into the driver loop or its hit/miss metadata changes.
 - When Brain/Navigator re-plan triggers or exit conditions change.
 - When the Report contract (slim fields or full fields) changes.
 - When the recording path emits new artifacts.

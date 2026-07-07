@@ -45,6 +45,8 @@ planGoals(prompt, schema, step) walks the plan-goals ladder. This is the BRAIN p
 
 visualVerdict(png, expectation, step) walks the visual-verdict ladder. Rung 0 Nano always leads when available. On an uncertain verdict, the router escalates to the next visual adapter and returns the last uncertain verdict if every visual adapter is uncertain.
 
+visualVerdictCandidates() returns the live visual-capable candidates in ladder order. visualVerdictWith(candidate, png, expectation, step, traceNote) runs a specific candidate and appends the same model_trace metadata as a normal visual verdict. src/assertions/policy.ts uses these helpers for `fail-on-disagreement` and `arbiter-on-disagreement`; the default `single-ladder` policy still calls visualVerdict().
+
 hasCapability(cap) probes whether any adapter can serve a capability right now. The driver uses this for plan-goals so a missing BRAIN can degrade to navigator-only behavior instead of failing the run.
 
 AGENT NOTE: available() probes are called in parallel before every ladder walk and are not cached between steps. A CLI or local service may become available mid-run, so live state drives ordering.
@@ -82,9 +84,9 @@ Calls the Anthropic API using the Vault "anthropic" key or ANTHROPIC_API_KEY. Ru
 
 ## Rung 2 - OpenAiCompatibleAdapter (src/router/adapters/openai-compatible.ts)
 
-OpenAI-compatible REST adapter. Used for gpt:api, openrouter:api, and glm:api. Rung 2. Supports plan-step and plan-goals, and supports visual-verdict only when constructed with supportsVision:true. Keys come from Vault or provider env vars.
+OpenAI-compatible REST adapter. Used for gpt:api, openrouter:api, and glm:api. Rung 2. Supports plan-step and plan-goals, and supports visual-verdict only when constructed with supportsVision:true. Keys come from Vault or provider env vars. src/router/gateway.ts normalizes provider and gateway base URLs before adapter construction.
 
-AGENT NOTE: supportsVision:false keeps text-only models such as GLM off the visual-verdict ladder. jsonMode and extraBody are provider-specific request knobs.
+AGENT NOTE: supportsVision:false keeps text-only models such as GLM off the visual-verdict ladder. jsonMode and extraBody are provider-specific request knobs. Gateway base URL overrides must point at an OpenAI-compatible `/v1`-style base; a trailing `/chat/completions` suffix is normalized away.
 
 ## Rung 2 - GLM / z.ai
 
@@ -120,6 +122,7 @@ Adapters that receive provider usage metadata set lastUsage after generateJson()
 - When capability support changes for any adapter.
 - When ladder ordering, role pinning, or preferFreePlanner behavior changes.
 - When ModelAdapter or ModelRouterOptions gains or loses fields.
+- When assertion consensus routing or visual candidate selection changes.
 - When token usage is reported from a new source.
 - When the isSafeModelId security check scope changes.
 

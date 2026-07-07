@@ -3,7 +3,7 @@
 > Scope: Every CLI subcommand and the MCP stdio tool that callers use to trigger QA runs.
 > Rendering context: Server-side (Node.js daemon / CLI)
 > Project tier: 3
-> Last updated: 2026-06-11
+> Last updated: 2026-07-07
 
 ## Overview
 
@@ -29,15 +29,15 @@ AGENT NOTE: The MCP server suppresses all progress lines (onProgress is a no-op)
 
 ## CLI: qa run
 
-node dist/cli.js run "<task>" --url <url> [--json] [--via cdp|extension] [--no-record]
+node dist/cli.js run "<task>" --url <url> [--json] [--via cdp|extension] [--no-record] [--action-cache|--no-action-cache]
 
-Runs a QA session. Streams progress lines to stdout during the run. On completion, prints the slim 5-field verdict in human-readable form, or JSON if --json is passed. --no-record skips recording a replay script on pass.
+Runs a QA session. Streams progress lines to stdout during the run. On completion, prints the slim 5-field verdict in human-readable form, or JSON if --json is passed. --no-record skips recording a replay script on pass. --action-cache enables the verified file-backed action cache for one run; --no-action-cache bypasses it even if config/env enables it.
 
 ## CLI: qa replay
 
-node dist/cli.js replay [name|path] [--all] [--heal] [--via cdp|extension]
+node dist/cli.js replay [name|path] [--all] [--heal] [--via cdp|extension] [--json]
 
-Replays a recorded QaScript at $0 (no planner, Nano-only visuals). name matches generated-tests/<name>.json. --all replays every script in generated-tests/. --heal re-engages the driver on the original task if the replay fails and re-emits the script.
+Replays a recorded QaScript at $0 (no planner, Nano-only visuals). name matches generated-tests/<name>.json. --all replays every script in generated-tests/. --heal re-engages the driver on the original task if the replay fails and re-emits the script. With --all --json, the CLI prints one JSON array of replay results for CI consumers.
 
 ## CLI: qa daemon
 

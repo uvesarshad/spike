@@ -6,6 +6,11 @@ import type { NanoVerdict } from '../ports/nano-port.js';
 import type { AdapterUsage, Capability, ModelAdapter } from './adapter.js';
 import { VERDICT_JSON_SCHEMA, verdictPrompt } from './verdict.js';
 
+export interface VisualCandidate {
+  name: string;
+  rung: number;
+}
+
 export interface ModelTraceEntry {
   step: number;
   capability: Capability;
@@ -165,6 +170,60 @@ export class ModelRouter {
     }
     if (lastUncertain) return lastUncertain; // whole ladder uncertain — honest answer
     throw new Error(`all visual-verdict adapters failed: ${lastError?.message}`);
+  }
+
+  /** Available visual candidates in the same order visualVerdict() would use. */
+  async visualVerdictCandidates(): Promise<VisualCandidate[]> {
+    return (await this.candidates('visual-verdict')).map((a) => ({ name: a.name, rung: a.rung }));
+  }
+
+  /** Call a specific visual adapter by candidate name/rung and record the normal model trace.
+   * Used by assertion consensus policies that need independent primary/secondary calls. */
+  async visualVerdictWith(
+    candidate: VisualCandidate,
+    png: Buffer,
+    expectation: string,
+    step: number,
+    traceNote?: string,
+  ): Promise<{ verdict: NanoVerdict; candidate: VisualCandidate }> {
+    const ladder = await this.candidates('visual-verdict');
+    const adapter = ladder.find((a) => a.name === candidate.name && a.rung === candidate.rung);
+    if (!adapter) throw new Error(`visual-verdict adapter unavailable: ${candidate.name}`);
+    const t0 = Date.now();
+    try {
+      const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
+      const raw = (await adapter.generateJson({
+        prompt,
+        schema: VERDICT_JSON_SCHEMA,
+        imagePng: png,
+      })) as Partial<NanoVerdict>;
+      const verdict: NanoVerdict = {
+        verdict: raw.verdict === 'pass' || raw.verdict === 'fail' ? raw.verdict : 'uncertain',
+        summary: raw.summary ?? '',
+        issues: Array.isArray(raw.issues) ? raw.issues : [],
+      };
+      this.trace.push({
+        step,
+        capability: 'visual-verdict',
+        rung: adapter.rung,
+        adapter: adapter.name,
+        ms: Date.now() - t0,
+        note: traceNote,
+        usage: adapter.lastUsage,
+      });
+      return { verdict, candidate };
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      this.trace.push({
+        step,
+        capability: 'visual-verdict',
+        rung: adapter.rung,
+        adapter: adapter.name,
+        ms: Date.now() - t0,
+        note: `${traceNote ? `${traceNote}: ` : ''}error: ${err.message.slice(0, 120)}`,
+      });
+      throw err;
+    }
   }
 
   /** NAVIGATOR step (cheap, called every step): ladder led by navigatorAdapter,

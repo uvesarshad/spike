@@ -6,6 +6,8 @@ import type { ConsoleEntry, NetworkEntry } from '../ports/browser-port.js';
 import type { NanoVerdict } from '../ports/nano-port.js';
 import type { Action } from '../driver/actions.js';
 import type { ModelTraceEntry } from '../router/model-router.js';
+import type { AssertionTraceEntry } from '../assertions/policy.js';
+import type { RunDataState } from '../run-data/index.js';
 
 export type RunVerdict = 'pass' | 'fail' | 'uncertain';
 
@@ -38,6 +40,7 @@ export interface StepRecord {
   network: NetworkEntry[];
   visual?: NanoVerdict;
   screenshot?: string;
+  video?: string;
   ts: number;
 }
 
@@ -73,6 +76,14 @@ export interface ReportTokens {
   brainTokens: number;
 }
 
+export interface ActionCacheStats {
+  enabled: boolean;
+  hits: number;
+  misses: number;
+  stale: number;
+  stored: number;
+}
+
 export interface Report {
   // ---- slim contract: what the calling agent reads ----
   verdict: RunVerdict;
@@ -86,6 +97,10 @@ export interface Report {
   url: string;
   steps: StepRecord[];
   model_trace: ModelTraceEntry[];
+  assertion_trace?: AssertionTraceEntry[];
+  /** Non-secret per-run generated/extracted values such as run.email/orderId. */
+  run_data?: RunDataState;
+  action_cache?: ActionCacheStats;
   durationMs: number;
   /** What the expensive calling agent pays = tokens.verdictPayloadTokens. */
   tokenEstimate: number;
@@ -124,9 +139,11 @@ export function describeAction(a: Action): string {
     case 'go_back':
       return 'go back';
     case 'assert_visual':
-      return `visual check: ${a.expectation}`;
+      return `${a.mode === 'video' ? 'video' : 'visual'} check: ${a.expectation}`;
     case 'assert_dom':
       return `dom check: ${a.nodeId} contains ${JSON.stringify(a.contains)}`;
+    case 'extract':
+      return `extract ${a.key} from ${a.nodeId}${a.pattern ? ` matching ${JSON.stringify(a.pattern)}` : ''}`;
     case 'wait':
       return `wait ${a.ms}ms`;
     case 'finish':

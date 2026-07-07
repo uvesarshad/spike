@@ -46,7 +46,7 @@ cfg.navigator and cfg.planner come from loadConfig(), which merges defaults, qa.
 
 If a role selects nano, buildLadder() resolves the pin name to "nano". Nano can serve visual-verdict and plan-step when it is available, but it never serves plan-goals. If Nano is unavailable or the pin is not present in candidates for a role, ModelRouter falls through to the next available adapter.
 
-API keys for Gemini, Anthropic, OpenAI, OpenRouter, and GLM are read from the Vault first where supported, then from environment variables as a fallback. Gemini also honors cfg.geminiApiKey.
+API keys for Gemini, Anthropic, OpenAI, OpenRouter, and GLM are read from the Vault first where supported, then from environment variables as a fallback. Gemini also honors cfg.geminiApiKey. OpenAI-compatible API adapters are constructed through src/router/gateway.ts so OPENAI_BASE_URL, OPENROUTER_BASE_URL, and GLM_BASE_URL can route the same adapter through compatible gateways.
 
 AGENT SEE: docs/modules/model-ladder.md - full adapter list, capabilities, role pins, and ladder ordering
 
@@ -61,6 +61,12 @@ Nano is a $0 visual judge and can act as the NAVIGATOR for plan-step, but it is 
 qaRun() constructs ModelRouter with preferFreePlanner, navigatorAdapter, and plannerAdapter, then passes it to runDriverLoop(). The driver records router.trace into the final report. Each ModelTraceEntry includes capability, rung, adapter, elapsed milliseconds, escalation note, and optional usage copied from adapter.lastUsage.
 
 Token accounting therefore lives in the model trace. Providers that expose prompt/output/total/cached token counts populate usage; Nano and local adapters may omit it.
+
+When cfg.actionCache is enabled, qaRun() constructs FileActionCache(cfg.actionCacheDir) and passes it to runDriverLoop(). The driver records action_cache metadata in the full report: enabled, hits, misses, stale, and stored. CLI `qa run` exposes `--action-cache` and `--no-action-cache` for one-run overrides; QA_ACTION_CACHE and QA_ACTION_CACHE_DIR cover automation defaults.
+
+qaRun() also passes cfg.assertionPolicy into runDriverLoop(). The driver applies it to explicit assert_visual actions and the final finish:pass confirmation, writing assertion_trace entries in the full report while keeping the slim MCP response unchanged.
+
+For `assert_visual` mode `video`, the driver uses the existing CDP screencast recorder as best-effort per-step evidence when cdpClient() is available. Current model adapters still judge the screenshot fallback; video-capable model upload is intentionally not enabled until an adapter advertises that support.
 
 ## GIF Clip Recording
 
@@ -80,11 +86,14 @@ qaReplay loads a QaScript by name or path, calls replayScript(), and returns the
 - When session.close() changes.
 - When QaRunOptions or QaRunResult add or remove fields.
 - When report trace or token accounting fields change.
+- When action-cache config, bypass controls, or report metadata change.
+- When assertion policy routing or report metadata change.
 
 ## Related Docs
 
 - docs/architecture/data-flow.md - end-to-end run lifecycle
 - docs/modules/model-ladder.md - adapter construction and rung ordering
 - docs/modules/browser-port.md - BrowserPort implementations
+- docs/modules/action-cache.md - verified action-cache helpers
 - docs/modules/recorder.md - script recording and replay
 - docs/infra/environment.md - config keys and env vars

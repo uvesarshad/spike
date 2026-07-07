@@ -63,18 +63,20 @@ Fallback: escalates on error; unavailable when no key is configured.
 ## OpenAI API (Rung 2)
 
 What it does: plan-step.
-Module: src/router/adapters/openai-compatible.ts (baseUrl: https://api.openai.com/v1, label: 'gpt').
+Module: src/router/adapters/openai-compatible.ts via src/router/gateway.ts (default baseUrl: https://api.openai.com/v1, label: 'gpt').
 Credentials: Vault key 'openai' or OPENAI_API_KEY env var.
 Default model: gpt-4o-mini.
+Gateway override: OPENAI_BASE_URL can point at an OpenAI-compatible gateway such as Vercel AI Gateway or a Cloudflare OpenAI gateway path.
 Rate limit: governed by the API key's quota.
 Fallback: escalates on error.
 
 ## OpenRouter (Rung 2)
 
 What it does: plan-step.
-Module: src/router/adapters/openai-compatible.ts (baseUrl: https://openrouter.ai/api/v1, label: 'openrouter').
+Module: src/router/adapters/openai-compatible.ts via src/router/gateway.ts (default baseUrl: https://openrouter.ai/api/v1, label: 'openrouter').
 Credentials: Vault key 'openrouter' or OPENROUTER_API_KEY env var.
 Default model: anthropic/claude-3.5-haiku.
+Gateway override: OPENROUTER_BASE_URL can point at a compatible proxy while preserving the OpenRouter adapter label/model defaults.
 Rate limit: governed by the API key's quota and OpenRouter per-model limits.
 Fallback: escalates on error.
 
@@ -82,7 +84,7 @@ Fallback: escalates on error.
 
 What it does: plan-step only (GLM-5.2 is text-only — it does not judge screenshots).
 Module: src/router/adapters/openai-compatible.ts (label: 'glm', supportsVision: false), wired in engine.ts buildLadder as 'glm:api'.
-Endpoint: https://api.z.ai/api/paas/v4/chat/completions (OpenAI-compatible). Override with GLM_BASE_URL for the GLM Coding Plan endpoint or the mainland BigModel host (https://open.bigmodel.cn/api/paas/v4).
+Endpoint: https://api.z.ai/api/paas/v4/chat/completions (OpenAI-compatible). src/router/gateway.ts uses GLM_BASE_URL for the GLM Coding Plan endpoint or the mainland BigModel host (https://open.bigmodel.cn/api/paas/v4).
 Credentials: Vault key 'glm' or GLM_API_KEY (ZAI_API_KEY also accepted) env var. Bearer-token auth.
 Default model: glm-5.2. Override via planner selection (QA_PLANNER_MODEL / panel) — e.g. a cheaper GLM tier.
 Request shaping: thinking is disabled by default ({ thinking: { type: 'disabled' } }) so the planner stays fast/cheap (set GLM_THINKING=enabled to turn reasoning on); response_format json_object is requested and the schema steered in-prompt.
@@ -108,12 +110,17 @@ Rate limit: governed by local hardware.
 Fallback: the privacy floor. If all other rungs fail, Ollama is the last resort. Unavailable when Ollama is not running.
 AGENT NOTE: Ollama is the only rung guaranteed to keep data off external servers. In sensitive testing environments, set QA_PLANNER_PROVIDER=ollama to pin it.
 
+## Video Assertion Routing
+
+`assert_visual` accepts mode `screenshot` or `video`. Current provider adapters consume screenshots only; video mode can add best-effort clip evidence to the report, then falls back to screenshot visual verdict routing until a video-capable adapter is added. Do not send clips to text-only adapters or screenshot-only visual adapters.
+
 ## Update Triggers
 
 - When a new external service or adapter is added.
 - When credential sources change (new Vault keys or env vars).
 - When a model default is updated for any rung.
 - When the Google CLI binary name changes after 2026-06-18.
+- When video-capable assertion providers are added.
 
 ## Related Docs
 

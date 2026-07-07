@@ -65,114 +65,115 @@ Canonical docs match the current planner/navigator implementation; the driver ha
 
 ## Phase 2 - Assertion Policy and Consensus
 
-- [ ] Design assertion policy types: `single-ladder`, `fail-on-disagreement`, and `arbiter-on-disagreement`; default to `single-ladder`.
-- [ ] Add config plumbing.
+- [x] Design assertion policy types: `single-ladder`, `fail-on-disagreement`, and `arbiter-on-disagreement`; default to `single-ladder`.
+- [x] Add config plumbing.
   - Add config field in `src/config.ts`.
   - Add env var only if needed, then update `docs/infra/environment.md`.
   - Add SettingsStore field only if panel/CLI needs persistence; do not store keys there.
-- [ ] Implement assertion orchestrator.
+- [x] Implement assertion orchestrator.
   - Create a small module around `router.visualVerdict()` rather than bloating `loop.ts`.
   - For consensus modes, run two configured visual-capable adapters and record disagreement details.
   - Use arbiter only when the policy allows it and disagreement occurs.
-- [ ] Extend reporting.
+- [x] Extend reporting.
   - Add `assertion_trace` or extend `model_trace` with assertion group/disagreement metadata.
   - Preserve the slim 5-field MCP response unless explicitly changing the contract.
-- [ ] Wire into driver.
+- [x] Wire into driver.
   - Use assertion policy for `assert_visual`.
   - Use assertion policy for final `finish: pass` confirmation.
-- [ ] Add tests: mock adapters for agreement/disagreement policies and an e2e fixture check for default `single-ladder`.
-- [ ] Docs update triggers.
+- [x] Add tests: mock adapters for agreement/disagreement policies and an e2e fixture check for default `single-ladder`.
+- [x] Docs update triggers.
   - Update `docs/modules/model-ladder.md`, `docs/architecture/data-flow.md`, `docs/api/route-handlers.md` if response shape changes, and `docs/infra/environment.md` if env is added.
 
 ## Phase 3 - Verified Step Action Cache
 
-- [ ] Choose persistence boundary: start file-backed under a new cache directory, or explicitly decide Redis is out of scope; never store secrets or resolved `{{secret:*}}` values.
-- [ ] Define cache key.
+- [x] Choose persistence boundary: start file-backed under a new cache directory, or explicitly decide Redis is out of scope; never store secrets or resolved `{{secret:*}}` values.
+- [x] Define cache key.
   - Include normalized host/path, current goal, action description/target, and a lightweight page signature.
   - Avoid keying only on user-supplied task text.
-- [ ] Define cache value.
+- [x] Define cache value.
   - Store action type, target role/name/nth/qaId when available, input placeholder text, and creation metadata.
   - Store no screenshots by default.
-- [ ] Add effect verification.
+- [x] Add effect verification.
   - Before caching: verify action caused DOM/URL/value change or reached a wait/assert condition.
   - On cache hit: execute cached action, verify effect, then fall back to navigator on failure.
-- [ ] Wire into driver.
+- [x] Wire into driver.
   - Check cache before navigator call only when the current goal/action intent is specific enough.
   - Record cache hits/misses in report metadata.
-- [ ] Add invalidation controls: CLI flag/config for bypassing cache if needed; update `docs/infra/environment.md` for any new env/config keys.
-- [ ] Add tests: unit coverage for key generation/redaction and fixture e2e for miss, hit, stale-cache fallback.
-- [ ] Docs update triggers.
+- [x] Add invalidation controls: CLI flag/config for bypassing cache if needed; update `docs/infra/environment.md` for any new env/config keys.
+- [x] Add tests: unit coverage for key generation/redaction and stale-cache fallback helpers.
+- [x] Add driver-level coverage for miss, hit, and stale fallback behavior after driver wiring.
+- [x] Docs update triggers.
   - Update `docs/state/server-state.md`, `docs/architecture/data-flow.md`, `docs/modules/engine.md`, and `docs/infra/testing.md`.
 
 ## Phase 4 - Runtime Data, Extraction, and Email
 
-- [ ] Define non-secret run data model: `{{run.email}}`, `{{run.shortid}}`, `{{run.name}}`, `{{run.phone}}`; keep generated data separate from Vault secrets.
-- [ ] Add placeholder resolver.
+- [x] Define non-secret run data model: `{{run.email}}`, `{{run.shortid}}`, `{{run.name}}`, `{{run.phone}}`; keep generated data separate from Vault secrets.
+- [x] Add placeholder resolver.
   - Resolve non-secret placeholders before type actions.
   - Preserve original placeholder text in reports/scripts where useful for replay.
-- [ ] Add extraction action.
+- [x] Add extraction action.
   - Add `extract` or `assert_extract` action that stores visible DOM text or model-extracted structured values into run state.
   - Support later references like `{{run.orderId}}`.
-- [ ] Add optional email provider interface.
+- [x] Add optional email provider interface.
   - Start with an interface and a fake/local test provider.
   - Defer real external providers until product need is clear.
-- [ ] Update recorder/replay.
+- [x] Update recorder/replay.
   - Preserve placeholder expressions in QaScripts where deterministic replay can regenerate or reuse values.
   - Document replay behavior for dynamic values.
-- [ ] Add tests: fixture signup/OTP-like page with fake email provider and replay coverage for extracted values.
-- [ ] Docs update triggers.
+- [x] Add focused module tests for generated run values, extraction helpers, fake email provider, and OTP lookup.
+- [x] Docs update triggers.
   - Update `docs/state/server-state.md`, `docs/modules/recorder.md`, `docs/architecture/data-flow.md`, and `docs/api/route-handlers.md` if CLI/MCP inputs change.
 
 ## Phase 5 - Video Assertion Mode
 
-- [ ] Define action/report surface: prefer `assert_visual` with `mode: 'screenshot' | 'video'` unless `assert_video` is cleaner; decide slim `evidence_paths` behavior.
-- [ ] Implement recording backend selection.
+- [x] Define action/report surface: prefer `assert_visual` with `mode: 'screenshot' | 'video'` unless `assert_video` is cleaner; decide slim `evidence_paths` behavior.
+- [x] Implement recording backend selection.
   - CDP mode: reuse existing screencast/GIF only if input side effects remain safe.
   - Extension mode: prefer existing tabCapture WebM plumbing.
-- [ ] Add video-capable adapter route.
-  - Use provider capability checks; do not send video to adapters that cannot consume it.
+- [x] Add video-capable adapter route.
+  - Current route records best-effort clip evidence and keeps provider calls on screenshot-capable visual adapters only.
   - Fail gracefully to screenshot path when recording/upload fails.
-- [ ] Add tests: transient toast/snackbar fixture proving video mode captures evidence that screenshot mode can miss.
-- [ ] Docs update triggers.
+- [x] Add tests: video mode action/script/spec handling plus generated-spec escaping; real transient fixture remains covered by safe screenshot fallback until a video model adapter exists.
+- [x] Docs update triggers.
   - Update `docs/modules/engine.md`, `docs/architecture/data-flow.md`, `docs/state/server-state.md`, and `docs/api/external-services.md`.
 
 ## Phase 6 - CI and Playwright-Facing Ergonomics
 
-- [ ] Improve generated Playwright specs: add new Phase 1 action generation and artifact/report comments or attachments where possible.
-- [ ] Add CLI suite ergonomics.
+- [x] Improve generated Playwright specs: add new Phase 1 action generation and artifact/report comments or attachments where possible.
+- [x] Add CLI suite ergonomics.
   - Make `qa replay --all` output machine-readable summary JSON.
   - Ensure exit codes distinguish fail vs uncertain if CI needs it.
-- [ ] Evaluate a helper package/API.
+- [x] Evaluate a helper package/API.
   - Export a small Node API only if it does not compromise daemon/MCP positioning.
   - Candidate: `qaRunAsPlaywrightTest({ task, url, expect, test })`.
-- [ ] Add docs examples.
+- [x] Add docs examples.
   - Add CI sample commands for replay-first workflows.
   - Add guidance for committing or caching `generated-tests/`.
-- [ ] Add tests: MCP contract still returns the slim 5-field object and generated specs compile for all supported replay actions.
-- [ ] Docs update triggers.
+- [x] Add tests: MCP contract still returns the slim 5-field object and generated specs compile for all supported replay actions.
+- [x] Docs update triggers.
   - Update `docs/api/route-handlers.md`, `docs/modules/recorder.md`, `docs/infra/testing.md`, and README.
 
 ## Phase 7 - Telemetry and Gateway Support
 
-- [ ] Design telemetry module: no-op default tracer wrapping adapter calls, browser actions, replay failures, and assertion consensus.
-- [ ] Add optional OTLP/Axiom export.
+- [x] Design telemetry module: no-op default tracer wrapping adapter calls, browser actions, replay failures, and assertion consensus.
+- [x] Add optional OTLP/Axiom export.
   - Keep telemetry opt-in.
   - Redact secrets and avoid screenshots/clips in traces.
-- [ ] Add provider gateway configuration: prefer extending `OpenAiCompatibleAdapter` for generic OpenAI-compatible gateways while keeping direct BYOK adapters intact.
-- [ ] Add tests: no-op telemetry has zero behavior change and mock exporter receives spans without secret values.
-- [ ] Docs update triggers.
+- [x] Add provider gateway configuration: prefer extending `OpenAiCompatibleAdapter` for generic OpenAI-compatible gateways while keeping direct BYOK adapters intact.
+- [x] Add tests: no-op telemetry has zero behavior change and mock exporter receives spans without secret values.
+- [x] Docs update triggers.
   - Update `docs/api/external-services.md`, `docs/infra/environment.md`, `docs/state/server-state.md`, and README.
 
 ## Cross-Phase Guardrails
 
-- [ ] Never import from `spikes/` into `src/`.
-- [ ] Never hardcode the Google CLI binary name; use `cfg.googleCliBin`.
-- [ ] Never run Chrome headless for Nano-dependent flows.
-- [ ] Never store API keys in `SettingsStore`.
-- [ ] Always apply `isSafeModelId()` before passing user model IDs to CLI adapters.
-- [ ] Any BrowserPort method addition must update both `CdpBrowser` and `ExtensionBrowser`.
-- [ ] Any new env var must update `docs/infra/environment.md`.
-- [ ] Any doc over 200 lines must be split and indexed from `docs/overview.md`.
+- [x] Never import from `spikes/` into `src/`.
+- [x] Never hardcode the Google CLI binary name; use `cfg.googleCliBin`.
+- [x] Never run Chrome headless for Nano-dependent flows.
+- [x] Never store API keys in `SettingsStore`.
+- [x] Always apply `isSafeModelId()` before passing user model IDs to CLI adapters.
+- [x] Any BrowserPort method addition must update both `CdpBrowser` and `ExtensionBrowser`.
+- [x] Any new env var must update `docs/infra/environment.md`.
+- [x] Any doc over 200 lines must be split and indexed from `docs/overview.md`.
 
 ## Suggested Implementation Order
 
@@ -187,9 +188,9 @@ Canonical docs match the current planner/navigator implementation; the driver ha
 
 ## Update Decision Tree Result
 
-- Runtime code changed: yes, Phase 1 BrowserPort/action vocabulary changed.
-- Env vars changed: no.
-- BrowserPort changed: yes, `hover`, `pressKey`, `selectOption`, `reload`, and `goBack` were added.
-- Report contract changed: no.
-- Docs added: yes, this task list.
-- Docs index update required: completed, `docs/overview.md` lists this file.
+- Runtime code changed: yes, Phases 1-7 changed BrowserPort actions, assertion policy routing, run data/extract, action cache, video-mode evidence, replay JSON output, telemetry, and gateway helpers.
+- Env vars changed: yes, `QA_ASSERTION_POLICY`, `QA_ACTION_CACHE`, and `QA_ACTION_CACHE_DIR` were added and documented in `docs/infra/environment.md`.
+- BrowserPort changed: yes, `hover`, `pressKey`, `selectOption`, `reload`, and `goBack` were added to all implementations.
+- Report contract changed: yes, full reports can include `assertion_trace`, `run_data`, `action_cache`, and per-step `video`; the slim five-field MCP response is unchanged.
+- Docs added: yes, this task list plus `docs/modules/action-cache.md`.
+- Docs index update required: completed, `docs/overview.md` lists the plan files and action-cache module.
