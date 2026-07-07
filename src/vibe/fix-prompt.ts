@@ -25,6 +25,16 @@ export function humanizeStep(step: StepRecord): string {
       return `clicked ${targetPhrase ?? 'an element'}`;
     case 'type':
       return `typed ${JSON.stringify(a.text)} into ${targetPhrase ?? 'a field'}`;
+    case 'hover':
+      return `hovered over ${targetPhrase ?? 'an element'}`;
+    case 'press_key':
+      return `pressed ${a.key}`;
+    case 'select_option':
+      return `selected ${JSON.stringify(a.value)} in ${targetPhrase ?? 'a field'}`;
+    case 'reload':
+      return 'reloaded the page';
+    case 'go_back':
+      return 'went back to the previous page';
     case 'assert_visual':
       return `checked the page looked right: ${a.expectation}`;
     case 'assert_dom':

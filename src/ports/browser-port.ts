@@ -56,6 +56,11 @@ export interface BrowserPort {
   axTree(): Promise<AxSnapshot>;
   click(nodeId: string): Promise<void>;
   type(nodeId: string, text: string): Promise<void>;
+  hover(nodeId: string): Promise<void>;
+  pressKey(key: string): Promise<void>;
+  selectOption(nodeId: string, value: string): Promise<void>;
+  reload(): Promise<void>;
+  goBack(): Promise<void>;
   screenshot(): Promise<Buffer>;
   setLogpoint(spec: LogpointSpec): Promise<void>;
   /** Everything captured since the previous drain — per-step evidence correlation. */

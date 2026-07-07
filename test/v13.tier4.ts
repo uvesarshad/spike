@@ -112,6 +112,11 @@ class FakeBrowser implements BrowserPort {
   async type(nodeId: string, text: string): Promise<void> {
     this.typed.push({ nodeId, text });
   }
+  async hover(_nodeId: string): Promise<void> {}
+  async pressKey(_key: string): Promise<void> {}
+  async selectOption(_nodeId: string, _value: string): Promise<void> {}
+  async reload(): Promise<void> {}
+  async goBack(): Promise<void> {}
   async screenshot(): Promise<Buffer> {
     // a minimal PNG-shaped buffer so saveScreenshot writes something
     return Buffer.from('\x89PNG\r\n\x1a\n', 'binary');

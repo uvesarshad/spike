@@ -113,6 +113,16 @@ export function describeAction(a: Action): string {
       return `click ${a.nodeId}`;
     case 'type':
       return `type ${JSON.stringify(a.text)} into ${a.nodeId}`;
+    case 'hover':
+      return `hover ${a.nodeId}`;
+    case 'press_key':
+      return `press key ${a.key}`;
+    case 'select_option':
+      return `select ${JSON.stringify(a.value)} in ${a.nodeId}`;
+    case 'reload':
+      return 'reload page';
+    case 'go_back':
+      return 'go back';
     case 'assert_visual':
       return `visual check: ${a.expectation}`;
     case 'assert_dom':

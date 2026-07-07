@@ -65,8 +65,10 @@ ${ctx.axText}
 ${historyLines ? `ACTIONS SO FAR (with any errors/console/network evidence they caused):\n${historyLines}` : 'No actions taken yet.'}
 
 Decide the next 1-3 actions. Rules:
-- Interact via nodeIds from the tree above (click/type). nodeIds change every step — only use ids from THIS tree.
+- Interact via nodeIds from the tree above (click/type/hover/select_option). nodeIds change every step — only use ids from THIS tree.
 - typing into a field REPLACES its content; no need to clear first.
+- Use select_option for native select/combobox controls when the desired value or visible option text is known.
+- Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
 - Console errors / failed network requests after an action are strong evidence the app is broken — investigate or finish with verdict "fail" and cite them.
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input — the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
@@ -86,6 +88,11 @@ Action types:
 - {"type":"navigate","url":string}
 - {"type":"click","nodeId":string}
 - {"type":"type","nodeId":string,"text":string}
+- {"type":"hover","nodeId":string}
+- {"type":"press_key","key":string}
+- {"type":"select_option","nodeId":string,"value":string}
+- {"type":"reload"}
+- {"type":"go_back"}
 - {"type":"assert_dom","nodeId":string,"contains":string}   // cheap text check
 - {"type":"assert_visual","expectation":string}             // screenshot judged by a vision model
 - {"type":"wait","ms":number}
@@ -197,8 +204,10 @@ ${ctx.axText}
 ${historyLines ? `ACTIONS SO FAR (with any errors/console/network evidence they caused):\n${historyLines}` : 'No actions taken yet.'}
 
 Work on the CURRENT GOAL. Decide the next 1-3 actions. Rules:
-- Interact via nodeIds from the tree above (click/type). nodeIds change every step — only use ids from THIS tree.
+- Interact via nodeIds from the tree above (click/type/hover/select_option). nodeIds change every step — only use ids from THIS tree.
 - typing into a field REPLACES its content; no need to clear first.
+- Use select_option for native select/combobox controls when the desired value or visible option text is known.
+- Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
 - Console errors / failed network requests after an action are strong evidence the app is broken — investigate or finish with verdict "fail" and cite them.
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input — the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
@@ -220,6 +229,11 @@ Action types:
 - {"type":"navigate","url":string}
 - {"type":"click","nodeId":string}
 - {"type":"type","nodeId":string,"text":string}
+- {"type":"hover","nodeId":string}
+- {"type":"press_key","key":string}
+- {"type":"select_option","nodeId":string,"value":string}
+- {"type":"reload"}
+- {"type":"go_back"}
 - {"type":"assert_dom","nodeId":string,"contains":string}   // cheap text check
 - {"type":"assert_visual","expectation":string}             // screenshot judged by a vision model
 - {"type":"wait","ms":number}

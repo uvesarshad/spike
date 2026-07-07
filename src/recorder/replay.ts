@@ -75,6 +75,25 @@ export async function replayScript(
           await browser.type(node.id, s.text);
           break;
         }
+        case 'hover': {
+          const node = await findByTarget(browser, s.target);
+          await browser.hover(node.id);
+          break;
+        }
+        case 'press_key':
+          await browser.pressKey(s.key);
+          break;
+        case 'select_option': {
+          const node = await findByTarget(browser, s.target);
+          await browser.selectOption(node.id, s.value);
+          break;
+        }
+        case 'reload':
+          await browser.reload();
+          break;
+        case 'go_back':
+          await browser.goBack();
+          break;
         case 'assert_dom': {
           const node = await findByTarget(browser, s.target);
           const ax = await browser.axTree();
@@ -184,6 +203,16 @@ function toAction(s: ScriptStep): StepRecord['action'] {
       return { type: 'click', nodeId: `<${s.target.role}:${s.target.name ?? ''}>` };
     case 'type':
       return { type: 'type', nodeId: `<${s.target.role}:${s.target.name ?? ''}>`, text: s.text };
+    case 'hover':
+      return { type: 'hover', nodeId: `<${s.target.role}:${s.target.name ?? ''}>` };
+    case 'press_key':
+      return { type: 'press_key', key: s.key };
+    case 'select_option':
+      return { type: 'select_option', nodeId: `<${s.target.role}:${s.target.name ?? ''}>`, value: s.value };
+    case 'reload':
+      return { type: 'reload' };
+    case 'go_back':
+      return { type: 'go_back' };
     case 'assert_dom':
       return { type: 'assert_dom', nodeId: `<${s.target.role}:${s.target.name ?? ''}>`, contains: s.contains };
     case 'assert_visual':
@@ -201,6 +230,16 @@ function describeScriptStep(s: ScriptStep): string {
       return `click ${s.target.role} "${s.target.name ?? ''}"`;
     case 'type':
       return `type ${JSON.stringify(s.text)} into ${s.target.role} "${s.target.name ?? ''}"`;
+    case 'hover':
+      return `hover ${s.target.role} "${s.target.name ?? ''}"`;
+    case 'press_key':
+      return `press key ${s.key}`;
+    case 'select_option':
+      return `select ${JSON.stringify(s.value)} in ${s.target.role} "${s.target.name ?? ''}"`;
+    case 'reload':
+      return 'reload page';
+    case 'go_back':
+      return 'go back';
     case 'assert_dom':
       return `dom check: ${s.target.role} "${s.target.name ?? ''}" contains ${JSON.stringify(s.contains)}`;
     case 'assert_visual':

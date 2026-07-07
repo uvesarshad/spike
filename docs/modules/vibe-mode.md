@@ -3,7 +3,7 @@
 > Scope: VibeService daemon (src/vibe/), BridgeServer transport, side panel extension UI, and auto-fix loop.
 > Rendering context: Server-side daemon + client-side Chrome extension
 > Project tier: 3
-> Last updated: 2026-06-11
+> Last updated: 2026-07-07
 
 ## Overview
 
@@ -44,9 +44,11 @@ AGENT AVOID: Do not hardcode 'claude' or 'codex' as the fix agent binary. The co
 
 ## SettingsStore (src/vibe/settings.ts)
 
-Persists the user's non-secret picks to %LOCALAPPDATA%\qa-subagent\settings.json (Windows) or $HOME/qa-subagent/settings.json (other platforms). Fields: planner (PlannerSelection), debugMode ('prompt' | 'auto'), debugAgent ('auto' | 'claude' | 'codex' | 'gemini'). API keys never land here — those go in the Vault.
+Persists the user's non-secret picks to %LOCALAPPDATA%\qa-subagent\settings.json (Windows) or $HOME/qa-subagent/settings.json (other platforms). Fields: planner (Brain PlannerSelection), navigator (Navigator PlannerSelection), debugMode ('prompt' | 'auto'), debugAgent ('auto' | 'claude' | 'codex' | 'gemini'). API keys never land here — those go in the Vault.
 
 loadConfig() folds SettingsStore below env vars, so QA_* env vars always win for power users and CI.
+
+Runtime-generated data is not SettingsStore state. Reports, screenshots, audit logs, and clips belong under ArtifactStore; generated replay scripts belong under generated-tests/; the last failed report/fix prompt is daemon memory derived from a Report.
 
 AGENT SEE: docs/state/server-state.md — full SettingsStore persistence detail
 
@@ -56,7 +58,7 @@ The MV3 Chrome extension provides the vibe-mode UI layer. Its components:
 
 sw.js — Service worker. Connects to BridgeServer on startup, relays CDP operations via chrome.debugger (cdp-shim), forwards console/network events to the daemon, handles vibe.run / vibe.cancel messages.
 
-panel.html / panel.js / panel.css — Side panel UI. Displays the run history list, current step progress, fix-prompt text area, and model selector. Communicates with sw.js via chrome.runtime.sendMessage.
+panel.html / panel.js / panel.css — Side panel UI. Displays the run history list, current step progress, fix-prompt text area, Brain and Navigator model selectors, provider key controls, and clip download affordance. Communicates with sw.js via chrome.runtime.sendMessage.
 
 overlay.js — Ghost-cursor overlay injected into the page under test. Animates the cursor glide, ripple effects, and step captions in real time as the daemon drives the tab. Receives messages from sw.js.
 

@@ -90,7 +90,7 @@ function hostAllowed(host: string, allowedHosts: string[]): boolean {
 }
 
 /** Step-progress callback shape — VibeService forwards these verbatim to the UI. */
-export type StepKind = 'plan' | 'click' | 'type' | 'navigate' | 'assert' | 'wait' | 'finish';
+export type StepKind = 'plan' | 'click' | 'type' | 'hover' | 'key' | 'select' | 'navigate' | 'assert' | 'wait' | 'finish';
 export interface StepInfo {
   index: number;
   kind: StepKind;
@@ -126,7 +126,15 @@ function stepKind(action: Action): StepKind {
       return 'click';
     case 'type':
       return 'type';
+    case 'hover':
+      return 'hover';
+    case 'press_key':
+      return 'key';
+    case 'select_option':
+      return 'select';
     case 'navigate':
+    case 'reload':
+    case 'go_back':
       return 'navigate';
     case 'wait':
       return 'wait';
@@ -147,8 +155,18 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
       return `Click ${tgt ?? action.nodeId}`;
     case 'type':
       return `Type into ${tgt ?? action.nodeId}`;
+    case 'hover':
+      return `Hover ${tgt ?? action.nodeId}`;
+    case 'press_key':
+      return `Press key ${action.key}`;
+    case 'select_option':
+      return `Select ${JSON.stringify(action.value)} in ${tgt ?? action.nodeId}`;
     case 'navigate':
       return `Navigate to ${action.url}`;
+    case 'reload':
+      return 'Reload page';
+    case 'go_back':
+      return 'Go back';
     case 'wait':
       return `Wait ${action.ms}ms`;
     case 'finish':
@@ -563,10 +581,15 @@ export async function runDriverLoop(
         break;
       }
 
-      // ---- read-only-by-default guard: mutations (click/type) only on allowed
+      // ---- read-only-by-default guard: mutations only on allowed
       // hosts. Check the LIVE page host, not batchUrl — an earlier action in the
       // batch may have navigated us elsewhere. navigate/assert/wait stay allowed.
-      if (action.type === 'click' || action.type === 'type') {
+      if (
+        action.type === 'click' ||
+        action.type === 'type' ||
+        action.type === 'select_option' ||
+        action.type === 'press_key'
+      ) {
         const host = hostOf(await browser.url());
         if (host && !hostAllowed(host, allowedHosts)) {
           readOnlyBlock = host;
@@ -599,7 +622,7 @@ export async function runDriverLoop(
           if (count > 1 && index >= 0) record.target.nth = index;
           // #9: a name-less interaction target has no resilient role+name locator
           // — stamp a data-qa-id as a fallback (best-effort; lost on reload).
-          if (!t.name && (action.type === 'click' || action.type === 'type') && browser.stampQaId) {
+          if (!t.name && (action.type === 'click' || action.type === 'type' || action.type === 'hover' || action.type === 'select_option') && browser.stampQaId) {
             try {
               const qaId = await browser.stampQaId(action.nodeId);
               if (qaId) record.target.qaId = qaId;
@@ -681,7 +704,19 @@ export async function runDriverLoop(
       });
 
       // a real action that landed = navigator progress; reset the stuck counter
-      if (record.ok && (action.type === 'click' || action.type === 'type' || action.type === 'navigate')) {
+      if (
+        record.ok &&
+        (
+          action.type === 'click' ||
+          action.type === 'type' ||
+          action.type === 'hover' ||
+          action.type === 'press_key' ||
+          action.type === 'select_option' ||
+          action.type === 'navigate' ||
+          action.type === 'reload' ||
+          action.type === 'go_back'
+        )
+      ) {
         brainEscalations = 0;
       }
 
@@ -698,6 +733,7 @@ export async function runDriverLoop(
       if (a < actions.length - 1) {
         if (!record.ok) break;
         if (drainHasPageError(record.console, record.network)) break;
+        if (action.type === 'navigate' || action.type === 'reload' || action.type === 'go_back') break;
         const nowUrl = await browser.url();
         if (nowUrl !== batchUrl) break;
       }
@@ -900,7 +936,9 @@ async function executeWithRetry(browser: BrowserPort, action: Action, planTree: 
   } catch (firstErr) {
     // DOM may have shifted between snapshot and execution: re-resolve the
     // target by role+name in a FRESH tree and retry once
-    if (action.type !== 'click' && action.type !== 'type') throw firstErr;
+    if (action.type !== 'click' && action.type !== 'type' && action.type !== 'hover' && action.type !== 'select_option') {
+      throw firstErr;
+    }
     const target = findNode(planTree, action.nodeId);
     if (!target) throw firstErr;
     const fresh = await browser.axTree();
@@ -918,6 +956,16 @@ async function executeOnce(browser: BrowserPort, action: Action): Promise<void> 
       return browser.click(action.nodeId);
     case 'type':
       return browser.type(action.nodeId, action.text);
+    case 'hover':
+      return browser.hover(action.nodeId);
+    case 'press_key':
+      return browser.pressKey(action.key);
+    case 'select_option':
+      return browser.selectOption(action.nodeId, action.value);
+    case 'reload':
+      return browser.reload();
+    case 'go_back':
+      return browser.goBack();
     case 'wait':
       return sleep(action.ms);
     default:
@@ -986,13 +1034,25 @@ function subtreeText(node: AxNode): string {
 function auditTarget(action: Action, target?: { role: string; name?: string }): string | undefined {
   if (action.type === 'navigate') return action.url;
   if (target) return target.name ? `${target.role} "${target.name}"` : target.role;
+  if (action.type === 'press_key') return action.key;
+  if (action.type === 'reload') return 'reload';
+  if (action.type === 'go_back') return 'go_back';
   return undefined;
 }
 
 function lastInteraction(steps: StepRecord[]): FailingStep | null {
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i];
-    if (s.action.type === 'click' || s.action.type === 'type' || s.action.type === 'navigate') {
+    if (
+      s.action.type === 'click' ||
+      s.action.type === 'type' ||
+      s.action.type === 'hover' ||
+      s.action.type === 'press_key' ||
+      s.action.type === 'select_option' ||
+      s.action.type === 'navigate' ||
+      s.action.type === 'reload' ||
+      s.action.type === 'go_back'
+    ) {
       return { index: s.index, action: s.action, description: s.description };
     }
   }

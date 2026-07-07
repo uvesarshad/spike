@@ -3,11 +3,17 @@
 > Scope: ModelRouter, ModelAdapter interface, and all rung adapters in src/router/.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-06-20
+> Last updated: 2026-07-07
 
 ## Overview
 
-The model ladder is a cost-ordered sequence of AI adapters. Each adapter wraps one model access method and declares its rung (cost level). ModelRouter walks the ladder for each capability request — cheap first — escalating on error or uncertainty. Every call (success or failure) appends a ModelTraceEntry to router.trace, which feeds both report.model_trace and the token accounting story.
+The model ladder is a cost-ordered sequence of AI adapters. Each adapter wraps one model access method and declares its rung (cost level). ModelRouter walks the ladder per capability request, cheap first unless a role pin or BYOK-fast ordering changes the planner order. Every call, success or failure, appends a ModelTraceEntry to router.trace, which feeds report.model_trace and token accounting.
+
+The current architecture splits planning into two roles:
+
+- visual-verdict: judge a screenshot against an expectation.
+- plan-step: the NAVIGATOR, a cheap per-step call that chooses the next browser action.
+- plan-goals: the BRAIN, a smarter and rarer call that creates or repairs the sub-goal plan.
 
 AGENT OWNER: src/router/
 
@@ -15,82 +21,110 @@ AGENT OWNER: src/router/
 
 Every adapter implements:
 
-- name: string — unique identifier used in trace entries and the pinnedAdapter config.
-- rung: number — cost tier (0 = free on-device, 1 = free CLI quota, 2 = BYOK API, 3 = local/Ollama).
-- supports(cap) — declares which capabilities ('plan-step' | 'visual-verdict') this adapter handles. Rung 0 (Nano) supports visual-verdict only, never plan-step.
-- available() — async probe; returns false when the adapter is unconfigured or its service is unreachable. ModelRouter calls all available() probes in parallel.
-- generateJson(opts) — the single call surface: accepts prompt, schema (JSON Schema object), and optional imagePng (Buffer). Returns a validated parsed object.
-- lastUsage — populated after each generateJson call with token counts (totalTokens, cachedTokens) when the provider reports them.
+- name: unique identifier used in trace entries and role pins.
+- rung: cost tier (0 = free on-device, 1 = free CLI quota, 2 = BYOK API, 3 = local/Ollama).
+- supports(cap): declares support for visual-verdict, plan-step, or plan-goals.
+- available(): async probe; returns false when unconfigured or unreachable. ModelRouter probes supported adapters in parallel before each ladder walk.
+- generateJson(opts): accepts prompt, schema, and optional imagePng, then returns a parsed JSON-shaped value.
+- lastUsage: optional token usage from the most recent generateJson call. The router copies it into ModelTraceEntry. Rung-0 Nano and local adapters may leave it undefined.
+
+Any adapter that supports plan-step can also support plan-goals, except Nano. Nano supports visual-verdict and plan-step only; it is never the BRAIN.
 
 ## ModelRouter (src/router/model-router.ts)
 
-Constructor accepts an array of adapters and ModelRouterOptions (preferFreePlanner, pinnedAdapter). Adapters are sorted by ascending rung at construction time.
+Constructor accepts adapters and ModelRouterOptions:
 
-planJson(prompt, schema, step) — walks the plan-step ladder. Default ordering: if a rung-2 BYOK adapter is live and preferFreePlanner is false, rung 2 is promoted before rung 1 (~3× faster HTTP vs CLI cold-spawn). If pinnedAdapter is set, that adapter leads. Falls down-ladder on any error; throws only when all adapters fail.
+- preferFreePlanner: when false, live rung-2 planners are promoted before rung-1 planners for both plan-step and plan-goals. Visual verdicts are unaffected.
+- pinnedAdapter: back-compat single pin used for both planner roles when role-specific pins are absent. For visual-verdict, rung-0 Nano still stays first.
+- navigatorAdapter: role pin for plan-step. This is cfg.navigator resolved to an adapter name by buildLadder().
+- plannerAdapter: role pin for plan-goals. This is cfg.planner resolved to an adapter name by buildLadder().
 
-visualVerdict(png, expectation, step) — walks the visual-verdict ladder. Rung 0 (Nano) always leads (it is $0/on-device). On 'uncertain', escalates to the next rung. Returns the last uncertain verdict if the whole ladder is uncertain rather than throwing.
+planJson(prompt, schema, step) walks the plan-step ladder. This is the NAVIGATOR path and is called frequently by the driver loop.
 
-AGENT NOTE: The availability() probes are called in parallel before every ladder walk (not cached between steps). This is intentional — a CLI process that was unavailable at run start may become available mid-run, and the adapter ordering must reflect live state.
+planGoals(prompt, schema, step) walks the plan-goals ladder. This is the BRAIN path and is used for the sub-goal plan or re-plan.
 
-## Rung 0 — NanoAdapter (src/router/adapters/nano.ts)
+visualVerdict(png, expectation, step) walks the visual-verdict ladder. Rung 0 Nano always leads when available. On an uncertain verdict, the router escalates to the next visual adapter and returns the last uncertain verdict if every visual adapter is uncertain.
 
-Wraps NanoPort. Rung 0. Supports visual-verdict only. Passes the bare expectation string to the runner page (the runner page builds its own Prompt API prompt). Reports no token counts (on-device, $0).
+hasCapability(cap) probes whether any adapter can serve a capability right now. The driver uses this for plan-goals so a missing BRAIN can degrade to navigator-only behavior instead of failing the run.
 
-## Rung 1 — GoogleCliAdapter (src/router/adapters/google-cli.ts)
+AGENT NOTE: available() probes are called in parallel before every ladder walk and are not cached between steps. A CLI or local service may become available mid-run, so live state drives ordering.
 
-Wraps the Google CLI binary (cfg.googleCliBin, default 'gemini'). Rung 1. Supports both plan-step and visual-verdict. Spawns a child process with -p (headless prompt mode), passes images as base64 inline. Injects cfg.googleCliEnv into the child environment (contains NODE_OPTIONS=--use-system-ca on this machine for AVG TLS fix). Binary name is config-driven — after 2026-06-18 it switches from 'gemini' to the Antigravity CLI; never hardcode 'gemini' in new code.
+## Rung 0 - NanoAdapter (src/router/adapters/nano.ts)
 
-AGENT NOTE: Exit code 41 from the Google CLI child process means OAuth/TLS failure (usually the AVG TLS intercept on this machine). The adapter prints a hint and re-throws; the router escalates to rung 2.
+Wraps NanoPort. Rung 0. Supports:
 
-## Rung 1 — CliPlannerAdapter (src/router/adapters/cli-planner.ts)
+- visual-verdict: passes the bare expectation plus screenshot to the runner/offscreen Prompt API.
+- plan-step: calls nano.navStep() with the navigator prompt and schema.
 
-Generic CLI planner adapter. Used for claude (claude CLI) and codex (Codex CLI). Rung 1. Supports plan-step only. Spawns the binary, passes the prompt via stdin or -p flag, parses JSON output.
+Nano never supports plan-goals. It is a cheap local navigator and visual judge, not the BRAIN. It reports no token counts because it is on-device and $0.
 
-AGENT AVOID: Never pass user-supplied model IDs to CLI adapters without the isSafeModelId() check from src/vibe/settings.ts. The model flag is passed in a shell-spawned child (shell:true); an unsanitized model string is a command-injection sink.
+## Rung 1 - GoogleCliAdapter (src/router/adapters/google-cli.ts)
 
-## Rung 2 — ByokGeminiAdapter (src/router/adapters/byok-gemini.ts)
+Wraps the Google CLI binary from cfg.googleCliBin. Rung 1. Supports planning and visual verdicts. Spawns a child process with -p, passes images as base64 inline, and injects cfg.googleCliEnv into the child environment.
 
-Calls the Gemini REST API directly using cfg.geminiApiKey (or the Vault 'gemini' key). Rung 2. Supports plan-step and visual-verdict. Returns token counts from usageMetadata.
+AGENT NOTE: The binary name is config-driven. Never hardcode "gemini"; use cfg.googleCliBin.
 
-## Rung 2 — AnthropicAdapter (src/router/adapters/anthropic.ts)
+AGENT NOTE: Exit code 41 from the Google CLI child process means OAuth/TLS failure. The adapter prints a hint and re-throws; the router escalates.
 
-Calls the Anthropic API using the Vault 'anthropic' key or ANTHROPIC_API_KEY env. Rung 2. Supports plan-step. Default model: claude-haiku-4-5 (cheap tier; the ladder's whole point is to use cheap models).
+## Rung 1 - CliPlannerAdapter (src/router/adapters/cli-planner.ts)
 
-## Rung 2 — OpenAiCompatibleAdapter (src/router/adapters/openai-compatible.ts)
+Generic CLI planner adapter for claude CLI and codex CLI. Rung 1. Supports plan-step and plan-goals. Spawns the binary, passes the prompt through stdin or a prompt flag, and parses JSON output.
 
-OpenAI-compatible REST adapter. Used for 'gpt:api' (baseUrl: https://api.openai.com/v1), 'openrouter:api' (baseUrl: https://openrouter.ai/api/v1), and 'glm:api' (baseUrl: https://api.z.ai/api/paas/v4). Rung 2. Supports plan-step. Keys from Vault or env (OPENAI_API_KEY, OPENROUTER_API_KEY, GLM_API_KEY).
+AGENT AVOID: Never pass user-supplied model IDs to CLI adapters without the isSafeModelId() check from src/vibe/settings.ts. The model flag is passed in a shell-spawned child; an unsanitized model string is a command-injection sink.
 
-AGENT NOTE: The adapter has three optional knobs for non-default providers. supportsVision (default true) — set false for a text-only model so supports('visual-verdict') returns false and the router never routes a screenshot to a model that can't see it (and no image is attached even if one is passed). jsonMode (default true) — sends response_format:{type:'json_object'}; disable for a provider that rejects the field. extraBody — merged into the chat-completions body for provider-specific fields.
+## Rung 2 - ByokGeminiAdapter (src/router/adapters/byok-gemini.ts)
 
-## Rung 2 — GLM / z.ai (OpenAiCompatibleAdapter, label 'glm')
+Calls the Gemini REST API directly using cfg.geminiApiKey or the Vault "gemini" key. Rung 2. Supports planning and visual verdicts. Returns token counts from usageMetadata.
 
-GLM-5.2 from z.ai, wired in buildLadder() as 'glm:api'. Rung 2. Text-only reasoning model: constructed with supportsVision:false (supports plan-step only — Nano/Gemini keep the visual-verdict ladder) and extraBody { thinking: { type: 'disabled' } } so the planner stays fast and cheap. Default model glm-5.2. Key from Vault 'glm' or GLM_API_KEY / ZAI_API_KEY env. Endpoint defaults to https://api.z.ai/api/paas/v4 and is overridable via GLM_BASE_URL (e.g. the GLM Coding Plan endpoint or the mainland BigModel host). To use GLM as the browsing-control AI: `qa config set --provider glm` (then store the key with `qa secret set glm <key>` or via the panel).
+## Rung 2 - AnthropicAdapter (src/router/adapters/anthropic.ts)
 
-## Rung 3 — OllamaAdapter (src/router/adapters/ollama.ts)
+Calls the Anthropic API using the Vault "anthropic" key or ANTHROPIC_API_KEY. Rung 2. Supports plan-step and plan-goals. It is commonly used as the BRAIN default through cfg.planner.
 
-Calls a local Ollama instance (localhost:11434). Rung 3. Supports plan-step and visual-verdict. Default model: llama3.2-vision. Privacy floor: no data leaves the machine on this rung.
+## Rung 2 - OpenAiCompatibleAdapter (src/router/adapters/openai-compatible.ts)
+
+OpenAI-compatible REST adapter. Used for gpt:api, openrouter:api, and glm:api. Rung 2. Supports plan-step and plan-goals, and supports visual-verdict only when constructed with supportsVision:true. Keys come from Vault or provider env vars.
+
+AGENT NOTE: supportsVision:false keeps text-only models such as GLM off the visual-verdict ladder. jsonMode and extraBody are provider-specific request knobs.
+
+## Rung 2 - GLM / z.ai
+
+GLM is wired as glm:api through OpenAiCompatibleAdapter. It is constructed with supportsVision:false and joins only the planning ladders. GLM_THINKING defaults to disabled so planner calls stay fast and cheap.
+
+## Rung 3 - OllamaAdapter (src/router/adapters/ollama.ts)
+
+Calls a local Ollama instance on localhost:11434. Rung 3. Supports planning and visual verdicts when the configured local model can serve them. Privacy floor: no data leaves the machine on this rung.
 
 ## Ladder Ordering Summary
 
-For plan-step: [pinned adapter if set] → [rung 2 BYOK if preferFreePlanner=false] → [rung 1 CLI adapters] → [rung 3 Ollama]. Rung 0 (Nano) never plans.
+For plan-step: navigatorAdapter if live -> pinnedAdapter if no navigatorAdapter -> rung 2 before rung 1 when preferFreePlanner=false -> remaining planners by rung. Nano may lead this role when cfg.navigator resolves to nano and Nano is available.
 
-For visual-verdict: [rung 0 Nano] → [pinned adapter if set and not Nano] → [remaining by ascending rung]. Text-only adapters (e.g. GLM, supportsVision:false) declare no visual-verdict support and never appear on this ladder.
+For plan-goals: plannerAdapter if live -> pinnedAdapter if no plannerAdapter -> rung 2 before rung 1 when preferFreePlanner=false -> remaining planners by rung. Nano never appears on this ladder.
 
-## PlannerSelection and SettingsStore
+For visual-verdict: rung 0 Nano -> pinnedAdapter if live and not Nano -> remaining visual-capable adapters by rung. Text-only adapters do not appear.
 
-The user's chosen "browsing control AI" is stored as PlannerSelection (provider, mode, optional model) in SettingsStore (src/vibe/settings.ts). buildLadder() in engine.ts pins the corresponding adapter to the front. The default is { provider: 'claude', mode: 'cli' } — the claude CLI (the former gemini:cli free-quota default died on 2026-06-18). The side panel's vibe.config.set message and QA_PLANNER_* env vars both override this.
+## PlannerSelection, NavigatorSelection, and SettingsStore
 
-AGENT SEE: docs/state/server-state.md — SettingsStore persistence path
+The user's BRAIN choice is stored in cfg.planner and pins plannerAdapter for plan-goals. The user's NAVIGATOR choice is stored in cfg.navigator and pins navigatorAdapter for plan-step. loadConfig() merges defaults, qa.config.json, SettingsStore, env, and explicit overrides; QA_PLANNER_* controls the BRAIN and QA_NAVIGATOR_* controls the NAVIGATOR.
+
+buildLadder() resolves each role selection to an adapter name, constructs each provider:mode slot once, and passes navigatorAdapter/plannerAdapter into ModelRouter. Role-specific model IDs are applied to the pinned slot; unpinned fallback slots use cheap navigator-tier defaults. Nano resolves to the adapter name "nano"; it can serve plan-step if available but is intentionally absent from plan-goals.
+
+AGENT SEE: docs/state/server-state.md - SettingsStore persistence path
+
+## Token Accounting
+
+Adapters that receive provider usage metadata set lastUsage after generateJson(). ModelRouter copies that value into each ModelTraceEntry. This makes report.model_trace the source for per-call prompt, output, total, and cached token counts when providers expose them. Nano and local adapters can omit usage.
 
 ## Update Triggers
 
-- When a new model provider or adapter is added.
-- When the ladder ordering rules change (new rung, new preferFreePlanner behavior).
-- When the ModelAdapter interface gains or loses methods.
+- When a model provider or adapter is added.
+- When capability support changes for any adapter.
+- When ladder ordering, role pinning, or preferFreePlanner behavior changes.
+- When ModelAdapter or ModelRouterOptions gains or loses fields.
+- When token usage is reported from a new source.
 - When the isSafeModelId security check scope changes.
 
 ## Related Docs
 
-- docs/modules/engine.md — how buildLadder() and ModelRouter are composed in a run
-- docs/api/external-services.md — credentials, rate limits, and fallback per provider
-- docs/infra/environment.md — env vars for API keys and planner selection
+- docs/modules/engine.md - how buildLadder() and ModelRouter are composed in a run
+- docs/api/external-services.md - credentials, rate limits, and fallback per provider
+- docs/infra/environment.md - env vars for API keys and planner/navigator selection

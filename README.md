@@ -40,7 +40,7 @@ The exact error with file:line, the failing step, the failed network call, and a
            "http://localhost:3000")        4. THE LOOP — paid in cheap/free tokens:
           │                                   a. read the page as a compact a11y
           │   pays ZERO tokens                   tree (~800 tok, stable node ids)
-          │   while this runs                 b. planner (Gemini Flash) picks ONE
+          │   while this runs                 b. Brain/Navigator models pick ONE
           │                                      action: click n7 / type / assert…
           │                                   c. execute it over CDP
           │                                   d. capture console + network caused
@@ -61,10 +61,10 @@ Key design decisions:
   | 0 | **Gemini Nano** (Chrome Prompt API) | $0, on-device | visual verdicts on screenshots |
   | 1 | **CLI planner** (`claude` / `codex` / Antigravity) | account quota | step planning, multi-step reasoning |
   | 2 | **BYOK** (Gemini, Anthropic, OpenAI, OpenRouter, **GLM/z.ai** — `glm-5.2`) | your key | heavy runs, lower latency |
-  | 3 | **Ollama local** | $0, private | privacy floor (interface stub today) |
+  | 3 | **Ollama local** | $0, private | privacy floor; skipped unless a local daemon is available |
 
 - **CDP logpoints** (the spike-B trick): when diagnosing, the daemon can inject `console.log`s at any file:line of a *running* page with **zero source edits** — `Debugger.setBreakpointByUrl` with a condition that logs and returns `false`. No dirty diffs, no cleanup, works on sites you don't own.
-- **CDP now, extension later**: the engine only talks to a `BrowserPort` interface. `CdpBrowser` (plain `--remote-debugging-port`) ships today; `ExtensionBrowser` (MV3 `chrome.debugger`) is a deliberate stub that becomes the plug-and-play vibe-mode face (Web Store install, real logged-in sessions, native Nano access) without rewriting the engine.
+- **CDP and extension transports**: the engine only talks to a `BrowserPort` interface. `CdpBrowser` drives a daemon-owned Chrome over `--remote-debugging-port`; `ExtensionBrowser` drives the user's existing Chrome tab through the MV3 bridge and `chrome.debugger`, so vibe mode can use real logged-in sessions without rewriting the engine.
 - **Evidence per step**: console and network buffers are drained between steps, so each step record carries exactly the fallout it caused.
 
 ## Tech stack
@@ -146,7 +146,7 @@ GLM-5.2 is text-only, so it does the planning while Gemini Nano (or another visi
 
 ```
 src/
-├─ ports/        BrowserPort (CdpBrowser real, ExtensionBrowser stub) · NanoPort (localhost runner page)
+├─ ports/        BrowserPort (CdpBrowser + ExtensionBrowser real) · NanoPort (localhost runner page)
 ├─ chrome/       Chrome process management (launch/attach/reuse)
 ├─ capture/      a11y tree extraction · console+network capture · CDP logpoints
 ├─ router/       model ladder: adapters (nano, google-cli, byok-gemini, ollama) + escalation

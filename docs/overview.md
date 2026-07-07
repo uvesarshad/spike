@@ -48,6 +48,13 @@ Product documentation (human-authored, not generated):
 - docs/benchmark.md — token cost comparison vs Playwright MCP
 - docs/vibe-panel-manual-test.md — manual testing checklist for the extension side panel
 
+Planning and audit documentation:
+- docs/plan/2026-07-01-planner-navigator-split.md — plan for the Brain/Navigator architecture split
+- docs/plan/2026-07-01-planner-navigator-split-todo.md — implementation checklist and dogfood results for the split
+- docs/plan/2026-07-03-ui-design-tokens.md — side-panel UI design token plan
+- docs/plan/2026-07-07-passmark-comparison-audit.md — Passmark comparison audit and gap roadmap
+- docs/plan/2026-07-07-passmark-gap-implementation-tasks.md — detailed implementation checklist from the Passmark audit
+
 ## Key Architectural Decisions
 
 Interface-driven transports: BrowserPort isolates the driver loop from how Chrome is controlled (CDP today, extension bridge in vibe mode). Adding a new transport means implementing BrowserPort; zero engine changes required.
@@ -79,6 +86,8 @@ Recorded scripts use role+name locators: After a passing run, the recorder emits
 
 ## Recent Changes
 
+- [2026-07-07] Added Passmark gap implementation task list under docs/plan.
+- [2026-07-07] Added Passmark comparison audit under docs/plan and indexed planning docs.
 - [2026-06-11] Initial documentation generated from codebase; all docs/ subdirectories created.
 
 ## Related Docs

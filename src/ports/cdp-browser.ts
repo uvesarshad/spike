@@ -78,18 +78,20 @@ export class CdpBrowser implements BrowserPort {
     return backendId;
   }
 
-  async click(nodeId: string): Promise<void> {
-    const backendNodeId = this.backendNodeId(nodeId);
-    // Mirror ExtensionBrowser: foreground the tab before input. Raw CDP input
-    // usually works on background tabs, but occluded-window throttling has
-    // twice swallowed clicks in live headed runs — bringToFront removes the
-    // variable (and the headed window is the "watch the robot" show anyway).
+  private async centerOf(backendNodeId: number): Promise<{ x: number; y: number }> {
     await this.c.Page.bringToFront().catch(() => {});
     await this.c.DOM.scrollIntoViewIfNeeded({ backendNodeId }).catch(() => {});
     const { model } = await this.c.DOM.getBoxModel({ backendNodeId });
     const quad = model.content;
-    const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
-    const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
+    return {
+      x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+      y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4,
+    };
+  }
+
+  async click(nodeId: string): Promise<void> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    const { x, y } = await this.centerOf(backendNodeId);
     for (const type of ['mousePressed', 'mouseReleased'] as const) {
       await this.c.Input.dispatchMouseEvent({ type, x, y, button: 'left', clickCount: 1 });
     }
@@ -131,6 +133,67 @@ export class CdpBrowser implements BrowserPort {
     // silent-typing-failure bug class for good; the slow per-char path only
     // engages on a real mismatch.
     await this.verifyTyped(backendNodeId, text);
+  }
+
+  async hover(nodeId: string): Promise<void> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    const { x, y } = await this.centerOf(backendNodeId);
+    await this.c.Input.dispatchMouseEvent({ type: 'mouseMoved', x, y });
+    await sleep(250);
+  }
+
+  async pressKey(key: string): Promise<void> {
+    await this.c.Page.bringToFront().catch(() => {});
+    await this.c.Input.dispatchKeyEvent({ type: 'keyDown', key });
+    await this.c.Input.dispatchKeyEvent({ type: 'keyUp', key });
+    await sleep(150);
+  }
+
+  async selectOption(nodeId: string, value: string): Promise<void> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    let objectId: string | undefined;
+    try {
+      const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+      objectId = object.objectId;
+      if (!objectId) throw new Error(`selectOption() failed: node ${nodeId} is not a JS object`);
+      const { result } = await this.c.Runtime.callFunctionOn({
+        objectId,
+        functionDeclaration: `function (value) {
+          if (!(this instanceof HTMLSelectElement)) {
+            return { ok: false, error: 'target is not a native select element' };
+          }
+          const match = Array.from(this.options).find((o) => o.value === value || o.text === value || o.label === value);
+          if (!match) return { ok: false, error: 'option not found: ' + value };
+          this.value = match.value;
+          this.dispatchEvent(new Event('input', { bubbles: true }));
+          this.dispatchEvent(new Event('change', { bubbles: true }));
+          return { ok: true, value: this.value };
+        }`,
+        arguments: [{ value }],
+        returnByValue: true,
+      });
+      const out = result.value as { ok?: boolean; error?: string } | undefined;
+      if (!out?.ok) throw new Error(`selectOption() failed: ${out?.error ?? 'unknown error'}`);
+    } finally {
+      if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {});
+    }
+    await sleep(200);
+  }
+
+  async reload(): Promise<void> {
+    const loaded = this.c.Page.loadEventFired();
+    await this.c.Page.reload({ ignoreCache: false });
+    await Promise.race([loaded, sleep(15_000)]);
+    await sleep(300);
+  }
+
+  async goBack(): Promise<void> {
+    const { entries, currentIndex } = await this.c.Page.getNavigationHistory();
+    if (currentIndex <= 0) throw new Error('goBack() failed: no previous history entry');
+    const loaded = this.c.Page.loadEventFired();
+    await this.c.Page.navigateToHistoryEntry({ entryId: entries[currentIndex - 1].id });
+    await Promise.race([loaded, sleep(15_000)]);
+    await sleep(300);
   }
 
   /** Read the field's live `.value` (Runtime.evaluate is NOT node-scoped — go

@@ -49,7 +49,7 @@ export interface QaRunOptions {
   onProgress?: (line: string) => void;
   /** Structured per-step hook (vibe panel animates these). Threaded into the
    * driver loop by the planner-side work; forwarded as vibe.step events. */
-  onStep?: (info: { index: number; kind: 'plan' | 'click' | 'type' | 'navigate' | 'assert' | 'wait' | 'finish'; text: string; ok?: boolean }) => void;
+  onStep?: (info: { index: number; kind: 'plan' | 'click' | 'type' | 'hover' | 'key' | 'select' | 'navigate' | 'assert' | 'wait' | 'finish'; text: string; ok?: boolean }) => void;
   /** Caller-owned bridge (extension mode). When the panel already drives an
    * attached Chrome, the daemon reuses this bridge instead of spawning its own;
    * ownership (and close()) stays with the caller. */

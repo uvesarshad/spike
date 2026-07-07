@@ -3,25 +3,27 @@
 > Scope: All persistent state — SettingsStore, Vault (API keys), ArtifactStore (run output).
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-06-11
+> Last updated: 2026-07-07
 
 ## Overview
 
-The daemon has three persistence points: SettingsStore (user preferences), Vault (API keys, encrypted), and ArtifactStore (per-run output). There is no database. All state is file-based. There is no client-side state beyond the extension panel's in-memory run history list.
+The daemon has three persistence points: SettingsStore (user preferences), Vault (API keys, encrypted), and ArtifactStore (per-run output). There is no database. All daemon state is file-based. The extension may keep panel UI history outside the daemon; authoritative run output is still ArtifactStore.
 
 AGENT OWNER: src/vibe/settings.ts, src/vault/vault.ts, src/report/artifacts.ts
 
 ## SettingsStore (src/vibe/settings.ts)
 
-Stores: QaSettings — planner (PlannerSelection: provider, mode, model), debugMode ('prompt' | 'auto'), debugAgent ('auto' | 'claude' | 'codex' | 'gemini').
+Stores: QaSettings — planner (Brain PlannerSelection: provider, mode, model), navigator (Navigator PlannerSelection: provider, mode, model), debugMode ('prompt' | 'auto'), debugAgent ('auto' | 'claude' | 'codex' | 'gemini').
 
 File location: %LOCALAPPDATA%\qa-subagent\settings.json (Windows) or $HOME/qa-subagent/settings.json (other platforms).
 
 Read by: loadConfig() (src/config.ts) folds it in below env vars. The SettingsStore layer sits between qa.config.json and env vars in the precedence chain (low to high: defaults < qa.config.json < SettingsStore < env < explicit overrides).
 
-Written by: `qa config set` CLI command and the vibe.config.set bridge message from the extension side panel. write() merges a partial patch (planner is merged as a nested object, not replaced wholesale).
+Written by: `qa config set` CLI command and the vibe.config.set bridge message from the extension side panel. write() merges a partial patch (planner and navigator are merged as nested objects, not replaced wholesale).
 
 AGENT NOTE: API keys are never stored in SettingsStore. A user who accidentally puts a key in SettingsStore will have it readable as plain JSON. Keys belong in the Vault only.
+
+AGENT NOTE: Runtime-generated data is never stored in SettingsStore. Reports, screenshots, audit logs, and replay clips belong in ArtifactStore; generated replay scripts belong in generated-tests/; fix prompts are derived from Reports and may exist only in daemon memory or CLI output.
 
 ## Vault (src/vault/vault.ts)
 
@@ -46,7 +48,7 @@ Layout for each run:
 - artifacts/<runId>/report.json — the full Report object (written once at run end, rewritten with final token counts and clip path).
 - artifacts/<runId>/screenshots/step-NN.png — one PNG per step that took a screenshot.
 - artifacts/<runId>/audit.jsonl — append-only newline-delimited JSON; one line per executed action (ts, runId, action type, redacted target, url, ok). Secrets never appear here.
-- artifacts/<runId>/replay.gif — optional GIF clip (when cfg.recordClip is true and the clip recorder succeeded).
+- artifacts/<runId>/replay.gif|webm|mp4 — optional replay clip (transport- and recorder-dependent).
 
 runId: generated once per ArtifactStore instantiation (at the start of qaRun or qaReplay). A UUID-like string prefixed with 'r-'.
 
@@ -62,11 +64,11 @@ AGENT NOTE: artifacts/ and generated-tests/ are both git-ignored. Do not rely on
 
 Location: generated-tests/<slug>.json and generated-tests/<slug>.spec.ts.
 
-These are recorded QaScripts emitted after a passing run. They are also git-ignored by default. In a CI environment, the directory should be committed or restored from a cache so `qa replay --all` has scripts to run.
+These are recorded QaScripts emitted after a passing run. They are runtime/generated data, not SettingsStore state. They are also git-ignored by default. In a CI environment, the directory should be committed or restored from a cache so `qa replay --all` has scripts to run.
 
-## Extension Panel In-Memory State
+## Extension Panel UI State
 
-The extension's panel.js holds a run history list in JavaScript memory (not persisted across panel opens). It is not documented further here — it is ephemeral and reconstructed from the bridge events on each connection.
+The extension panel may keep lightweight UI history in browser storage, but it is not daemon SettingsStore state. Reports, clips, and fix prompts remain derived runtime outputs owned by ArtifactStore or the active daemon process.
 
 ## Update Triggers
 

@@ -63,6 +63,11 @@ class FakeBrowser implements BrowserPort {
     this.clicked.push(nodeId);
   }
   async type(): Promise<void> {}
+  async hover(): Promise<void> {}
+  async pressKey(): Promise<void> {}
+  async selectOption(): Promise<void> {}
+  async reload(): Promise<void> {}
+  async goBack(): Promise<void> {}
   async screenshot(): Promise<Buffer> {
     return Buffer.from('\x89PNG\r\n\x1a\n', 'binary');
   }

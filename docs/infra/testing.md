@@ -3,7 +3,7 @@
 > Scope: Test strategy, test suite layout, frameworks, and how to run each suite.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-06-11
+> Last updated: 2026-07-07
 
 ## Overview
 
@@ -13,7 +13,7 @@ AGENT OWNER: test/
 
 ## Test Layout
 
-test/m1.browser-port.ts — BrowserPort contract (7 checks). Exercises the full CdpBrowser interface (navigate, click, type, screenshot, axTree, drainConsole, drainNetwork) against the fixture app. No model calls.
+test/m1.browser-port.ts — BrowserPort contract. Exercises the full CdpBrowser interface (navigate, click, hover, type, pressKey, selectOption, reload, goBack, screenshot, axTree, drainConsole, drainNetwork) against the fixture app. No model calls.
 
 test/m2.nano-port.ts — NanoPort discrimination. Verifies that Gemini Nano returns 'pass' on the healthy fixture home page and 'fail' (or 'uncertain') on a broken page. Requires Nano to be available.
 
@@ -31,7 +31,7 @@ test/e2e.recorder.ts — Recorder proof. Runs qaRun() on the healthy fixture, ve
 
 test/e2e.autofix-real.ts — Auto-fix loop e2e. Runs qaRun() on the buggy fixture, triggers the auto-fix loop with a real coding agent, and verifies the next qaRun returns 'pass'. Requires a coding agent CLI on PATH.
 
-test/port-contract.ts — Shared BrowserPort interface assertions imported by m1 and m3.
+test/port-contract.ts — Shared BrowserPort interface assertions imported by m1 and m3. Covers the common action vocabulary so CDP and extension transports remain in parity.
 
 test/v1–v25 (*.ts) — Numbered integration spikes. These are numbered research experiments documenting specific capabilities (clip recording, CDP logpoints, Nano availability probing, etc.). They are reference code, not regression gates. Not imported by the main test suites.
 

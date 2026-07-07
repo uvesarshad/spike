@@ -2101,6 +2101,16 @@ function describeAction(a) {
       return `click ${a.nodeId}`;
     case "type":
       return `type ${JSON.stringify(a.text)} into ${a.nodeId}`;
+    case "hover":
+      return `hover ${a.nodeId}`;
+    case "press_key":
+      return `press key ${a.key}`;
+    case "select_option":
+      return `select ${JSON.stringify(a.value)} in ${a.nodeId}`;
+    case "reload":
+      return "reload page";
+    case "go_back":
+      return "go back";
     case "assert_visual":
       return `visual check: ${a.expectation}`;
     case "assert_dom":
@@ -6180,6 +6190,11 @@ var ActionSchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("navigate"), url: external_exports.string() }),
   external_exports.object({ type: external_exports.literal("click"), nodeId: external_exports.string() }),
   external_exports.object({ type: external_exports.literal("type"), nodeId: external_exports.string(), text: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("hover"), nodeId: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("press_key"), key: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("select_option"), nodeId: external_exports.string(), value: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("reload") }),
+  external_exports.object({ type: external_exports.literal("go_back") }),
   external_exports.object({ type: external_exports.literal("assert_visual"), expectation: external_exports.string() }),
   external_exports.object({ type: external_exports.literal("assert_dom"), nodeId: external_exports.string(), contains: external_exports.string() }),
   external_exports.object({ type: external_exports.literal("wait"), ms: external_exports.number().int().min(50).max(1e4) }),
@@ -6215,11 +6230,26 @@ var PLAN_JSON_SCHEMA = {
         properties: {
           type: {
             type: "string",
-            enum: ["navigate", "click", "type", "assert_visual", "assert_dom", "wait", "finish"]
+            enum: [
+              "navigate",
+              "click",
+              "type",
+              "hover",
+              "press_key",
+              "select_option",
+              "reload",
+              "go_back",
+              "assert_visual",
+              "assert_dom",
+              "wait",
+              "finish"
+            ]
           },
           url: { type: "string" },
           nodeId: { type: "string" },
           text: { type: "string" },
+          key: { type: "string" },
+          value: { type: "string" },
           expectation: { type: "string" },
           contains: { type: "string" },
           ms: { type: "integer" },
@@ -6345,8 +6375,10 @@ ${historyLines ? `ACTIONS SO FAR (with any errors/console/network evidence they 
 ${historyLines}` : "No actions taken yet."}
 
 Work on the CURRENT GOAL. Decide the next 1-3 actions. Rules:
-- Interact via nodeIds from the tree above (click/type). nodeIds change every step \u2014 only use ids from THIS tree.
+- Interact via nodeIds from the tree above (click/type/hover/select_option). nodeIds change every step \u2014 only use ids from THIS tree.
 - typing into a field REPLACES its content; no need to clear first.
+- Use select_option for native select/combobox controls when the desired value or visible option text is known.
+- Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
 - Console errors / failed network requests after an action are strong evidence the app is broken \u2014 investigate or finish with verdict "fail" and cite them.
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input \u2014 the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
@@ -6368,6 +6400,11 @@ Action types:
 - {"type":"navigate","url":string}
 - {"type":"click","nodeId":string}
 - {"type":"type","nodeId":string,"text":string}
+- {"type":"hover","nodeId":string}
+- {"type":"press_key","key":string}
+- {"type":"select_option","nodeId":string,"value":string}
+- {"type":"reload"}
+- {"type":"go_back"}
 - {"type":"assert_dom","nodeId":string,"contains":string}   // cheap text check
 - {"type":"assert_visual","expectation":string}             // screenshot judged by a vision model
 - {"type":"wait","ms":number}
@@ -6420,7 +6457,15 @@ function stepKind(action) {
       return "click";
     case "type":
       return "type";
+    case "hover":
+      return "hover";
+    case "press_key":
+      return "key";
+    case "select_option":
+      return "select";
     case "navigate":
+    case "reload":
+    case "go_back":
       return "navigate";
     case "wait":
       return "wait";
@@ -6438,8 +6483,18 @@ function humanizeAction(action, target) {
       return `Click ${tgt ?? action.nodeId}`;
     case "type":
       return `Type into ${tgt ?? action.nodeId}`;
+    case "hover":
+      return `Hover ${tgt ?? action.nodeId}`;
+    case "press_key":
+      return `Press key ${action.key}`;
+    case "select_option":
+      return `Select ${JSON.stringify(action.value)} in ${tgt ?? action.nodeId}`;
     case "navigate":
       return `Navigate to ${action.url}`;
+    case "reload":
+      return "Reload page";
+    case "go_back":
+      return "Go back";
     case "wait":
       return `Wait ${action.ms}ms`;
     case "finish":
@@ -6752,7 +6807,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         reason = "cancelled by user";
         break;
       }
-      if (action.type === "click" || action.type === "type") {
+      if (action.type === "click" || action.type === "type" || action.type === "select_option" || action.type === "press_key") {
         const host = hostOf(await browser.url());
         if (host && !hostAllowed(host, allowedHosts)) {
           readOnlyBlock = host;
@@ -6777,7 +6832,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
           record.target = { role: t.role, ...t.name && { name: t.name } };
           const { count, index } = rankByRoleName(ax.root, t.role, t.name, action.nodeId);
           if (count > 1 && index >= 0) record.target.nth = index;
-          if (!t.name && (action.type === "click" || action.type === "type") && browser.stampQaId) {
+          if (!t.name && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "select_option") && browser.stampQaId) {
             try {
               const qaId = await browser.stampQaId(action.nodeId);
               if (qaId) record.target.qaId = qaId;
@@ -6844,7 +6899,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         text: humanizeAction(action, record.target),
         ok: record.ok
       });
-      if (record.ok && (action.type === "click" || action.type === "type" || action.type === "navigate")) {
+      if (record.ok && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "press_key" || action.type === "select_option" || action.type === "navigate" || action.type === "reload" || action.type === "go_back")) {
         brainEscalations = 0;
       }
       if (verdict !== "uncertain" || action.type === "finish") {
@@ -7012,7 +7067,9 @@ async function executeWithRetry(browser, action, planTree) {
   try {
     await executeOnce(browser, action);
   } catch (firstErr) {
-    if (action.type !== "click" && action.type !== "type") throw firstErr;
+    if (action.type !== "click" && action.type !== "type" && action.type !== "hover" && action.type !== "select_option") {
+      throw firstErr;
+    }
     const target = findNode(planTree, action.nodeId);
     if (!target) throw firstErr;
     const fresh = await browser.axTree();
@@ -7029,6 +7086,16 @@ async function executeOnce(browser, action) {
       return browser.click(action.nodeId);
     case "type":
       return browser.type(action.nodeId, action.text);
+    case "hover":
+      return browser.hover(action.nodeId);
+    case "press_key":
+      return browser.pressKey(action.key);
+    case "select_option":
+      return browser.selectOption(action.nodeId, action.value);
+    case "reload":
+      return browser.reload();
+    case "go_back":
+      return browser.goBack();
     case "wait":
       return sleep(action.ms);
     default:
@@ -7077,12 +7144,15 @@ function subtreeText(node) {
 function auditTarget(action, target) {
   if (action.type === "navigate") return action.url;
   if (target) return target.name ? `${target.role} "${target.name}"` : target.role;
+  if (action.type === "press_key") return action.key;
+  if (action.type === "reload") return "reload";
+  if (action.type === "go_back") return "go_back";
   return void 0;
 }
 function lastInteraction(steps) {
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i];
-    if (s.action.type === "click" || s.action.type === "type" || s.action.type === "navigate") {
+    if (s.action.type === "click" || s.action.type === "type" || s.action.type === "hover" || s.action.type === "press_key" || s.action.type === "select_option" || s.action.type === "navigate" || s.action.type === "reload" || s.action.type === "go_back") {
       return { index: s.index, action: s.action, description: s.description };
     }
   }
@@ -7620,16 +7690,21 @@ var LiteExtensionBrowser = class {
     }
     return backendId;
   }
-  async click(nodeId) {
-    const backendNodeId = this.backendNodeId(nodeId);
+  async centerOf(backendNodeId) {
     await this.c.Page.bringToFront().catch(() => {
     });
     await this.c.DOM.scrollIntoViewIfNeeded({ backendNodeId }).catch(() => {
     });
     const { model } = await this.c.DOM.getBoxModel({ backendNodeId });
     const quad = model.content;
-    const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
-    const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
+    return {
+      x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4,
+      y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4
+    };
+  }
+  async click(nodeId) {
+    const backendNodeId = this.backendNodeId(nodeId);
+    const { x, y } = await this.centerOf(backendNodeId);
     this.emitCursor({ kind: "move", x, y, caption: "Clicking " + this.nodeLabel(nodeId) });
     await sleep2(350);
     for (const type of ["mousePressed", "mouseReleased"]) {
@@ -7672,6 +7747,70 @@ var LiteExtensionBrowser = class {
     await this.c.Input.insertText({ text });
     await sleep2(150);
     await this.verifyTyped(backendNodeId, text);
+  }
+  async hover(nodeId) {
+    const backendNodeId = this.backendNodeId(nodeId);
+    const { x, y } = await this.centerOf(backendNodeId);
+    this.emitCursor({ kind: "move", x, y, caption: "Hovering over " + this.nodeLabel(nodeId) });
+    await sleep2(350);
+    await this.c.Input.dispatchMouseEvent({ type: "mouseMoved", x, y });
+    await sleep2(250);
+  }
+  async pressKey(key) {
+    await this.c.Page.bringToFront().catch(() => {
+    });
+    this.emitCursor({ kind: "caption", caption: `Pressing ${key}` });
+    await this.c.Input.dispatchKeyEvent({ type: "keyDown", key });
+    await this.c.Input.dispatchKeyEvent({ type: "keyUp", key });
+    await sleep2(150);
+  }
+  async selectOption(nodeId, value) {
+    const backendNodeId = this.backendNodeId(nodeId);
+    this.emitCursor({ kind: "caption", caption: "Selecting " + JSON.stringify(value) + " in " + this.nodeLabel(nodeId) });
+    let objectId;
+    try {
+      const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+      objectId = object.objectId;
+      if (!objectId) throw new Error(`selectOption() failed: node ${nodeId} is not a JS object`);
+      const { result } = await this.c.Runtime.callFunctionOn({
+        objectId,
+        functionDeclaration: `function (value) {
+          if (!(this instanceof HTMLSelectElement)) {
+            return { ok: false, error: 'target is not a native select element' };
+          }
+          const match = Array.from(this.options).find((o) => o.value === value || o.text === value || o.label === value);
+          if (!match) return { ok: false, error: 'option not found: ' + value };
+          this.value = match.value;
+          this.dispatchEvent(new Event('input', { bubbles: true }));
+          this.dispatchEvent(new Event('change', { bubbles: true }));
+          return { ok: true, value: this.value };
+        }`,
+        arguments: [{ value }],
+        returnByValue: true
+      });
+      const out = result.value;
+      if (!out?.ok) throw new Error(`selectOption() failed: ${out?.error ?? "unknown error"}`);
+    } finally {
+      if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {
+      });
+    }
+    await sleep2(200);
+  }
+  async reload() {
+    this.emitCursor({ kind: "caption", caption: "Reloading the page" });
+    const loaded = this.c.Page.loadEventFired();
+    await this.c.Page.reload({ ignoreCache: false });
+    await Promise.race([loaded, sleep2(15e3)]);
+    await sleep2(300);
+  }
+  async goBack() {
+    this.emitCursor({ kind: "caption", caption: "Going back" });
+    const { entries, currentIndex } = await this.c.Page.getNavigationHistory();
+    if (currentIndex <= 0) throw new Error("goBack() failed: no previous history entry");
+    const loaded = this.c.Page.loadEventFired();
+    await this.c.Page.navigateToHistoryEntry({ entryId: entries[currentIndex - 1].id });
+    await Promise.race([loaded, sleep2(15e3)]);
+    await sleep2(300);
   }
   /** Read the field's live `.value` via DOM.resolveNode → Runtime.callFunctionOn. */
   async liveValue(backendNodeId) {
@@ -7942,6 +8081,16 @@ function humanizeStep(step) {
       return `clicked ${targetPhrase ?? "an element"}`;
     case "type":
       return `typed ${JSON.stringify(a.text)} into ${targetPhrase ?? "a field"}`;
+    case "hover":
+      return `hovered over ${targetPhrase ?? "an element"}`;
+    case "press_key":
+      return `pressed ${a.key}`;
+    case "select_option":
+      return `selected ${JSON.stringify(a.value)} in ${targetPhrase ?? "a field"}`;
+    case "reload":
+      return "reloaded the page";
+    case "go_back":
+      return "went back to the previous page";
     case "assert_visual":
       return `checked the page looked right: ${a.expectation}`;
     case "assert_dom":

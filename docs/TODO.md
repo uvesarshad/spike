@@ -21,7 +21,7 @@
 
 ### Ports (the engine ↔ browser seam)
 - [x] `BrowserPort` interface + `CdpBrowser` implementation (navigate, click, type, screenshot, logpoints, drains)
-- [x] `ExtensionBrowser` stub with per-method MV3 mappings (keeps vibe mode honest)
+- [x] `ExtensionBrowser` planned at the BrowserPort seam with per-method MV3 mappings (later shipped as the real extension transport)
 - [x] `NanoPort` + localhost runner page (warm session priming, storage-gate diagnostics, tab reuse across runs)
 
 ### Capture & evidence
@@ -34,7 +34,7 @@
 - [x] Rung 0: Nano adapter (visual verdicts only, never plans)
 - [x] Rung 1: generic Google CLI adapter (stdin prompt, `@shot.png` + cwd=tempdir, `-e none -o json`, trust env, exit 41/55 hints; binary name from config — Antigravity-ready)
 - [x] Rung 2: BYOK Gemini API adapter (`responseSchema`, gated on key)
-- [ ] Rung 3: Ollama adapter — **interface stub only** (`available() → false`); implement when privacy floor is needed
+- [x] Rung 3: Ollama adapter — local privacy floor with `/api/tags` availability probe and `/api/chat` JSON generation; skips cleanly when no daemon is listening
 
 ### Driver & reporting
 - [x] Action schema (zod + JSON-schema twins): navigate/click/type/assert_dom/assert_visual/wait/finish

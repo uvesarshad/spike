@@ -35,11 +35,25 @@ document.getElementById('add').addEventListener('click', () => {
   addItem('Widget', 49.99);
   fetch('/api/ping');
 });
+document.getElementById('shipping').addEventListener('change', (e) => {
+  document.getElementById('shipping-status').textContent = 'Shipping: ' + e.target.value;
+});
+document.getElementById('more').addEventListener('mouseover', () => {
+  document.getElementById('hover-panel').hidden = false;
+});
+document.getElementById('coupon').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('key-status').textContent = 'Coupon submitted';
+});
 `;
 
 const INDEX_HTML = `<!DOCTYPE html><html><head><title>M1 shop</title></head><body>
 <h1>Demo shop</h1>
 <label>Coupon <input id="coupon" type="text"></label>
+<label>Shipping <select id="shipping"><option value="standard">Standard</option><option value="express">Express</option></select></label>
+<p id="shipping-status">Shipping: standard</p>
+<button id="more">More actions</button>
+<div id="hover-panel" hidden>Hover menu visible</div>
+<p id="key-status">No key yet</p>
 <button id="add">Add Widget</button>
 <div id="total">$0.00</div>
 <script src="/app.js"></script>
@@ -105,7 +119,9 @@ export async function runPortContract(
     console.log('--- a11y tree ---\n' + ax.text + '\n-----------------');
     const addBtn = findByName(ax.root, 'button', 'Add Widget');
     const coupon = findByName(ax.root, 'textbox', 'Coupon');
-    check('axTree finds button + textbox with stable ids', Boolean(addBtn && coupon));
+    const shipping = findByName(ax.root, 'combobox', 'Shipping');
+    const more = findByName(ax.root, 'button', 'More actions');
+    check('axTree finds button + textbox + combobox with stable ids', Boolean(addBtn && coupon && shipping && more));
 
     browser.drainConsole();
     browser.drainNetwork(); // reset buffers → next drains correlate to the clicks only
@@ -139,6 +155,26 @@ export async function runPortContract(
       'type() REPLACES existing content (retype is not appended)',
       coupon2?.value === 'SAVE10',
     );
+
+    await browser.pressKey('Enter');
+    const ax3 = await browser.axTree();
+    check('pressKey() dispatches keyboard input', ax3.text.includes('Coupon submitted'));
+
+    await browser.selectOption(shipping!.id, 'express');
+    const ax4 = await browser.axTree();
+    check('selectOption() updates native select value', ax4.text.includes('Shipping: express'));
+
+    await browser.hover(more!.id);
+    const ax5 = await browser.axTree();
+    check('hover() dispatches mouse movement', ax5.text.includes('Hover menu visible'));
+
+    await browser.navigate(`http://127.0.0.1:${httpPort}/second`);
+    check('navigate to second page before goBack()', (await browser.url()).includes('/second'));
+    await browser.goBack();
+    check('goBack() returns to previous page', !(await browser.url()).includes('/second'));
+
+    await browser.reload();
+    check('reload() keeps the current page loaded', (await browser.url()).includes(`127.0.0.1:${httpPort}`));
 
     const png = await browser.screenshot();
     check('screenshot returns PNG', png.length > 1000 && png.subarray(1, 4).toString() === 'PNG');

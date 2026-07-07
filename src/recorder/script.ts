@@ -32,6 +32,11 @@ export type ScriptStep =
   | { type: 'navigate'; url: string }
   | { type: 'click'; target: ScriptTarget }
   | { type: 'type'; target: ScriptTarget; text: string }
+  | { type: 'hover'; target: ScriptTarget }
+  | { type: 'press_key'; key: string }
+  | { type: 'select_option'; target: ScriptTarget; value: string }
+  | { type: 'reload' }
+  | { type: 'go_back' }
   | { type: 'assert_dom'; target: ScriptTarget; contains: string }
   | { type: 'assert_visual'; expectation: string }
   | { type: 'wait'; ms: number };
@@ -76,6 +81,21 @@ export function scriptFromReport(report: Report): QaScript {
         break;
       case 'type':
         if (s.target) steps.push({ type: 'type', target: s.target, text: a.text });
+        break;
+      case 'hover':
+        if (s.target) steps.push({ type: 'hover', target: s.target });
+        break;
+      case 'press_key':
+        steps.push({ type: 'press_key', key: a.key });
+        break;
+      case 'select_option':
+        if (s.target) steps.push({ type: 'select_option', target: s.target, value: a.value });
+        break;
+      case 'reload':
+        steps.push({ type: 'reload' });
+        break;
+      case 'go_back':
+        steps.push({ type: 'go_back' });
         break;
       case 'assert_dom':
         if (s.target) steps.push({ type: 'assert_dom', target: s.target, contains: a.contains });
@@ -182,6 +202,16 @@ function stepSig(s: ScriptStep): string {
       return `click ${targetSig(s.target)}`;
     case 'type':
       return `type ${JSON.stringify(s.text)} → ${targetSig(s.target)}`;
+    case 'hover':
+      return `hover ${targetSig(s.target)}`;
+    case 'press_key':
+      return `press_key ${JSON.stringify(s.key)}`;
+    case 'select_option':
+      return `select_option ${JSON.stringify(s.value)} → ${targetSig(s.target)}`;
+    case 'reload':
+      return 'reload';
+    case 'go_back':
+      return 'go_back';
     case 'assert_dom':
       return `assert_dom ${targetSig(s.target)} contains ${JSON.stringify(s.contains)}`;
     case 'assert_visual':
@@ -235,6 +265,21 @@ export function toPlaywrightSpec(script: QaScript): string {
         break;
       case 'type':
         lines.push(`  await ${locator(s.target)}.fill(${JSON.stringify(s.text)});`);
+        break;
+      case 'hover':
+        lines.push(`  await ${locator(s.target)}.hover();`);
+        break;
+      case 'press_key':
+        lines.push(`  await page.keyboard.press(${JSON.stringify(s.key)});`);
+        break;
+      case 'select_option':
+        lines.push(`  await ${locator(s.target)}.selectOption(${JSON.stringify(s.value)});`);
+        break;
+      case 'reload':
+        lines.push(`  await page.reload();`);
+        break;
+      case 'go_back':
+        lines.push(`  await page.goBack();`);
         break;
       case 'assert_dom':
         lines.push(`  await expect(${locator(s.target)}).toContainText(${JSON.stringify(s.contains)});`);
