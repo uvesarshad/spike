@@ -29,10 +29,12 @@ AGENT OWNER: src/telemetry/*, wiring in src/engine.ts
 Within the files this module owns (`src/engine.ts` — the shared core both the CLI and MCP server call into):
 
 - `qa.run` — one span per `qaRun()` call. Events: `replay.match` (Phase 14 matcher outcome), `replay.used` / `replay.fallback` (matched-replay path), `session.opened` (navigator/brain pins, transport), `driver.loop.completed`, `script.recorded`.
-- `qa.run.driver_loop` — wraps the `runDriverLoop()` call itself (attributes: runId/task/url) so the AI-driven exploration phase has its own latency/outcome span even though the loop's internals live in `src/driver/loop.ts` (not owned here — no instrumentation was added inside it).
+- `qa.run.driver_loop` — wraps the `runDriverLoop()` call itself (attributes: runId/task/url) so the AI-driven exploration phase has its own latency/outcome span.
 - `qa.replay` — one span per `qaReplay()` call. Events: `heal.start` when `--heal` re-engages the driver after a failed replay.
+- `model.call` — one span per adapter INVOCATION (in `src/router/model-router.ts`), including every down-ladder fallback attempt. Attributes: `capability` (`visual-verdict`/`plan-step`/`plan-goals`), `adapter` name, `rung`, `step`. Accurate wall-clock duration; `error` status on a failed attempt (the router then falls to the next rung). Non-secret attributes only — never the prompt, image bytes, or resolved secrets. Complements `report.model_trace` (the in-report per-call cost record).
+- `browser.action` — one span per executed driver action (in `src/driver/loop.ts`). Attributes: `type` (click/type/navigate/upload_file/…), `step`, and `kind` for `mouse`. `error` status when the step records a failure. Non-secret attributes only (never type text, full urls, or targets).
 
-Adapter-level calls, individual browser actions, and action-cache hits/misses happen inside `src/router/*` and `src/driver/loop.ts`, which this lane does not own — those boundaries are not instrumented here; a future pass can add spans inside those modules following the same pattern (`getDefaultTracer()` + `trace()`/`startSpan()`).
+Together these give a full `qa.run → qa.run.driver_loop → browser.action` / `model.call` tree in a tracing backend. Action-cache hits/misses remain in `report.json` (and the `qa dashboard`), not spans. A test hook, `setDefaultTracerForTest()` in `telemetry/env.ts`, lets tests pin a mock-exporter tracer to observe these spans (see `test/v33.trace-spans.ts`).
 
 ## Redaction guarantees
 

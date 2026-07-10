@@ -48,6 +48,7 @@ import {
   verifyActionEffect,
   type CachedActionValue,
 } from '../cache/action-cache.js';
+import { getDefaultTracer } from '../telemetry/env.js';
 import { startClipRecorder, type CdpClientLike } from '../clip/screencast.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -841,6 +842,14 @@ export async function runDriverLoop(
         actionCache && a === actions.length - 1 && action.type !== 'finish' && action.type !== 'assert_visual' && action.type !== 'wait'
           ? await captureActionEffectState(browser).catch(() => null)
           : null;
+      // one `browser.action` telemetry span per executed action (no-op sink by
+      // default). Attributes are non-secret (type/step/kind only — never type
+      // text, urls beyond host, or targets); redaction is a second safety net.
+      const actionSpan = getDefaultTracer().startSpan('browser.action', {
+        type: action.type,
+        step: i,
+        ...(action.type === 'mouse' && { kind: action.kind }),
+      });
       try {
         if (action.type === 'finish') {
           // trust a fail immediately; confirm a pass with one visual check
@@ -1015,6 +1024,8 @@ export async function runDriverLoop(
           record.error = e instanceof Error ? e.message : String(e);
         }
       }
+      if (record.ok === false) actionSpan.fail(record.error ?? 'action failed');
+      else actionSpan.end();
 
       await sleep(150); // let async fallout (fetches, navigations) land
       record.console = browser.drainConsole();

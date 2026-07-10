@@ -5,6 +5,7 @@
 import type { NanoVerdict } from '../ports/nano-port.js';
 import type { AdapterUsage, Capability, ModelAdapter } from './adapter.js';
 import { VERDICT_JSON_SCHEMA, verdictPrompt } from './verdict.js';
+import { getDefaultTracer } from '../telemetry/env.js';
 
 export interface VisualCandidate {
   name: string;
@@ -46,6 +47,11 @@ export interface ModelRouterOptions {
 
 export class ModelRouter {
   readonly trace: ModelTraceEntry[] = [];
+  /** Process-wide telemetry tracer (no-op sink by default → zero external calls
+   * / zero behaviour change). Emits one `model.call` span per adapter INVOCATION
+   * — including down-ladder fallback attempts — so a tracing backend sees the
+   * full run→loop→model.call tree, complementing report.model_trace. */
+  private readonly tracer = getDefaultTracer();
   private readonly preferFreePlanner: boolean;
   private readonly pinnedAdapter?: string;
   private readonly navigatorAdapter?: string;
@@ -131,11 +137,9 @@ export class ModelRouter {
         // rung 0 takes the bare expectation (runner builds its own prompt);
         // higher rungs get the full QA prompt
         const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
-        const raw = (await adapter.generateJson({
-          prompt,
-          schema: VERDICT_JSON_SCHEMA,
-          imagePng: png,
-        })) as Partial<NanoVerdict>;
+        const raw = (await this.traceCall('visual-verdict', adapter, step, () =>
+          adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png }),
+        )) as Partial<NanoVerdict>;
         const verdict: NanoVerdict = {
           verdict: raw.verdict === 'pass' || raw.verdict === 'fail' ? raw.verdict : 'uncertain',
           summary: raw.summary ?? '',
@@ -199,7 +203,9 @@ export class ModelRouter {
     }
     const t0 = Date.now();
     try {
-      const raw = (await adapter.videoVerdict(videoPath, expectation)) as Partial<NanoVerdict>;
+      const raw = (await this.traceCall('visual-verdict', adapter, step, () =>
+        adapter.videoVerdict!(videoPath, expectation),
+      )) as Partial<NanoVerdict>;
       const verdict: NanoVerdict = {
         verdict: raw.verdict === 'pass' || raw.verdict === 'fail' ? raw.verdict : 'uncertain',
         summary: raw.summary ?? '',
@@ -244,11 +250,9 @@ export class ModelRouter {
     const t0 = Date.now();
     try {
       const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
-      const raw = (await adapter.generateJson({
-        prompt,
-        schema: VERDICT_JSON_SCHEMA,
-        imagePng: png,
-      })) as Partial<NanoVerdict>;
+      const raw = (await this.traceCall('visual-verdict', adapter, step, () =>
+        adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png }),
+      )) as Partial<NanoVerdict>;
       const verdict: NanoVerdict = {
         verdict: raw.verdict === 'pass' || raw.verdict === 'fail' ? raw.verdict : 'uncertain',
         summary: raw.summary ?? '',
@@ -309,7 +313,7 @@ export class ModelRouter {
     for (const adapter of ladder) {
       const t0 = Date.now();
       try {
-        const result = await adapter.generateJson({ prompt, schema });
+        const result = await this.traceCall(cap, adapter, step, () => adapter.generateJson({ prompt, schema }));
         this.trace.push({
           step,
           capability: cap,
@@ -335,6 +339,15 @@ export class ModelRouter {
       }
     }
     throw new Error(`all planner adapters failed: ${lastError?.message}`);
+  }
+
+  /** Wrap a single adapter invocation in a `model.call` telemetry span with the
+   * accurate wall-clock duration. Attributes are non-secret (capability / adapter
+   * name / rung / step only — never the prompt or image). On throw the span is
+   * failed and the error rethrown, so the caller's existing down-ladder fallback
+   * + model_trace error entry are unchanged. */
+  private traceCall<T>(cap: Capability, adapter: ModelAdapter, step: number, fn: () => Promise<T>): Promise<T> {
+    return this.tracer.trace('model.call', { capability: cap, adapter: adapter.name, rung: adapter.rung, step }, fn);
   }
 }
 

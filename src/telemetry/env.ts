@@ -21,6 +21,15 @@ export function resetDefaultTracer(): void {
   cached = undefined;
 }
 
+/** Test-only hook: pin the process-wide tracer to a specific instance (e.g. one
+ * wired to a mock exporter) so a test can observe the `model.call` /
+ * `browser.action` spans the router and driver emit. Pass a tracer to set it,
+ * or call `resetDefaultTracer()` afterwards to return to env-driven behaviour.
+ * Never used by product code. */
+export function setDefaultTracerForTest(tracer: TelemetryTracer): void {
+  cached = tracer;
+}
+
 function buildTracerFromEnv(): TelemetryTracer {
   const mode = (process.env.QA_TELEMETRY_EXPORTER ?? 'none').toLowerCase();
   if (mode !== 'otlp') return createTelemetryTracer(); // no-op sink; spans still always constructed

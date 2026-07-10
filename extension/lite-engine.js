@@ -4822,6 +4822,286 @@ Judge strictly from what is visible across the clip (including transient UI such
 Respond with ONLY a JSON object: {"verdict":"pass"|"fail"|"uncertain","summary":string,"issues":string[]}`;
 }
 
+// src/telemetry/env.ts
+init_buffer_shim();
+
+// src/telemetry/tracer.ts
+init_buffer_shim();
+
+// src/telemetry/redaction.ts
+init_buffer_shim();
+var REDACTED = "[redacted]";
+var SECRET_PLACEHOLDER_RE = /\{\{secret:([A-Za-z0-9_-]+)\}\}/g;
+var BEARER_RE = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
+var API_KEY_RE = /\b(?:sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,})\b/g;
+var SENSITIVE_KEY_RE = /(^|[-_.])(api[-_]?key|authorization|cookie|password|secret|token|x-api-key)([-_.]|$)/i;
+function isSensitiveKey(key) {
+  return SENSITIVE_KEY_RE.test(key);
+}
+function redactString(input, opts = {}) {
+  let out = input;
+  for (const secret of opts.secretValues ?? []) {
+    if (!secret) continue;
+    out = out.split(secret).join(REDACTED);
+  }
+  out = out.replace(BEARER_RE, (_m, scheme) => `${scheme} ${REDACTED}`);
+  out = out.replace(API_KEY_RE, REDACTED);
+  if (opts.redactSecretPlaceholders ?? true) {
+    out = out.replace(SECRET_PLACEHOLDER_RE, `{{secret:${REDACTED}}}`);
+  }
+  const max = opts.maxStringLength ?? 4e3;
+  return out.length > max ? `${out.slice(0, max)}...` : out;
+}
+function redactValue(value, opts = {}) {
+  return redactAny(value, opts, 0, /* @__PURE__ */ new WeakSet(), void 0);
+}
+function redactAny(value, opts, depth, seen, key) {
+  if (key && isSensitiveKey(key)) return REDACTED;
+  if (typeof value === "string") return redactString(value, opts);
+  if (typeof value === "number" || typeof value === "boolean" || value === null || value === void 0) return value;
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Date) return value.toISOString();
+  if (import_buffer.Buffer.isBuffer(value)) return `[buffer:${value.length} bytes]`;
+  if (typeof value !== "object") return String(value);
+  const maxDepth = opts.maxDepth ?? 6;
+  if (depth >= maxDepth) return "[max-depth]";
+  if (seen.has(value)) return "[circular]";
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => redactAny(item, opts, depth + 1, seen, void 0));
+  }
+  const out = {};
+  for (const [childKey, childValue] of Object.entries(value)) {
+    out[childKey] = redactAny(childValue, opts, depth + 1, seen, childKey);
+  }
+  return out;
+}
+
+// src/telemetry/tracer.ts
+var NoopTelemetryExporter = class {
+  /** Test/observability hook only — never read by product code. Incremented on
+   * every (discarded) export so callers can confirm spans are actually being
+   * constructed and handed to a sink, not skipped, even with no real exporter
+   * configured (Phase 11: "always-on structured spans"). */
+  exportCount = 0;
+  export() {
+    this.exportCount++;
+  }
+};
+var defaultNoopExporter = new NoopTelemetryExporter();
+function createTelemetryTracer(opts = {}) {
+  return new ExportingTelemetryTracer(opts.exporter ?? defaultNoopExporter, opts.redaction ?? {});
+}
+var ExportingTelemetryTracer = class {
+  constructor(exporter, redaction) {
+    this.exporter = exporter;
+    this.redaction = redaction;
+  }
+  exporter;
+  redaction;
+  startSpan(name, attributes = {}) {
+    return new ExportingSpan(name, attributes, this.exporter, this.redaction);
+  }
+  async trace(name, attributes, fn) {
+    const span = this.startSpan(name, attributes);
+    try {
+      const result = await fn();
+      span.end();
+      return result;
+    } catch (e) {
+      span.fail(e);
+      throw e;
+    }
+  }
+};
+var ExportingSpan = class {
+  constructor(name, attributes, exporter, redaction) {
+    this.name = name;
+    this.exporter = exporter;
+    this.redaction = redaction;
+    this.attributes = sanitizeRecord(attributes, redaction);
+  }
+  name;
+  exporter;
+  redaction;
+  started = Date.now();
+  startIso = new Date(this.started).toISOString();
+  attributes;
+  events = [];
+  ended = false;
+  setAttribute(key, value) {
+    if (this.ended) return;
+    this.attributes[key] = sanitizeAttribute(key, value, this.redaction);
+  }
+  addEvent(name, attributes = {}) {
+    if (this.ended) return;
+    this.events.push({
+      name,
+      time: (/* @__PURE__ */ new Date()).toISOString(),
+      attributes: sanitizeRecord(attributes, this.redaction)
+    });
+  }
+  end(attributes = {}) {
+    this.finish("ok", void 0, attributes);
+  }
+  fail(error, attributes = {}) {
+    this.finish("error", error, attributes);
+  }
+  finish(status, error, attributes = {}) {
+    if (this.ended) return;
+    this.ended = true;
+    Object.assign(this.attributes, sanitizeRecord(attributes, this.redaction));
+    const ended = Date.now();
+    const span = {
+      name: this.name,
+      startTime: this.startIso,
+      endTime: new Date(ended).toISOString(),
+      durationMs: ended - this.started,
+      status,
+      attributes: this.attributes,
+      events: this.events,
+      error: error === void 0 ? void 0 : redactValue(error instanceof Error ? error.message : String(error), this.redaction)
+    };
+    void this.exporter.export(span);
+  }
+};
+function sanitizeRecord(input, opts) {
+  const out = {};
+  for (const [key, value] of Object.entries(input)) {
+    out[key] = sanitizeAttribute(key, value, opts);
+  }
+  return out;
+}
+function sanitizeAttribute(key, value, opts) {
+  const redacted = redactValue({ [key]: value }, opts);
+  return redacted[key];
+}
+
+// src/telemetry/otlp-exporter.ts
+init_buffer_shim();
+import { createHash, randomBytes } from "crypto";
+var OtlpHttpExporter = class {
+  endpoint;
+  headers;
+  resourceAttrs;
+  timeoutMs;
+  warned = false;
+  constructor(opts) {
+    this.endpoint = opts.endpoint;
+    this.headers = { "content-type": "application/json", ...opts.headers ?? {} };
+    this.resourceAttrs = [{ key: "service.name", value: { stringValue: opts.serviceName ?? "browser-qa-subagent" } }];
+    this.timeoutMs = opts.timeoutMs ?? 5e3;
+  }
+  async export(span) {
+    let body;
+    try {
+      body = JSON.stringify(toOtlpPayload(span, this.resourceAttrs));
+    } catch {
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(this.endpoint, { method: "POST", headers: this.headers, body, signal: controller.signal });
+      if (!res.ok) this.warnOnce(`OTLP export to ${this.endpoint} returned HTTP ${res.status}`);
+    } catch (e) {
+      this.warnOnce(`OTLP export to ${this.endpoint} failed (${e instanceof Error ? e.message : String(e)})`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  warnOnce(message) {
+    if (this.warned) return;
+    this.warned = true;
+    console.error(`telemetry: ${message} \u2014 further export failures are silenced for this process (spans are best-effort).`);
+  }
+};
+function attrsToOtlp(attrs) {
+  return Object.entries(attrs).map(([key, value]) => ({
+    key,
+    value: { stringValue: typeof value === "string" ? value : safeStringify(value) }
+  }));
+}
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+function traceIdFor(span) {
+  const runId = typeof span.attributes.runId === "string" ? span.attributes.runId : void 0;
+  if (runId) return createHash("sha256").update(runId).digest("hex").slice(0, 32);
+  return randomBytes(16).toString("hex");
+}
+function nanos(iso) {
+  return String(Date.parse(iso) * 1e6);
+}
+function toOtlpPayload(span, resourceAttrs) {
+  return {
+    resourceSpans: [
+      {
+        resource: { attributes: resourceAttrs },
+        scopeSpans: [
+          {
+            scope: { name: "browser-qa-subagent" },
+            spans: [
+              {
+                traceId: traceIdFor(span),
+                spanId: randomBytes(8).toString("hex"),
+                name: span.name,
+                kind: 1,
+                // SPAN_KIND_INTERNAL
+                startTimeUnixNano: nanos(span.startTime),
+                endTimeUnixNano: nanos(span.endTime),
+                attributes: attrsToOtlp(span.attributes),
+                events: span.events.map((e) => ({
+                  name: e.name,
+                  timeUnixNano: nanos(e.time),
+                  attributes: attrsToOtlp(e.attributes)
+                })),
+                status: { code: span.status === "ok" ? 1 : 2, message: span.error }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+}
+
+// src/telemetry/env.ts
+var cached;
+function getDefaultTracer() {
+  if (!cached) cached = buildTracerFromEnv();
+  return cached;
+}
+function buildTracerFromEnv() {
+  const mode = (process.env.QA_TELEMETRY_EXPORTER ?? "none").toLowerCase();
+  if (mode !== "otlp") return createTelemetryTracer();
+  const endpoint = process.env.QA_OTLP_ENDPOINT;
+  if (!endpoint) {
+    console.error(
+      "telemetry: QA_TELEMETRY_EXPORTER=otlp is set but QA_OTLP_ENDPOINT is missing \u2014 falling back to the no-op sink (zero external calls)."
+    );
+    return createTelemetryTracer();
+  }
+  let headers = {};
+  if (process.env.QA_OTLP_HEADERS) {
+    try {
+      headers = JSON.parse(process.env.QA_OTLP_HEADERS);
+    } catch {
+      console.error("telemetry: QA_OTLP_HEADERS is not valid JSON \u2014 exporting without extra headers.");
+    }
+  }
+  const exporter = new OtlpHttpExporter({
+    endpoint,
+    headers,
+    serviceName: process.env.QA_OTLP_SERVICE_NAME || "browser-qa-subagent"
+  });
+  return createTelemetryTracer({ exporter, redaction: { maxStringLength: 2e3 } });
+}
+
 // src/router/model-router.ts
 var ModelRouter = class {
   constructor(adapters, opts) {
@@ -4834,6 +5114,11 @@ var ModelRouter = class {
   }
   adapters;
   trace = [];
+  /** Process-wide telemetry tracer (no-op sink by default → zero external calls
+   * / zero behaviour change). Emits one `model.call` span per adapter INVOCATION
+   * — including down-ladder fallback attempts — so a tracing backend sees the
+   * full run→loop→model.call tree, complementing report.model_trace. */
+  tracer = getDefaultTracer();
   preferFreePlanner;
   pinnedAdapter;
   navigatorAdapter;
@@ -4885,11 +5170,12 @@ var ModelRouter = class {
       const t0 = Date.now();
       try {
         const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
-        const raw = await adapter.generateJson({
-          prompt,
-          schema: VERDICT_JSON_SCHEMA,
-          imagePng: png
-        });
+        const raw = await this.traceCall(
+          "visual-verdict",
+          adapter,
+          step,
+          () => adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png })
+        );
         const verdict = {
           verdict: raw.verdict === "pass" || raw.verdict === "fail" ? raw.verdict : "uncertain",
           summary: raw.summary ?? "",
@@ -4950,7 +5236,12 @@ var ModelRouter = class {
     }
     const t0 = Date.now();
     try {
-      const raw = await adapter.videoVerdict(videoPath, expectation);
+      const raw = await this.traceCall(
+        "visual-verdict",
+        adapter,
+        step,
+        () => adapter.videoVerdict(videoPath, expectation)
+      );
       const verdict = {
         verdict: raw.verdict === "pass" || raw.verdict === "fail" ? raw.verdict : "uncertain",
         summary: raw.summary ?? "",
@@ -4988,11 +5279,12 @@ var ModelRouter = class {
     const t0 = Date.now();
     try {
       const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
-      const raw = await adapter.generateJson({
-        prompt,
-        schema: VERDICT_JSON_SCHEMA,
-        imagePng: png
-      });
+      const raw = await this.traceCall(
+        "visual-verdict",
+        adapter,
+        step,
+        () => adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png })
+      );
       const verdict = {
         verdict: raw.verdict === "pass" || raw.verdict === "fail" ? raw.verdict : "uncertain",
         summary: raw.summary ?? "",
@@ -5045,7 +5337,7 @@ var ModelRouter = class {
     for (const adapter of ladder) {
       const t0 = Date.now();
       try {
-        const result = await adapter.generateJson({ prompt, schema });
+        const result = await this.traceCall(cap, adapter, step, () => adapter.generateJson({ prompt, schema }));
         this.trace.push({
           step,
           capability: cap,
@@ -5071,6 +5363,14 @@ var ModelRouter = class {
       }
     }
     throw new Error(`all planner adapters failed: ${lastError?.message}`);
+  }
+  /** Wrap a single adapter invocation in a `model.call` telemetry span with the
+   * accurate wall-clock duration. Attributes are non-secret (capability / adapter
+   * name / rung / step only — never the prompt or image). On throw the span is
+   * failed and the error rethrown, so the caller's existing down-ladder fallback
+   * + model_trace error entry are unchanged. */
+  traceCall(cap, adapter, step, fn) {
+    return this.tracer.trace("model.call", { capability: cap, adapter: adapter.name, rung: adapter.rung, step }, fn);
   }
 };
 function planRank(rung) {
@@ -9868,7 +10168,7 @@ init_buffer_shim();
 
 // src/run-data/state.ts
 init_buffer_shim();
-import { randomBytes } from "crypto";
+import { randomBytes as randomBytes2 } from "crypto";
 var RUN_KEY_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 function createRunDataState(opts = {}) {
   const shortid = opts.shortid ?? randomShortId();
@@ -9909,7 +10209,7 @@ function assertSafeRunDataKey(key) {
   }
 }
 function randomShortId() {
-  return randomBytes(4).toString("hex");
+  return randomBytes2(4).toString("hex");
 }
 function phoneFromShortId(shortid) {
   let acc = 0;
@@ -10067,7 +10367,7 @@ import crypto2 from "crypto";
 import fs from "fs";
 import path from "path";
 var ACTION_CACHE_VERSION = 1;
-var SECRET_PLACEHOLDER_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
+var SECRET_PLACEHOLDER_RE2 = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
 var TRACKING_QUERY_RE = /^(utm_|fbclid$|gclid$|msclkid$)/i;
 var SECRET_PATTERNS = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
@@ -10340,7 +10640,7 @@ function targetIntent(target) {
   ].join("|");
 }
 function textForKey(text) {
-  return redactSecretLikeText(text).replace(SECRET_PLACEHOLDER_RE, "{{secret:*}}").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
+  return redactSecretLikeText(text).replace(SECRET_PLACEHOLDER_RE2, "{{secret:*}}").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
 }
 function requireCachedTarget(target, actionType) {
   if (!target) throw new ActionCacheRejectedError(`${actionType} cannot be cached without StepRecord.target`);
@@ -10368,7 +10668,7 @@ function assertNoSecretText(text, field) {
   if (looksSecretLike(text)) throw new ActionCacheRejectedError(`${field} looks like secret material`);
 }
 function looksSecretLike(text) {
-  const withoutPlaceholders = text.replace(SECRET_PLACEHOLDER_RE, "{{secret:*}}");
+  const withoutPlaceholders = text.replace(SECRET_PLACEHOLDER_RE2, "{{secret:*}}");
   if (SECRET_PATTERNS.some((re) => re.test(withoutPlaceholders))) return true;
   const compact = withoutPlaceholders.replace(/\s+/g, "");
   const structuredMetadata = /[=:|]/.test(withoutPlaceholders);
@@ -10378,7 +10678,7 @@ function looksSecretLike(text) {
   return false;
 }
 function redactSecretLikeText(text) {
-  let out = text.replace(SECRET_PLACEHOLDER_RE, "{{secret:*}}");
+  let out = text.replace(SECRET_PLACEHOLDER_RE2, "{{secret:*}}");
   for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED]");
   return out;
 }
@@ -10437,9 +10737,9 @@ function actionTextVerifies(text, node) {
   return nodeText(node).toLowerCase().includes(text.toLowerCase());
 }
 function hasSecretPlaceholder(text) {
-  SECRET_PLACEHOLDER_RE.lastIndex = 0;
-  const found = SECRET_PLACEHOLDER_RE.test(text);
-  SECRET_PLACEHOLDER_RE.lastIndex = 0;
+  SECRET_PLACEHOLDER_RE2.lastIndex = 0;
+  const found = SECRET_PLACEHOLDER_RE2.test(text);
+  SECRET_PLACEHOLDER_RE2.lastIndex = 0;
   return found;
 }
 function sha256(text) {
@@ -10882,15 +11182,15 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       let acceptedCacheHit = false;
       const recordsToTry = cachedRecords.length === 1 ? cachedRecords : [];
       if (cachedRecords.length > 1) actionCacheStats.misses++;
-      for (const cached of recordsToTry) {
-        const cachedAction = await actionFromCachedValue(cached.value, ax, browser);
+      for (const cached2 of recordsToTry) {
+        const cachedAction = await actionFromCachedValue(cached2.value, ax, browser);
         if (!cachedAction || cachedAction.type === "assert_visual" || cachedAction.type === "finish" || cachedAction.type === "wait") {
           actionCacheStats.stale++;
           continue;
         }
         const i = stepIndex++;
         stepsInGoal++;
-        const target = cachedTargetForRecord(cached.value);
+        const target = cachedTargetForRecord(cached2.value);
         const record = {
           index: i,
           thought: "cached action",
@@ -10913,17 +11213,17 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             record.ok = false;
             record.error = `stale cached action: ${effect.reason}`;
             actionCacheStats.stale++;
-            actionCache.delete(cached.key);
+            actionCache.delete(cached2.key);
           } else {
             actionCacheStats.hits++;
-            actionCache.markHit(cached);
+            actionCache.markHit(cached2);
             acceptedCacheHit = true;
           }
         } catch (e) {
           record.ok = false;
           record.error = e instanceof Error ? e.message : String(e);
           actionCacheStats.stale++;
-          actionCache.delete(cached.key);
+          actionCache.delete(cached2.key);
         }
         record.console = browser.drainConsole();
         record.network = browser.drainNetwork();
@@ -11077,6 +11377,11 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       }
       steps.push(record);
       const cacheBefore = actionCache && a === actions.length - 1 && action.type !== "finish" && action.type !== "assert_visual" && action.type !== "wait" ? await captureActionEffectState(browser).catch(() => null) : null;
+      const actionSpan = getDefaultTracer().startSpan("browser.action", {
+        type: action.type,
+        step: i,
+        ...action.type === "mouse" && { kind: action.kind }
+      });
       try {
         if (action.type === "finish") {
           if (action.verdict === "fail") {
@@ -11223,6 +11528,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
           record.error = e instanceof Error ? e.message : String(e);
         }
       }
+      if (record.ok === false) actionSpan.fail(record.error ?? "action failed");
+      else actionSpan.end();
       await sleep(150);
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
