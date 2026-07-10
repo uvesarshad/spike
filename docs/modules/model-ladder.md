@@ -27,6 +27,8 @@ Every adapter implements:
 - available(): async probe; returns false when unconfigured or unreachable. ModelRouter probes supported adapters in parallel before each ladder walk.
 - generateJson(opts): accepts prompt, schema, and optional imagePng, then returns a parsed JSON-shaped value.
 - lastUsage: optional token usage from the most recent generateJson call. The router copies it into ModelTraceEntry. Rung-0 Nano and local adapters may leave it undefined.
+- supportsVideo: optional. True only on an adapter that can judge an uploaded video clip in addition to a screenshot. Absent/false means screenshot-only.
+- videoVerdict(clipPath, expectation): optional, present iff supportsVideo is true. Uploads/judges a recorded clip and returns the same raw verdict shape generateJson() returns for a visual-verdict call.
 
 Any adapter that supports plan-step can also support plan-goals, except Nano. Nano supports visual-verdict and plan-step only; it is never the BRAIN.
 
@@ -49,7 +51,9 @@ visualVerdictCandidates() returns the live visual-capable candidates in ladder o
 
 hasCapability(cap) probes whether any adapter can serve a capability right now. The driver uses this for plan-goals so a missing BRAIN can degrade to navigator-only behavior instead of failing the run.
 
-AGENT NOTE: available() probes are called in parallel before every ladder walk and are not cached between steps. A CLI or local service may become available mid-run, so live state drives ordering.
+hasVideoVerdict() (Phase 8, opt-in via cfg.videoAssertions) returns true iff the current visual-verdict ladder contains at least one live candidate with supportsVideo and a videoVerdict method. videoVerdict(videoPath, expectation, step) picks the FIRST such candidate (same ladder/pin ordering as visualVerdict()), calls its videoVerdict(), normalizes the reply into the same NanoVerdict shape visualVerdict() returns, and records a ModelTraceEntry with note:'video'. It throws when no candidate supports video (`no video-capable visual-verdict adapter available`) — the driver catches this and falls back to a screenshot verdict, writing a report note. It never falls back internally to a screenshot call itself; that decision belongs to the caller.
+
+AGENT NOTE: available() probes are called in parallel before every ladder walk. Rung-0 Nano and the BYOK/HTTP rung-2 adapters probe live every call (cheap: a boolean check or a stored key). GoogleCliAdapter, CliPlannerAdapter, and OllamaAdapter cache their (slower, spawn/localhost-fetch) probe for 30s so a long run doesn't re-probe on every step, while still picking a CLI/service that becomes available mid-run back up within that window.
 
 ## Rung 0 - NanoAdapter (src/router/adapters/nano.ts)
 
@@ -76,17 +80,23 @@ AGENT AVOID: Never pass user-supplied model IDs to CLI adapters without the isSa
 
 ## Rung 2 - ByokGeminiAdapter (src/router/adapters/byok-gemini.ts)
 
-Calls the Gemini REST API directly using cfg.geminiApiKey or the Vault "gemini" key. Rung 2. Supports planning and visual verdicts. Returns token counts from usageMetadata.
+Calls the Gemini REST API directly using cfg.geminiApiKey or the Vault "gemini" key. Rung 2. Supports planning and visual verdicts. Returns token counts from usageMetadata. Selectable for BOTH the NAVIGATOR (plan-step) and visual-verdict roles, not just planning — see "Reliable Default Recipe" below.
+
+supportsVideo is true. videoVerdict(clipPath, expectation) uploads the clip to the Gemini Files API (`POST /upload/v1beta/files`, multipart/related body with a JSON metadata part + the raw clip bytes), polls `GET /v1beta/{file.name}` until the file leaves `PROCESSING` (bounded to ~30s), then calls `generateContent` with a `fileData` part referencing the uploaded `fileUri` plus a schema-steered video-verdict prompt (`videoVerdictPrompt()` in verdict.ts). Reuses the adapter's already-configured model id — no new model is invented. This is the Phase 8 route ModelRouter.videoVerdict() calls when cfg.videoAssertions is on.
 
 ## Rung 2 - AnthropicAdapter (src/router/adapters/anthropic.ts)
 
-Calls the Anthropic API using the Vault "anthropic" key or ANTHROPIC_API_KEY. Rung 2. Supports plan-step and plan-goals. It is commonly used as the BRAIN default through cfg.planner.
+Calls the Anthropic API using the Vault "anthropic" key or ANTHROPIC_API_KEY. Rung 2. Supports plan-step and plan-goals, and visual-verdict (image as a base64 content block) — selectable for BOTH the NAVIGATOR and visual-verdict roles. It is commonly used as the BRAIN default through cfg.planner.
+
+Screenshot-only: supportsVideo is explicitly false. The Messages API has no Files-API-style video upload/judge path, so a video assertion routed here falls back to the screenshot verdict.
 
 ## Rung 2 - OpenAiCompatibleAdapter (src/router/adapters/openai-compatible.ts)
 
 OpenAI-compatible REST adapter. Used for gpt:api, openrouter:api, and glm:api. Rung 2. Supports plan-step and plan-goals, and supports visual-verdict only when constructed with supportsVision:true. Keys come from Vault or provider env vars. src/router/gateway.ts normalizes provider and gateway base URLs before adapter construction.
 
 AGENT NOTE: supportsVision:false keeps text-only models such as GLM off the visual-verdict ladder. jsonMode and extraBody are provider-specific request knobs. Gateway base URL overrides must point at an OpenAI-compatible `/v1`-style base; a trailing `/chat/completions` suffix is normalized away.
+
+Screenshot-only: supportsVideo is explicitly false for gpt/openrouter/glm — chat-completions has no standard video-upload-and-judge path across those providers.
 
 ## Rung 2 - GLM / z.ai
 
@@ -95,6 +105,10 @@ GLM is wired as glm:api through OpenAiCompatibleAdapter. It is constructed with 
 ## Rung 3 - OllamaAdapter (src/router/adapters/ollama.ts)
 
 Calls a local Ollama instance on localhost:11434. Rung 3. Supports planning and visual verdicts when the configured local model can serve them. Privacy floor: no data leaves the machine on this rung.
+
+## Video Assertions (Phase 8, opt-in)
+
+Config field cfg.videoAssertions (default false, env QA_VIDEO_ASSERTIONS) gates `assert_visual { mode: 'video' }`. OFF (default): the driver runs the normal screenshot verdict and writes a report note that video was requested but disabled — it never calls router.videoVerdict(). ON: the driver records a clip (CDP screencast or extension tabCapture, per docs/modules/engine.md), calls router.hasVideoVerdict() to check a video-capable candidate is live, then router.videoVerdict(clipPath, expectation, step). Today only ByokGeminiAdapter (byok-gemini.ts) implements the route; Anthropic and the OpenAI-compatible adapters (gpt/openrouter/glm) are screenshot-only. Any failure (no adapter, upload error, timeout) is caught by the driver, which falls back to the screenshot path rather than failing the run.
 
 ## Ladder Ordering Summary
 
@@ -112,6 +126,29 @@ buildLadder() resolves each role selection to an adapter name, constructs each p
 
 AGENT SEE: docs/state/server-state.md - SettingsStore persistence path
 
+## Config Drift Migration (Phase 13)
+
+SettingsStore.readRaw() (src/vibe/settings.ts) reads settings.json exactly as stored, with no default-filling for planner/navigator — this lets config.ts's fromSettings() distinguish "the user explicitly saved a role pin" from "nothing was ever saved, fall through to config.ts's own DEFAULTS" (previously SettingsStore.read()'s always-filled shape silently overrode config.ts's daemon-specific claude:cli brain default with the shared lite DEFAULT_SETTINGS.planner of claude:api, even on a machine with no settings.json at all).
+
+readRaw() also migrates on load: a persisted planner pinned to the dead Gemini CLI free tier (isDeadPlannerSelection() in settings-data.ts: provider 'gemini' + mode 'cli') is rewritten to claude:cli; a persisted config with no navigator key (pre planner/navigator split) is rewritten to nano:ondevice. The migrated result is written back to settings.json once, so every other reader (the panel, `qa config` CLI) sees the fixed values without re-deriving the migration. loadConfig() additionally prints a startup warning (warnIfDeadPlanner()) if the FINAL merged config still resolves either role to gemini:cli — this only fires for an explicit env/qa.config.json/override pin, since the on-disk case is already migrated away.
+
+There is no checked-in settings.json in this repo (it is a per-machine file under %LOCALAPPDATA%/qa-subagent/, created on first run) — DEFAULTS.planner in src/config.ts (claude:cli) is the single source of truth for the daemon's out-of-the-box brain pin.
+
+## Reliable Default Recipe (Phase 12)
+
+A cheap, reliable non-Nano navigator + visual pair, useful while Nano-as-navigator stays Experimental (see CLAUDE.md's "Nano-as-navigator is real but rough" gotcha):
+
+```
+GEMINI_API_KEY=<your key>
+QA_NAVIGATOR_PROVIDER=gemini
+QA_NAVIGATOR_MODE=api
+QA_NAVIGATOR_MODEL=gemini-3-flash-preview   # optional — already the default
+QA_PLANNER_PROVIDER=claude
+QA_PLANNER_MODE=cli                          # or api + ANTHROPIC_API_KEY for BYOK
+```
+
+ByokGeminiAdapter and AnthropicAdapter both declare `supports(cap)` unconditionally true, so either is selectable for BOTH plan-step (navigator) and visual-verdict, not just planning — pin either as navigatorAdapter and it also leads the visual-verdict ladder right after rung-0 Nano (or absolute-first if Nano is unavailable). An all-BYOK pair with no CLI dependency: `GEMINI_API_KEY` + `QA_NAVIGATOR_PROVIDER=gemini QA_NAVIGATOR_MODE=api` for the navigator, `ANTHROPIC_API_KEY` + `QA_PLANNER_PROVIDER=claude QA_PLANNER_MODE=api` for the brain.
+
 ## Token Accounting
 
 Adapters that receive provider usage metadata set lastUsage after generateJson(). ModelRouter copies that value into each ModelTraceEntry. This makes report.model_trace the source for per-call prompt, output, total, and cached token counts when providers expose them. Nano and local adapters can omit usage.
@@ -125,6 +162,9 @@ Adapters that receive provider usage metadata set lastUsage after generateJson()
 - When assertion consensus routing or visual candidate selection changes.
 - When token usage is reported from a new source.
 - When the isSafeModelId security check scope changes.
+- When supportsVideo/videoVerdict is added to a new adapter.
+- When the config-drift migration's dead-provider detection or migration target changes.
+- When the availability-probe TTL window changes for any adapter.
 
 ## Related Docs
 

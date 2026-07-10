@@ -134,6 +134,7 @@ export function buildLiteConfig(keys: LiteKeys, settings: QaSettings): Record<st
     navigator: settings.navigator,
     debugMode: settings.debugMode,
     debugAgent: settings.debugAgent,
+    videoAssertions: settings.videoAssertions ?? false,
     providers,
     mode: 'lite',
   };

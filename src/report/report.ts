@@ -143,7 +143,23 @@ export function describeAction(a: Action): string {
     case 'assert_dom':
       return `dom check: ${a.nodeId} contains ${JSON.stringify(a.contains)}`;
     case 'extract':
-      return `extract ${a.key} from ${a.nodeId}${a.pattern ? ` matching ${JSON.stringify(a.pattern)}` : ''}`;
+      return `extract ${a.key} from ${a.nodeId ?? 'page'}${a.prompt ? ' (model)' : a.pattern ? ` matching ${JSON.stringify(a.pattern)}` : ''}`;
+    case 'upload_file':
+      return `upload ${a.paths.length} file(s) to ${a.nodeId}`;
+    case 'drag_and_drop':
+      return `drag ${a.sourceId} onto ${a.targetId}`;
+    case 'blur':
+      return `blur ${a.nodeId}`;
+    case 'mouse':
+      return `mouse ${a.kind} at (${a.x}, ${a.y})`;
+    case 'open_tab':
+      return `open tab ${a.url}`;
+    case 'switch_tab':
+      return `switch to tab ${a.tabId}`;
+    case 'close_tab':
+      return `close tab ${a.tabId}`;
+    case 'script':
+      return `run script (${a.steps.length} step${a.steps.length === 1 ? '' : 's'})`;
     case 'wait':
       return `wait ${a.ms}ms`;
     case 'finish':

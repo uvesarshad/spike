@@ -69,9 +69,15 @@ Decide the next 1-3 actions. Rules:
 - typing into a field REPLACES its content; no need to clear first.
 - Use select_option for native select/combobox controls when the desired value or visible option text is known.
 - Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
-- Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text.
+- Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text. When the value isn't a clean single line (e.g. "the order number somewhere in this confirmation paragraph"), give a "prompt" instead of/with "pattern" — a cheap text model reads the (subtree or whole-page) text and pulls the value out; omit nodeId to search the whole page.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
-- Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode.
+- Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode. Video judging is an opt-in, costly feature — when it is off the run still gets a screenshot verdict, just not of the animation mid-flight.
+- Use upload_file to set files on a native file input (an <input type="file"> element) — pass real, existing paths.
+- Use drag_and_drop for mouse-driven drag interactions (sortable lists, sliders, custom drop zones) — press on sourceId, glide to targetId, release. It does NOT fire native HTML5 draggable dragstart/drop events (those need an OS gesture); only use it on UI that reacts to raw mouse events.
+- Use blur to move focus off a field (fires blur/change handlers some forms rely on for validation).
+- Use mouse for a single discrete mouse event ("move"/"down"/"up") at page coordinates x,y — for gestures click()/hover()/dragAndDrop() don't cover.
+- Use open_tab to open a URL in a NEW tab without leaving the current one; it returns an id you'll see quoted in the next step's history (e.g. "Open new tab (id: 7A2B)") — copy that id VERBATIM into a later switch_tab/close_tab. Use switch_tab to make another tab the active one (this ends the batch — the tree you see next describes the NEW tab). Use close_tab to close a tab you are NOT currently on.
+- Use script for a short (<=20 step) sequence of ordinary actions (navigate/click/type/hover/press_key/select_option/reload/go_back/wait/assert_dom/extract/upload_file/drag_and_drop/blur/mouse) you want to run back-to-back as ONE step without waiting for a reply between each — useful for a fixed multi-field flow you already know by heart. It CANNOT contain assert_visual, finish, or another script, and every field must be a plain value (no code, no expressions) — an invalid script is rejected outright and counts as a failed step.
 - Console errors / failed network requests after an action are strong evidence the app is broken — investigate or finish with verdict "fail" and cite them.
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input — the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
@@ -82,8 +88,8 @@ BATCHING: PREFER returning 2-3 actions when you are confident they are independe
 - fill several fields then click submit: [type email, type password, click "Sign in"].
 - act on the page then move on: [click "Add Widget to cart", click "Go to cart"] — the add-to-cart click updates the page in place; the navigating click goes LAST.
 Rules:
-- After any action that navigates or could meaningfully change the page (a click that submits a form or navigates, or a navigate action), the remaining actions in your batch are DISCARDED and you will be asked again with the new page. So the ONLY navigating/submitting action in a batch must be the LAST one; everything before it must keep you on the same page.
-- finish, assert_visual and assert_dom must be the ONLY action in their batch (return exactly one action).
+- After any action that navigates or could meaningfully change the page (a click that submits a form or navigates, a navigate action, or a switch_tab), the remaining actions in your batch are DISCARDED and you will be asked again with the new page. So the ONLY navigating/submitting/tab-switching action in a batch must be the LAST one; everything before it must keep you on the same page.
+- finish, assert_visual, assert_dom, and script must be the ONLY action in their batch (return exactly one action).
 - When unsure whether an earlier action changes the page, return a single action.
 
 Action types:
@@ -95,9 +101,17 @@ Action types:
 - {"type":"select_option","nodeId":string,"value":string}
 - {"type":"reload"}
 - {"type":"go_back"}
+- {"type":"upload_file","nodeId":string,"paths":[string]}
+- {"type":"drag_and_drop","sourceId":string,"targetId":string}
+- {"type":"blur","nodeId":string}
+- {"type":"mouse","kind":"move"|"down"|"up","x":number,"y":number}
+- {"type":"open_tab","url":string}
+- {"type":"switch_tab","tabId":string}
+- {"type":"close_tab","tabId":string}
 - {"type":"assert_dom","nodeId":string,"contains":string}   // cheap text check
 - {"type":"assert_visual","expectation":string,"mode":"screenshot"|"video"} // visual check; video mode falls back to screenshot if no clip route is available
-- {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}
+- {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}; or {"type":"extract","key":string,"prompt":string} for model-assisted extraction (nodeId optional)
+- {"type":"script","steps":[{...same verbs as above, no assert_visual/finish/script}]}
 - {"type":"wait","ms":number}
 - {"type":"finish","verdict":"pass"|"fail","reason":string}
 
@@ -211,9 +225,15 @@ Work on the CURRENT GOAL. Decide the next 1-3 actions. Rules:
 - typing into a field REPLACES its content; no need to clear first.
 - Use select_option for native select/combobox controls when the desired value or visible option text is known.
 - Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
-- Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text.
+- Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text. When the value isn't a clean single line (e.g. "the order number somewhere in this confirmation paragraph"), give a "prompt" instead of/with "pattern" — a cheap text model reads the (subtree or whole-page) text and pulls the value out; omit nodeId to search the whole page.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
-- Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode.
+- Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode. Video judging is an opt-in, costly feature — when it is off the run still gets a screenshot verdict, just not of the animation mid-flight.
+- Use upload_file to set files on a native file input (an <input type="file"> element) — pass real, existing paths.
+- Use drag_and_drop for mouse-driven drag interactions (sortable lists, sliders, custom drop zones) — press on sourceId, glide to targetId, release. It does NOT fire native HTML5 draggable dragstart/drop events (those need an OS gesture); only use it on UI that reacts to raw mouse events.
+- Use blur to move focus off a field (fires blur/change handlers some forms rely on for validation).
+- Use mouse for a single discrete mouse event ("move"/"down"/"up") at page coordinates x,y — for gestures click()/hover()/dragAndDrop() don't cover.
+- Use open_tab to open a URL in a NEW tab without leaving the current one; it returns an id you'll see quoted in the next step's history (e.g. "Open new tab (id: 7A2B)") — copy that id VERBATIM into a later switch_tab/close_tab. Use switch_tab to make another tab the active one (this ends the batch — the tree you see next describes the NEW tab). Use close_tab to close a tab you are NOT currently on.
+- Use script for a short (<=20 step) sequence of ordinary actions (navigate/click/type/hover/press_key/select_option/reload/go_back/wait/assert_dom/extract/upload_file/drag_and_drop/blur/mouse) you want to run back-to-back as ONE step without waiting for a reply between each — useful for a fixed multi-field flow you already know by heart. It CANNOT contain assert_visual, finish, or another script, and every field must be a plain value (no code, no expressions) — an invalid script is rejected outright and counts as a failed step.
 - Console errors / failed network requests after an action are strong evidence the app is broken — investigate or finish with verdict "fail" and cite them.
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input — the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
@@ -226,8 +246,8 @@ BATCHING: PREFER returning 2-3 actions when you are confident they are independe
 - fill several fields then click submit: [type email, type password, click "Sign in"].
 - act on the page then move on: [click "Add Widget to cart", click "Go to cart"] — the add-to-cart click updates the page in place; the navigating click goes LAST.
 Rules:
-- After any action that navigates or could meaningfully change the page (a click that submits a form or navigates, or a navigate action), the remaining actions in your batch are DISCARDED and you will be asked again with the new page. So the ONLY navigating/submitting action in a batch must be the LAST one; everything before it must keep you on the same page.
-- finish, assert_visual and assert_dom must be the ONLY action in their batch (return exactly one action).
+- After any action that navigates or could meaningfully change the page (a click that submits a form or navigates, a navigate action, or a switch_tab), the remaining actions in your batch are DISCARDED and you will be asked again with the new page. So the ONLY navigating/submitting/tab-switching action in a batch must be the LAST one; everything before it must keep you on the same page.
+- finish, assert_visual, assert_dom, and script must be the ONLY action in their batch (return exactly one action).
 - When unsure whether an earlier action changes the page, return a single action.
 
 Action types:
@@ -239,9 +259,17 @@ Action types:
 - {"type":"select_option","nodeId":string,"value":string}
 - {"type":"reload"}
 - {"type":"go_back"}
+- {"type":"upload_file","nodeId":string,"paths":[string]}
+- {"type":"drag_and_drop","sourceId":string,"targetId":string}
+- {"type":"blur","nodeId":string}
+- {"type":"mouse","kind":"move"|"down"|"up","x":number,"y":number}
+- {"type":"open_tab","url":string}
+- {"type":"switch_tab","tabId":string}
+- {"type":"close_tab","tabId":string}
 - {"type":"assert_dom","nodeId":string,"contains":string}   // cheap text check
 - {"type":"assert_visual","expectation":string,"mode":"screenshot"|"video"} // visual check; video mode falls back to screenshot if no clip route is available
-- {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}
+- {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}; or {"type":"extract","key":string,"prompt":string} for model-assisted extraction (nodeId optional)
+- {"type":"script","steps":[{...same verbs as above, no assert_visual/finish/script}]}
 - {"type":"wait","ms":number}
 - {"type":"finish","verdict":"pass"|"fail","reason":string}
 

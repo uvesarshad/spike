@@ -33,6 +33,12 @@ export interface QaSettings {
   navigator: PlannerSelection;
   debugMode: DebugMode;
   debugAgent: DebugAgent;
+  /** Opt-in video assertions: when true, an `assert_visual { mode: 'video' }`
+   * step routes the recorded clip to a video-capable adapter (paid, slower)
+   * instead of judging the screenshot. Off by default — costly. Non-secret, so
+   * it lives in the store (never a key). Mirrors config.videoAssertions /
+   * QA_VIDEO_ASSERTIONS; env still wins. */
+  videoAssertions?: boolean;
 }
 
 export const DEFAULT_SETTINGS: QaSettings = {
@@ -49,6 +55,7 @@ export const DEFAULT_SETTINGS: QaSettings = {
   navigator: { provider: 'nano', mode: 'ondevice' },
   debugMode: 'prompt',
   debugAgent: 'auto',
+  videoAssertions: false,
 };
 
 /** NAVIGATOR (cheap) default model per provider+mode. Called on EVERY step, so
@@ -88,6 +95,16 @@ const BRAIN_MODELS: Record<string, string> = {
 export function defaultModelFor(provider: ProviderId, mode: PlannerMode, role?: ModelRole): string {
   const table = role === 'brain' ? BRAIN_MODELS : NAVIGATOR_MODELS;
   return table[`${provider}:${mode}`] ?? '';
+}
+
+/** True for a PlannerSelection pinned to a known-dead provider/mode. Today that's
+ * only the Gemini CLI free tier (Gemini Code Assist for individuals), which
+ * ended 2026-06-18 and now hard-fails auth (see google-cli.ts's IneligibleTier
+ * detection). Centralised here (pure, no node imports) so SettingsStore's
+ * migration (settings.ts) and config.ts's startup warning agree on what counts
+ * as "dead" without either owning the other's logic. */
+export function isDeadPlannerSelection(sel: PlannerSelection): boolean {
+  return sel.provider === 'gemini' && sel.mode === 'cli';
 }
 
 /** Is this a safe model identifier to interpolate into a CLI command line?

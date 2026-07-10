@@ -9,8 +9,10 @@
 import type { Capability, JsonRequest, ModelAdapter } from '../src/router/adapter.js';
 import { ModelRouter } from '../src/router/model-router.js';
 import { AnthropicAdapter } from '../src/router/adapters/anthropic.js';
+import { ByokGeminiAdapter } from '../src/router/adapters/byok-gemini.js';
 import { OpenAiCompatibleAdapter } from '../src/router/adapters/openai-compatible.js';
 import { CliPlannerAdapter } from '../src/router/adapters/cli-planner.js';
+import { GoogleCliAdapter } from '../src/router/adapters/google-cli.js';
 import { isSafeModelId } from '../src/vibe/settings.js';
 
 const checks: [string, boolean][] = [];
@@ -198,6 +200,68 @@ async function withMockFetch(body: unknown, fn: () => Promise<void>): Promise<Fe
   const a = new AnthropicAdapter({ apiKey: undefined, model: 'claude-haiku-4-5' });
   const o = new OpenAiCompatibleAdapter({ apiKey: undefined, model: 'm', baseUrl: 'https://x/v1', label: 'openrouter' });
   check('adapters without a key are unavailable', !(await a.available()) && !(await o.available()));
+}
+
+/* ---------- part 4 (Phase 12): reliable cloud navigator+visual + probe TTL ---------- */
+
+{
+  // a cheap BYOK vision model must be selectable for BOTH roles — the "reliable
+  // default" recipe (docs/modules/model-ladder.md) depends on this, not just
+  // on planning support.
+  const gemini = new ByokGeminiAdapter({ apiKey: 'k', model: 'gemini-3-flash-preview' });
+  const claude = new AnthropicAdapter({ apiKey: 'k', model: 'claude-haiku-4-5' });
+  check(
+    'byok-gemini is selectable for plan-step AND visual-verdict',
+    gemini.supports('plan-step') && gemini.supports('visual-verdict'),
+  );
+  check(
+    'anthropic (claude haiku) is selectable for plan-step AND visual-verdict',
+    claude.supports('plan-step') && claude.supports('visual-verdict'),
+  );
+  // both also route as the NAVIGATOR ladder's front pin, not just plan-goals —
+  // exercise the router the same way engine.ts's navigatorAdapter pin does.
+  const router = new ModelRouter([gemini, claude], { navigatorAdapter: gemini.name });
+  const ladder = await router.visualVerdictCandidates();
+  check('navigator-pinned adapter also appears in the visual-verdict ladder', ladder.some((c) => c.name === gemini.name));
+}
+
+{
+  // short-TTL availability cache (mirrors ollama.ts): google-cli and cli-planner
+  // must not re-spawn `--version` on every call within the TTL window, but MUST
+  // re-probe once the cache is stale — "can become available mid-run" stays true.
+  const google = new GoogleCliAdapter({ bin: '__qa-nonexistent-cli__', model: 'x', env: {} });
+  const before = await google.available();
+  check('google-cli: unconfigured binary reports unavailable', before === false);
+  // simulate a fresh "became available" probe result written into the cache,
+  // then confirm a same-tick re-read returns the CACHED value without re-spawning
+  // (re-spawning `__qa-nonexistent-cli__` would resolve false, not true).
+  (google as unknown as { availableCache: { value: boolean; at: number } }).availableCache = {
+    value: true,
+    at: Date.now(),
+  };
+  const cached = await google.available();
+  check('google-cli: fresh cache entry is trusted (no re-probe)', cached === true);
+  // age the cache entry past the TTL — the next call must re-probe (and the
+  // binary is still bogus, so it correctly flips back to false).
+  (google as unknown as { availableCache: { value: boolean; at: number } }).availableCache = {
+    value: true,
+    at: Date.now() - 31_000,
+  };
+  const stale = await google.available();
+  check('google-cli: stale cache entry re-probes (can-become-available mid-run preserved)', stale === false);
+
+  // a bogus bin (cast past the 'claude'|'codex' union — test-only) keeps this
+  // deterministic like the google-cli case above, symmetric assertions.
+  const cli = new CliPlannerAdapter({ bin: '__qa-nonexistent-cli__' as 'claude', model: undefined });
+  (cli as unknown as { availableCache: { value: boolean; at: number } }).availableCache = { value: true, at: Date.now() };
+  const cliCached = await cli.available();
+  check('cli-planner: fresh cache entry is trusted (no re-probe)', cliCached === true);
+  (cli as unknown as { availableCache: { value: boolean; at: number } }).availableCache = {
+    value: true,
+    at: Date.now() - 31_000,
+  };
+  const cliStale = await cli.available();
+  check('cli-planner: stale cache entry re-probes (can-become-available mid-run preserved)', cliStale === false);
 }
 
 const failed = checks.filter(([, ok]) => !ok);

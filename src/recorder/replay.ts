@@ -15,12 +15,18 @@ import type { ArtifactStore } from '../report/artifacts.js';
 import type { FailingStep, Report, RunVerdict, StepRecord } from '../report/report.js';
 import type { QaScript, ScriptStep, ScriptTarget } from './script.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders } from '../run-data/index.js';
+import { validateScriptSteps, runScriptSteps } from '../driver/script-runner/index.js';
+import type { Vault } from '../vault/vault.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const FIND_TIMEOUT_MS = 5_000;
 
 export interface ReplayOptions {
   onProgress?: (line: string) => void;
+  /** Secrets store for a recorded `script` step's {{secret:NAME}} placeholders
+   * (and, for parity, a `type` step's). Optional — without it a step
+   * referencing a secret fails exactly as it would live. */
+  vault?: Vault;
 }
 
 export async function replayScript(
@@ -37,7 +43,12 @@ export async function replayScript(
   let reason = `replayed ${script.steps.length} recorded steps without drift`;
   let failingStep: FailingStep | null = null;
   let visualsSkipped = 0;
+  let extractsSkipped = 0;
   const runData = createRunDataState();
+  // Runtime ids returned by browser.openTab() during THIS replay, in the order
+  // open_tab steps ran — resolves a recorded switch_tab/close_tab tabIndex
+  // (0 = the original tab; N = the Nth open_tab call) to a real id/index.
+  const openedTabIds: string[] = [];
 
   const nanoReady = nano !== null && (await nano.availability().catch(() => 'unavailable')) === 'available';
   if (nano && !nanoReady) progress('warning: Gemini Nano unavailable — visual assertions will be SKIPPED (replays never spend paid tokens)');
@@ -107,12 +118,68 @@ export async function replayScript(
           break;
         }
         case 'extract': {
+          if (s.prompt) {
+            // model-assisted extraction spends a paid model call — replay
+            // stays $0/zero-planner-calls, so this is SKIPPED with a warning,
+            // same convention as an unavailable-Nano visual assertion. A later
+            // {{run.key}} reference will fail with a precise "not found" error.
+            extractsSkipped++;
+            record.description += ' [SKIPPED: model-assisted extraction spends a model call — replay stays $0]';
+            break;
+          }
+          if (!s.target) throw new Error(`extract ${s.key} has neither a target nor a prompt`);
           const node = await findByTarget(browser, s.target);
           const ax = await browser.axTree();
           const fresh = findNodeById(ax.root, node.id) ?? node;
           const value = extractValue(subtreeText(fresh).trim(), s.pattern);
           if (!value) throw new Error(`could not extract ${s.key} from ${s.target.role} "${s.target.name ?? ''}"`);
           recordExtraction(runData, { key: s.key, value, source: 'dom', label: s.target.name });
+          break;
+        }
+        case 'upload_file': {
+          const node = await findByTarget(browser, s.target);
+          await browser.uploadFile(node.id, s.paths);
+          break;
+        }
+        case 'drag_and_drop': {
+          const source = await findByTarget(browser, s.source);
+          if (!s.target) throw new Error(`drag_and_drop ${s.source.role} "${s.source.name ?? ''}" has no recorded drop target`);
+          const target = await findByTarget(browser, s.target);
+          await browser.dragAndDrop(source.id, target.id);
+          break;
+        }
+        case 'blur': {
+          const node = await findByTarget(browser, s.target);
+          await browser.blur(node.id);
+          break;
+        }
+        case 'mouse':
+          await browser.mouse(s.kind, s.x, s.y);
+          break;
+        case 'open_tab': {
+          const tabId = await browser.openTab(s.url);
+          openedTabIds.push(tabId);
+          break;
+        }
+        case 'switch_tab':
+          await browser.switchTab(s.tabIndex);
+          break;
+        case 'close_tab': {
+          if (s.tabIndex === 0) {
+            throw new Error('close_tab #0 (the original tab) cannot be replayed — it was recorded while the script was on a different tab');
+          }
+          const tabId = openedTabIds[s.tabIndex - 1];
+          if (!tabId) throw new Error(`close_tab #${s.tabIndex} has no matching open_tab earlier in this replay`);
+          await browser.closeTab(tabId);
+          break;
+        }
+        case 'script': {
+          // RE-VALIDATE on every replay — never trust a persisted script step
+          // just because it passed validation when it was recorded.
+          const validated = validateScriptSteps(s.steps);
+          if (!validated.ok) throw new Error(`recorded script step failed re-validation: ${validated.reason}`);
+          const result = await runScriptSteps(browser, validated.steps, runData, opts.vault);
+          if (!result.ok) throw new Error(`script failed after ${result.executedSteps} step(s): ${result.error}`);
           break;
         }
         case 'assert_visual': {
@@ -163,6 +230,9 @@ export async function replayScript(
 
   if (verdict === 'pass' && visualsSkipped > 0) {
     reason += ` (${visualsSkipped} visual assertion(s) skipped — Nano unavailable)`;
+  }
+  if (verdict === 'pass' && extractsSkipped > 0) {
+    reason += ` (${extractsSkipped} model-assisted extraction(s) skipped — replay stays $0)`;
   }
 
   // final screenshot as evidence either way
@@ -228,11 +298,37 @@ function toAction(s: ScriptStep): StepRecord['action'] {
     case 'assert_dom':
       return { type: 'assert_dom', nodeId: `<${s.target.role}:${s.target.name ?? ''}>`, contains: s.contains };
     case 'extract':
-      return { type: 'extract', nodeId: `<${s.target.role}:${s.target.name ?? ''}>`, key: s.key, ...(s.pattern && { pattern: s.pattern }) };
+      return {
+        type: 'extract',
+        ...(s.target && { nodeId: `<${s.target.role}:${s.target.name ?? ''}>` }),
+        key: s.key,
+        ...(s.pattern && { pattern: s.pattern }),
+        ...(s.prompt && { prompt: s.prompt }),
+      };
     case 'assert_visual':
       return { type: 'assert_visual', expectation: s.expectation, ...(s.mode && { mode: s.mode }) };
     case 'wait':
       return { type: 'wait', ms: s.ms };
+    case 'upload_file':
+      return { type: 'upload_file', nodeId: `<${s.target.role}:${s.target.name ?? ''}>`, paths: s.paths };
+    case 'drag_and_drop':
+      return {
+        type: 'drag_and_drop',
+        sourceId: `<${s.source.role}:${s.source.name ?? ''}>`,
+        targetId: s.target ? `<${s.target.role}:${s.target.name ?? ''}>` : '<unresolved>',
+      };
+    case 'blur':
+      return { type: 'blur', nodeId: `<${s.target.role}:${s.target.name ?? ''}>` };
+    case 'mouse':
+      return { type: 'mouse', kind: s.kind, x: s.x, y: s.y };
+    case 'open_tab':
+      return { type: 'open_tab', url: s.url };
+    case 'switch_tab':
+      return { type: 'switch_tab', tabId: `#${s.tabIndex}` };
+    case 'close_tab':
+      return { type: 'close_tab', tabId: `#${s.tabIndex}` };
+    case 'script':
+      return { type: 'script', steps: s.steps };
   }
 }
 
@@ -257,11 +353,29 @@ function describeScriptStep(s: ScriptStep): string {
     case 'assert_dom':
       return `dom check: ${s.target.role} "${s.target.name ?? ''}" contains ${JSON.stringify(s.contains)}`;
     case 'extract':
-      return `extract ${s.key} from ${s.target.role} "${s.target.name ?? ''}"`;
+      return s.prompt
+        ? `extract ${s.key} (model-assisted)`
+        : `extract ${s.key} from ${s.target ? `${s.target.role} "${s.target.name ?? ''}"` : 'page'}`;
     case 'assert_visual':
       return `${s.mode === 'video' ? 'video' : 'visual'} check: ${s.expectation.slice(0, 80)}`;
     case 'wait':
       return `wait ${s.ms}ms`;
+    case 'upload_file':
+      return `upload ${s.paths.length} file(s) to ${s.target.role} "${s.target.name ?? ''}"`;
+    case 'drag_and_drop':
+      return `drag ${s.source.role} "${s.source.name ?? ''}" to ${s.target ? `${s.target.role} "${s.target.name ?? ''}"` : '(unresolved)'}`;
+    case 'blur':
+      return `blur ${s.target.role} "${s.target.name ?? ''}"`;
+    case 'mouse':
+      return `mouse ${s.kind} (${s.x}, ${s.y})`;
+    case 'open_tab':
+      return `open tab ${s.url}`;
+    case 'switch_tab':
+      return `switch to tab #${s.tabIndex}`;
+    case 'close_tab':
+      return `close tab #${s.tabIndex}`;
+    case 'script':
+      return `run script (${s.steps.length} step(s))`;
   }
 }
 

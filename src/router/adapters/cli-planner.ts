@@ -39,20 +39,27 @@ export interface CliPlannerOptions {
 export class CliPlannerAdapter implements ModelAdapter {
   readonly name: string;
   readonly rung = 1 as const;
-  private availableCache: boolean | null = null;
+  private availableCache: { value: boolean; at: number } | null = null;
+  private static readonly AVAIL_TTL_MS = 30_000;
 
   constructor(private readonly opts: CliPlannerOptions) {
     this.name = `cli(${opts.bin}${opts.model ? `:${opts.model}` : ''})`;
   }
 
+  /** Short-TTL cached probe — same rationale/window as google-cli.ts and
+   * ollama.ts: avoid a `--version` spawn on every plan-step call, while still
+   * letting a CLI that becomes available mid-run (installed/PATH fixed) get
+   * picked back up within 30s instead of staying "unavailable" for the whole run. */
   async available(): Promise<boolean> {
-    if (this.availableCache !== null) return this.availableCache;
-    this.availableCache = await new Promise<boolean>((resolve) => {
+    const cached = this.availableCache;
+    if (cached && Date.now() - cached.at < CliPlannerAdapter.AVAIL_TTL_MS) return cached.value;
+    const value = await new Promise<boolean>((resolve) => {
       const child = spawn(`${this.opts.bin} --version`, { shell: true, stdio: 'ignore' });
       child.once('error', () => resolve(false));
       child.once('exit', (code) => resolve(code === 0));
     });
-    return this.availableCache;
+    this.availableCache = { value, at: Date.now() };
+    return value;
   }
 
   supports(cap: Capability): boolean {

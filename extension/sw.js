@@ -232,6 +232,7 @@ async function getSettings() {
     navigator: { ...DEFAULT_SETTINGS.navigator, ...(s.navigator || {}) }, // NAVIGATOR role
     debugMode: s.debugMode || DEFAULT_SETTINGS.debugMode,
     debugAgent: s.debugAgent || DEFAULT_SETTINGS.debugAgent,
+    videoAssertions: Boolean(s.videoAssertions ?? DEFAULT_SETTINGS.videoAssertions),
   };
 }
 async function liteSetKey(provider, key) {
@@ -256,6 +257,8 @@ async function liteSetSettings(patch) {
   const next = {
     debugMode: patch.debugMode || cur.debugMode,
     debugAgent: patch.debugAgent || cur.debugAgent,
+    videoAssertions:
+      patch.videoAssertions !== undefined ? Boolean(patch.videoAssertions) : Boolean(cur.videoAssertions),
     planner: { ...cur.planner, ...(patch.planner || {}) },        // BRAIN role
     navigator: { ...cur.navigator, ...(patch.navigator || {}) },  // NAVIGATOR role
   };

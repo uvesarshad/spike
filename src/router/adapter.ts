@@ -38,6 +38,20 @@ export interface ModelAdapter {
   /** Token usage from the MOST RECENT generateJson() call, when the adapter can
    * surface it. The router reads this immediately after each successful call. */
   lastUsage?: AdapterUsage;
+  /** True when this adapter can judge an uploaded video clip, not just a still
+   * screenshot (opt-in — Phase 8 video assertions, gated by cfg.videoAssertions).
+   * Optional; absent/false means screenshot-only (the default for every adapter
+   * except one that implements videoVerdict, e.g. ByokGeminiAdapter via the
+   * Gemini Files API). Only ever set on an adapter that also supports
+   * 'visual-verdict'. */
+  readonly supportsVideo?: boolean;
+  /** Upload (if needed) and judge a recorded clip on disk against `expectation`,
+   * returning the SAME raw verdict shape generateJson() returns for a
+   * visual-verdict call (the caller normalizes it into NanoVerdict, same as
+   * visualVerdict()). Present iff supportsVideo is true; ModelRouter.videoVerdict()
+   * throws when no candidate defines it, so callers fall back to the screenshot
+   * path rather than crash the run. */
+  videoVerdict?(clipPath: string, expectation: string): Promise<unknown>;
 }
 
 /** Append a "respond with ONLY this JSON shape" instruction to a prompt. The

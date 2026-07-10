@@ -124,6 +124,9 @@ Consumed by: engine.ts (startClipRecorder).
 QA_ASSERTION_POLICY - String. `single-ladder` (default), `fail-on-disagreement`, or `arbiter-on-disagreement`. Controls assert_visual and final pass confirmation. Strict modes use multiple visual-capable adapters when available and write assertion_trace in the full report.
 Consumed by: src/config.ts, src/assertions/, src/driver/loop.ts.
 
+QA_VIDEO_ASSERTIONS - Boolean ('0'/'false' → off, any other value present → on). Default: false. When on, an `assert_visual { mode: 'video' }` step routes the recorded clip to a video-capable visual adapter (Gemini Files API) instead of judging the screenshot. Costly + slower — opt-in. With it off, video-mode asserts fall back to the screenshot verdict and note it. Also exposed as a panel toggle (non-secret, persisted in SettingsStore).
+Consumed by: src/config.ts, src/driver/loop.ts, src/router/model-router.ts.
+
 ## Artifact Output
 
 QA_ARTIFACTS_DIR - String (directory path). Where run artifacts are written. Default: ./artifacts.
@@ -134,6 +137,23 @@ Consumed by: src/config.ts, engine.ts, src/driver/loop.ts.
 
 QA_ACTION_CACHE_DIR - String (directory path). Where verified action-cache records are written. Default: ./.qa-action-cache.
 Consumed by: src/cache/action-cache.ts via engine.ts.
+
+## Telemetry & Dashboard
+
+QA_TELEMETRY_EXPORTER - String. `none` (default) or `otlp`. Spans are ALWAYS constructed (redacted) around adapter calls, the driver loop, and replay; `none` sends them to a no-op sink (zero external calls, zero behavior change), `otlp` ships them to an OTLP/HTTP endpoint.
+Consumed by: src/telemetry/env.ts.
+
+QA_OTLP_ENDPOINT - String (URL). OTLP/HTTP traces endpoint (Grafana Tempo/Alloy, Axiom, etc.). Required when QA_TELEMETRY_EXPORTER=otlp.
+Consumed by: src/telemetry/otlp-exporter.ts.
+
+QA_OTLP_HEADERS - String (JSON object). Extra POST headers for the OTLP exporter (auth token, dataset name). Optional.
+Consumed by: src/telemetry/otlp-exporter.ts.
+
+QA_OTLP_SERVICE_NAME - String. resource `service.name` on exported spans. Default: browser-qa-subagent.
+Consumed by: src/telemetry/otlp-exporter.ts.
+
+QA_DASHBOARD_PORT - Integer. Port for the read-only `qa dashboard` local viewer of artifacts/<runId> reports. Default: 9420.
+Consumed by: src/cli.ts (dashboard command).
 
 ## Auto-Fix
 

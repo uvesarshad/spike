@@ -9,7 +9,12 @@
  * (supportsVision:false, e.g. GLM-5.2) declares no visual-verdict support and
  * never attaches an image. extraBody passes provider-specific top-level fields
  * (e.g. GLM's thinking:{type:'disabled'} to keep the planner fast/cheap).
- * Unavailable (cleanly) when no key is set. */
+ * Unavailable (cleanly) when no key is set.
+ *
+ * Screenshot-only (Phase 8): chat-completions has no standard video-upload +
+ * judge path across gpt/openrouter/glm, so this adapter never sets
+ * supportsVideo/videoVerdict — a video assertion routed to gpt/openrouter/glm
+ * falls back to the screenshot verdict path (see ModelRouter.videoVerdict). */
 
 import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson, withSchemaInstruction } from '../adapter.js';
@@ -40,6 +45,9 @@ export interface OpenAiCompatibleOptions {
 export class OpenAiCompatibleAdapter implements ModelAdapter {
   readonly name: string;
   readonly rung = 2 as const;
+  /** Explicit false — screenshot-only (see file header): no gpt/openrouter/glm
+   * route currently uploads+judges a video clip. */
+  readonly supportsVideo = false;
   lastUsage?: AdapterUsage;
   private readonly supportsVision: boolean;
 

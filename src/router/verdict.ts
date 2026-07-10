@@ -20,3 +20,17 @@ export function verdictPrompt(expectation: string): string {
     'Respond with ONLY a JSON object: {"verdict":"pass"|"fail"|"uncertain","summary":string,"issues":string[]}'
   );
 }
+
+/** Prompt for a video-capable verdict (Phase 8, opt-in via cfg.videoAssertions).
+ * Same VERDICT_JSON_SCHEMA/shape as the screenshot path — only the framing text
+ * differs, since the evidence is a short clip (toast/animation/transient UI)
+ * rather than a single frame. */
+export function videoVerdictPrompt(expectation: string): string {
+  return (
+    'You are a QA assistant reviewing a short screen-recording clip of a web page interaction.\n' +
+    `Question: ${expectation}\n` +
+    'Judge strictly from what is visible across the clip (including transient UI such as toasts, ' +
+    'loading states, or animations that a single screenshot could miss). List concrete issues if any.\n' +
+    'Respond with ONLY a JSON object: {"verdict":"pass"|"fail"|"uncertain","summary":string,"issues":string[]}'
+  );
+}

@@ -32,7 +32,9 @@ Tier 3: a server-side daemon with an engine that calls multiple external model A
 - docs/modules/model-ladder.md — ModelRouter, ModelAdapter interface, and all rung adapters
 - docs/modules/browser-port.md — BrowserPort interface, CdpBrowser, ExtensionBrowser, bridge
 - docs/modules/action-cache.md — file-backed verified step action cache helpers
-- docs/modules/recorder.md — QaScript record/replay and the Playwright spec twin
+- docs/modules/script-runner.md — allowlisted/AST-validated secure custom-step runner
+- docs/modules/telemetry.md — always-on redacted spans, OTLP export, and `qa dashboard`
+- docs/modules/recorder.md — QaScript record/replay, pre-run replay matcher, and the Playwright spec twin
 - docs/modules/vibe-mode.md — VibeService daemon, side panel, auto-fix loop
 - docs/api/route-handlers.md — CLI commands and MCP tool contract
 - docs/api/external-services.md — each external model service: credentials, rate limits, fallback
@@ -91,6 +93,7 @@ Recorded scripts use role+name locators: After a passing run, the recorder emits
 - [2026-07-07] Added the file-backed action-cache module and v28 unit coverage.
 - [2026-07-07] Added runtime data and fake email provider modules for Phase 4.
 - [2026-07-07] Added Passmark gap implementation task list under docs/plan.
+- [2026-07-10] Round 2 (Phases 8-15): opt-in video assertions, action parity (upload/drag/blur/mouse/tabs), secure script runner, first-class telemetry + `qa dashboard`, more provider SDKs, config-drift migration, pre-run replay matcher, and model-assisted extraction. Added docs/modules/script-runner.md and docs/modules/telemetry.md.
 - [2026-07-07] Added Passmark comparison audit under docs/plan and indexed planning docs.
 - [2026-06-11] Initial documentation generated from codebase; all docs/ subdirectories created.
 

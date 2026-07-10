@@ -177,6 +177,58 @@ export class ModelRouter {
     return (await this.candidates('visual-verdict')).map((a) => ({ name: a.name, rung: a.rung }));
   }
 
+  /** True iff a video-capable visual adapter is configured AND available right
+   * now. The driver gates `assert_visual { mode: 'video' }` on cfg.videoAssertions
+   * FIRST, then calls this to decide whether to actually record/upload a clip or
+   * fall back to the screenshot path with a report note. */
+  async hasVideoVerdict(): Promise<boolean> {
+    const ladder = await this.candidates('visual-verdict');
+    return ladder.some((a) => a.supportsVideo && typeof a.videoVerdict === 'function');
+  }
+
+  /** Judge a recorded clip on disk. Picks the FIRST available visual-verdict
+   * candidate (same ladder/pin ordering as visualVerdict()) that declares
+   * supportsVideo. Returns the same NanoVerdict shape visualVerdict() returns.
+   * Throws when no candidate supports video — callers (the driver) catch this
+   * and fall back to a screenshot verdict rather than fail the run. */
+  async videoVerdict(videoPath: string, expectation: string, step: number): Promise<NanoVerdict> {
+    const ladder = await this.candidates('visual-verdict');
+    const adapter = ladder.find((a) => a.supportsVideo && typeof a.videoVerdict === 'function');
+    if (!adapter || !adapter.videoVerdict) {
+      throw new Error('no video-capable visual-verdict adapter available');
+    }
+    const t0 = Date.now();
+    try {
+      const raw = (await adapter.videoVerdict(videoPath, expectation)) as Partial<NanoVerdict>;
+      const verdict: NanoVerdict = {
+        verdict: raw.verdict === 'pass' || raw.verdict === 'fail' ? raw.verdict : 'uncertain',
+        summary: raw.summary ?? '',
+        issues: Array.isArray(raw.issues) ? raw.issues : [],
+      };
+      this.trace.push({
+        step,
+        capability: 'visual-verdict',
+        rung: adapter.rung,
+        adapter: adapter.name,
+        ms: Date.now() - t0,
+        note: 'video',
+        usage: adapter.lastUsage,
+      });
+      return verdict;
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      this.trace.push({
+        step,
+        capability: 'visual-verdict',
+        rung: adapter.rung,
+        adapter: adapter.name,
+        ms: Date.now() - t0,
+        note: `video error: ${err.message.slice(0, 120)}`,
+      });
+      throw err;
+    }
+  }
+
   /** Call a specific visual adapter by candidate name/rung and record the normal model trace.
    * Used by assertion consensus policies that need independent primary/secondary calls. */
   async visualVerdictWith(

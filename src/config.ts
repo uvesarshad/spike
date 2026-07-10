@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   SettingsStore,
   DEFAULT_SETTINGS,
+  isDeadPlannerSelection,
   type DebugAgent,
   type DebugMode,
   type PlannerSelection,
@@ -68,6 +69,11 @@ export interface QaConfig {
   /** Visual assertion policy. single-ladder preserves the cheap existing path;
    * stricter modes can require multi-model agreement when enough visual adapters are configured. */
   assertionPolicy: AssertionPolicy;
+  /** Opt-in (Phase 8, default false — it is costly): route `assert_visual { mode:
+   * 'video' }` to a video-capable model (router.videoVerdict()) instead of the
+   * screenshot fallback. OFF → mode:'video' still runs, but as a safe screenshot
+   * verdict with a report note ("video assertion requested but disabled"). */
+  videoAssertions: boolean;
   /** Keep the FREE rung-1 Google CLI as the first planner even when a BYOK key is
    * present. Default false: providing a key IS the opt-in to spend it for ~3×
    * faster planning (rung-2 HTTP beats the CLI cold-spawn). Set true to keep free
@@ -108,6 +114,7 @@ const DEFAULTS: QaConfig = {
   // Vibe-mode clips need a chrome.tabCapture recorder (planned).
   recordClip: false,
   assertionPolicy: 'single-ladder',
+  videoAssertions: false,
   preferFreePlanner: false,
   // BRAIN default: claude CLI — the daemon HAS cli rungs and the former gemini:cli
   // free tier is dead (see settings.ts). (This intentionally differs from
@@ -157,6 +164,7 @@ function fromEnv(): Partial<QaConfig> {
   if (e.QA_ASSERTION_POLICY && ASSERTION_POLICIES.includes(e.QA_ASSERTION_POLICY as AssertionPolicy)) {
     out.assertionPolicy = e.QA_ASSERTION_POLICY as AssertionPolicy;
   }
+  if (e.QA_VIDEO_ASSERTIONS) out.videoAssertions = e.QA_VIDEO_ASSERTIONS !== '0' && e.QA_VIDEO_ASSERTIONS !== 'false';
   if (e.QA_PREFER_FREE_PLANNER) out.preferFreePlanner = e.QA_PREFER_FREE_PLANNER !== '0' && e.QA_PREFER_FREE_PLANNER !== 'false';
   // planner (BRAIN) selection — env wins over the SettingsStore (power-users / tests).
   const planner: Partial<PlannerSelection> = {};
@@ -175,14 +183,52 @@ function fromEnv(): Partial<QaConfig> {
   return out;
 }
 
-/** The user's panel/CLI picks (planner + navigator + debug prefs). Folded in below env. */
+/** The user's panel/CLI picks (planner + navigator + debug prefs). Folded in below env.
+ *
+ * planner/navigator come from readRaw() — NOT read() — so a role the user never
+ * explicitly saved stays absent here rather than arriving as SettingsStore's own
+ * shared default (DEFAULT_SETTINGS.planner is claude:API, for lite/browser mode,
+ * which has no CLI rungs). That would otherwise silently clobber DEFAULTS.planner
+ * (claude:CLI, this module's own daemon default) even with zero settings.json on
+ * disk — the config-drift bug Phase 13 fixes. readRaw() also performs the
+ * dead-planner/missing-navigator migration and rewrites the file when it fires. */
 function fromSettings(): Partial<QaConfig> {
   try {
-    const s = new SettingsStore().read();
-    return { planner: s.planner, navigator: s.navigator, debugMode: s.debugMode, debugAgent: s.debugAgent };
+    const store = new SettingsStore();
+    const raw = store.readRaw();
+    const s = store.read(); // debugMode/debugAgent defaults already match config.ts's own
+    const out: Partial<QaConfig> = { debugMode: s.debugMode, debugAgent: s.debugAgent };
+    if (raw.planner) out.planner = raw.planner;
+    if (raw.navigator) out.navigator = raw.navigator;
+    // Only contribute the toggle when the user actually saved it (raw, not the
+    // defaulted read) so it never clobbers DEFAULTS.videoAssertions; env still wins.
+    if (typeof raw.videoAssertions === 'boolean') out.videoAssertions = raw.videoAssertions;
+    return out;
   } catch {
     return {};
   }
+}
+
+/** Recovery hint shared with google-cli.ts's runtime error — printed once at
+ * config-resolution time so a dead pin surfaces before the run even starts,
+ * not just on the first failed call. */
+function deadPlannerHint(role: 'brain' | 'navigator'): string {
+  return (
+    `[qa] warning: ${role} is pinned to gemini:cli — the Gemini CLI free tier (Gemini Code Assist ` +
+    'for individuals) ended 2026-06-18 and this client now hard-fails auth. Switch via ' +
+    '`qa config set --provider claude --mode cli` (or another BYOK key: glm/gemini/claude/openai), ' +
+    'use the `claude`/`codex` CLI, or point googleCliBin at the Antigravity CLI once installed.'
+  );
+}
+
+/** Startup warning when a resolved role pin is known-dead (Phase 13). Fires
+ * only when the FINAL merged config (after settings/env/overrides) still
+ * resolves to gemini:cli — the common on-disk case is already migrated away by
+ * SettingsStore.readRaw(), so this mainly catches an explicit env/override/
+ * qa.config.json pin a power user set deliberately. */
+function warnIfDeadPlanner(cfg: QaConfig): void {
+  if (isDeadPlannerSelection(cfg.planner)) console.warn(deadPlannerHint('brain'));
+  if (isDeadPlannerSelection(cfg.navigator)) console.warn(deadPlannerHint('navigator'));
 }
 
 export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd()): QaConfig {
@@ -209,5 +255,6 @@ export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd(
     ...(envCfg.navigator ?? {}),
     ...(overrides.navigator ?? {}),
   };
+  warnIfDeadPlanner(merged);
   return merged;
 }

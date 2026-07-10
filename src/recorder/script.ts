@@ -8,7 +8,8 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { Report, StepTarget } from '../report/report.js';
+import type { Report, StepRecord, StepTarget } from '../report/report.js';
+import type { ScriptRunnerStep } from '../driver/script-runner/schema.js';
 
 /** A script-step locator: role+name plus optional `nth` / `qaId` disambiguators.
  *
@@ -38,9 +39,33 @@ export type ScriptStep =
   | { type: 'reload' }
   | { type: 'go_back' }
   | { type: 'assert_dom'; target: ScriptTarget; contains: string }
-  | { type: 'extract'; target: ScriptTarget; key: string; pattern?: string }
+  // Phase 15: `target` becomes optional and `prompt` is added for the model-
+  // assisted mode (nodeId-less extract targeting the whole page). Replay never
+  // spends a model call — see replay.ts, which skips prompt-mode extract steps
+  // with a warning (replay stays $0/zero-planner-calls).
+  | { type: 'extract'; target?: ScriptTarget; key: string; pattern?: string; prompt?: string }
   | { type: 'assert_visual'; expectation: string; mode?: 'screenshot' | 'video' }
-  | { type: 'wait'; ms: number };
+  | { type: 'wait'; ms: number }
+  // Phase 9 — action parity. `paths` are made portable (relative to cwd) on
+  // record; drag_and_drop's `target` (the drop zone) is best-effort — only
+  // present when the driver loop resolved a role+name for it (see loop.ts's
+  // sourceTarget/targetTarget descriptor fields on the drag_and_drop Action).
+  | { type: 'upload_file'; target: ScriptTarget; paths: string[] }
+  | { type: 'drag_and_drop'; source: ScriptTarget; target?: ScriptTarget }
+  | { type: 'blur'; target: ScriptTarget }
+  // Raw page coordinates — inherently less resilient across layout changes
+  // than a role+name locator; documented in docs/modules/recorder.md.
+  | { type: 'mouse'; kind: 'move' | 'down' | 'up'; x: number; y: number }
+  | { type: 'open_tab'; url: string }
+  // tabIndex: 0 = the tab active when replay/the script started; N (>=1) = the
+  // Nth open_tab call IN THIS SCRIPT (creation order) — never a raw runtime id
+  // (those are per-run and would not resolve on replay). See replay.ts.
+  | { type: 'switch_tab'; tabIndex: number }
+  | { type: 'close_tab'; tabIndex: number }
+  // Phase 10 — secure script runner. Persisted verbatim; replay RE-VALIDATES
+  // before executing (see replay.ts) — a script step is never trusted just
+  // because it was recorded.
+  | { type: 'script'; steps: ScriptRunnerStep[] };
 
 export interface QaScript {
   version: 1;
@@ -102,13 +127,54 @@ export function scriptFromReport(report: Report): QaScript {
         if (s.target) steps.push({ type: 'assert_dom', target: s.target, contains: a.contains });
         break;
       case 'extract':
-        if (s.target) steps.push({ type: 'extract', target: s.target, key: a.key, ...(a.pattern && { pattern: a.pattern }) });
+        if (a.prompt) {
+          // model-assisted: no target required (may target the whole page)
+          steps.push({ type: 'extract', key: a.key, prompt: a.prompt, ...(s.target && { target: s.target }) });
+        } else if (s.target) {
+          steps.push({ type: 'extract', target: s.target, key: a.key, ...(a.pattern && { pattern: a.pattern }) });
+        }
         break;
       case 'assert_visual':
         steps.push({ type: 'assert_visual', expectation: a.expectation, ...(a.mode && { mode: a.mode }) });
         break;
       case 'wait':
         steps.push({ type: 'wait', ms: a.ms });
+        break;
+      case 'upload_file':
+        if (s.target) steps.push({ type: 'upload_file', target: s.target, paths: a.paths.map(portablePath) });
+        break;
+      case 'drag_and_drop':
+        // sourceTarget/targetTarget are resolved by the driver loop AFTER
+        // execution (see loop.ts) — never model-emitted. Without a sourceTarget
+        // there is nothing resilient to replay, so the step is skipped (same
+        // "no target, no recording" convention as click/hover/select_option).
+        if (a.sourceTarget) {
+          steps.push({
+            type: 'drag_and_drop',
+            source: { role: a.sourceTarget.role, ...(a.sourceTarget.name && { name: a.sourceTarget.name }), ...(a.sourceTarget.nth !== undefined && { nth: a.sourceTarget.nth }) },
+            ...(a.targetTarget && {
+              target: { role: a.targetTarget.role, ...(a.targetTarget.name && { name: a.targetTarget.name }), ...(a.targetTarget.nth !== undefined && { nth: a.targetTarget.nth }) },
+            }),
+          });
+        }
+        break;
+      case 'blur':
+        if (s.target) steps.push({ type: 'blur', target: s.target });
+        break;
+      case 'mouse':
+        steps.push({ type: 'mouse', kind: a.kind, x: a.x, y: a.y });
+        break;
+      case 'open_tab':
+        steps.push({ type: 'open_tab', url: a.url });
+        break;
+      case 'switch_tab':
+        steps.push({ type: 'switch_tab', tabIndex: tabIndexFor(report.steps, s.index, a.tabId) });
+        break;
+      case 'close_tab':
+        steps.push({ type: 'close_tab', tabIndex: tabIndexFor(report.steps, s.index, a.tabId) });
+        break;
+      case 'script':
+        steps.push({ type: 'script', steps: a.steps });
         break;
       case 'finish':
         // the pass-confirmation visual is part of the recorded contract
@@ -128,6 +194,38 @@ export function scriptFromReport(report: Report): QaScript {
     createdAt: new Date().toISOString(),
     steps,
   };
+}
+
+/** Make an upload_file path portable: absolute paths become relative to cwd
+ * (so a script recorded on one machine still reads sensibly on another /
+ * checked into git); already-relative paths pass through unchanged. Never
+ * touches the CONTENTS of the path — a path containing `{{secret:...}}` (a
+ * user pointing at a secret-derived filename) is rejected outright, since
+ * upload_file paths must never embed secrets. */
+function portablePath(p: string): string {
+  if (/\{\{secret:/i.test(p)) {
+    throw new Error(`upload_file path must not reference a secret: ${p}`);
+  }
+  return path.isAbsolute(p) ? path.relative(process.cwd(), p) : p;
+}
+
+/** Resolve a switch_tab/close_tab StepRecord's raw runtime `tabId` to a
+ * REPLAYABLE index: 0 = the tab active when the script starts; N (>=1) = the
+ * Nth open_tab call (creation order) IN THIS REPORT whose returned id matches.
+ * A runtime CDP target id would not exist on a later replay run — the index
+ * is what actually survives. Falls back to 0 (the original tab) when the id
+ * doesn't match any recorded open_tab (e.g. switching/closing the tab that
+ * was active before any open_tab call). */
+function tabIndexFor(steps: StepRecord[], uptoIndex: number, tabId: string): number {
+  let n = 0;
+  for (const s of steps) {
+    if (s.index > uptoIndex) break;
+    if (s.action.type === 'open_tab') {
+      n++;
+      if (s.target?.name === tabId) return n;
+    }
+  }
+  return 0;
 }
 
 /* ---------- persistence ---------- */
@@ -219,11 +317,29 @@ function stepSig(s: ScriptStep): string {
     case 'assert_dom':
       return `assert_dom ${targetSig(s.target)} contains ${JSON.stringify(s.contains)}`;
     case 'extract':
-      return `extract ${s.key} from ${targetSig(s.target)}${s.pattern ? ` matching ${JSON.stringify(s.pattern)}` : ''}`;
+      return s.prompt
+        ? `extract ${s.key} (model-assisted: ${JSON.stringify(s.prompt.slice(0, 60))})`
+        : `extract ${s.key} from ${s.target ? targetSig(s.target) : 'page'}${s.pattern ? ` matching ${JSON.stringify(s.pattern)}` : ''}`;
     case 'assert_visual':
       return `assert_visual${s.mode ? `:${s.mode}` : ''} ${JSON.stringify(s.expectation.slice(0, 60))}`;
     case 'wait':
       return `wait ${s.ms}ms`;
+    case 'upload_file':
+      return `upload_file ${JSON.stringify(s.paths)} → ${targetSig(s.target)}`;
+    case 'drag_and_drop':
+      return `drag_and_drop ${targetSig(s.source)} → ${s.target ? targetSig(s.target) : '?'}`;
+    case 'blur':
+      return `blur ${targetSig(s.target)}`;
+    case 'mouse':
+      return `mouse ${s.kind} (${s.x}, ${s.y})`;
+    case 'open_tab':
+      return `open_tab ${s.url}`;
+    case 'switch_tab':
+      return `switch_tab #${s.tabIndex}`;
+    case 'close_tab':
+      return `close_tab #${s.tabIndex}`;
+    case 'script':
+      return `script (${s.steps.length} step(s))`;
   }
 }
 
@@ -291,7 +407,11 @@ export function toPlaywrightSpec(script: QaScript): string {
         lines.push(`  await expect(${locator(s.target)}).toContainText(${JSON.stringify(s.contains)});`);
         break;
       case 'extract':
-        lines.push(`  // extract ${s.key} from ${locator(s.target)}${s.pattern ? ` using ${JSON.stringify(s.pattern)}` : ''}`);
+        lines.push(
+          s.prompt
+            ? `  // extract ${s.key} (model-assisted, judged by the QA subagent when replayed via \`qa replay\`): ${s.prompt.replace(/\n/g, ' ')}`
+            : `  // extract ${s.key} from ${s.target ? locator(s.target) : 'the page'}${s.pattern ? ` using ${JSON.stringify(s.pattern)}` : ''}`,
+        );
         break;
       case 'assert_visual':
         lines.push(`  // ${s.mode === 'video' ? 'video' : 'visual'} check (judged by the QA subagent when replayed via \`qa replay\`):`);
@@ -300,6 +420,40 @@ export function toPlaywrightSpec(script: QaScript): string {
         break;
       case 'wait':
         lines.push(`  await page.waitForTimeout(${s.ms});`);
+        break;
+      case 'upload_file':
+        lines.push(`  await ${locator(s.target)}.setInputFiles(${JSON.stringify(s.paths)});`);
+        break;
+      case 'drag_and_drop':
+        if (s.target) {
+          lines.push(`  await ${locator(s.source)}.dragTo(${locator(s.target)});`);
+        } else {
+          lines.push(`  // drag_and_drop ${locator(s.source)} → (drop target not resolved when recorded)`);
+        }
+        break;
+      case 'blur':
+        lines.push(`  await ${locator(s.target)}.blur();`);
+        break;
+      case 'mouse':
+        lines.push(
+          s.kind === 'move'
+            ? `  await page.mouse.move(${s.x}, ${s.y});`
+            : s.kind === 'down'
+              ? `  await page.mouse.move(${s.x}, ${s.y}); await page.mouse.down();`
+              : `  await page.mouse.move(${s.x}, ${s.y}); await page.mouse.up();`,
+        );
+        break;
+      case 'open_tab':
+        lines.push(`  // open_tab ${s.url} — judged by the QA subagent's replay (Playwright: use context.newPage())`);
+        break;
+      case 'switch_tab':
+        lines.push(`  // switch_tab #${s.tabIndex} — judged by the QA subagent's replay (Playwright: track pages[] from context.newPage())`);
+        break;
+      case 'close_tab':
+        lines.push(`  // close_tab #${s.tabIndex} — judged by the QA subagent's replay (Playwright: page.close() on the tracked page)`);
+        break;
+      case 'script':
+        lines.push(`  // script (${s.steps.length} step(s)) — judged by the QA subagent's replay (secure script runner, not translated here)`);
         break;
     }
   }

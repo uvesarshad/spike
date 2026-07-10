@@ -22,6 +22,22 @@ export class CdpBrowser implements BrowserPort {
   private capture: CaptureBuffers | null = null;
   /** planner nodeId ("n7") → CDP backendDOMNodeId; refreshed by every axTree(). */
   private nodeMap = new Map<string, number>();
+  /** Tabs opened via openTab() (or stashed by switchTab() when we move away
+   * from them) that are NOT the currently active session. Keyed by CDP target
+   * id. `capture` is attached EXACTLY ONCE per client (in openTab(), or here
+   * when stashing the tab we're switching away from) and carried across
+   * switches — re-attaching on every switchTab() would register a SECOND set
+   * of Runtime.consoleAPICalled/Network.* listeners on the same client,
+   * leaking duplicate console/network entries into later drains. */
+  private otherTabs = new Map<string, { client: CDP.Client; capture: CaptureBuffers }>();
+  /** The tab launch() started with — switchTab(0)/replay's tabIndex 0 always
+   * means "this one", regardless of how many tabs have been opened/switched
+   * since. Never changes after launch(). */
+  private mainTabId: string | null = null;
+  /** ids in openTab() call order — switchTab(N) for N>=1 means "the Nth tab
+   * openTab() created", the numeric convention recorded scripts replay with
+   * (see recorder/script.ts's tabIndexFor / recorder/replay.ts). */
+  private openOrder: string[] = [];
 
   constructor(private readonly opts: LaunchOptions) {}
 
@@ -40,6 +56,7 @@ export class CdpBrowser implements BrowserPort {
     await ensureChrome(this.opts);
     const target = await CDP.New({ port: this.opts.port, url: 'about:blank' });
     this.tabId = (target as { id?: string }).id ?? (target as { targetId?: string }).targetId!;
+    this.mainTabId = this.tabId;
     this.client = await CDP({ port: this.opts.port, target: this.tabId });
     await Promise.all([
       this.client.Page.enable(),
@@ -196,6 +213,123 @@ export class CdpBrowser implements BrowserPort {
     await sleep(300);
   }
 
+  async uploadFile(nodeId: string, paths: string[]): Promise<void> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    await this.c.DOM.setFileInputFiles({ files: paths, backendNodeId });
+    await sleep(150);
+  }
+
+  async dragAndDrop(sourceId: string, targetId: string): Promise<void> {
+    const src = await this.centerOf(this.backendNodeId(sourceId));
+    const dst = await this.centerOf(this.backendNodeId(targetId));
+    await this.c.Input.dispatchMouseEvent({ type: 'mouseMoved', x: src.x, y: src.y });
+    await this.c.Input.dispatchMouseEvent({ type: 'mousePressed', x: src.x, y: src.y, button: 'left', clickCount: 1 });
+    // Move in a few steps so listeners bound to mousemove (custom sortables,
+    // sliders, drop-zone highlight logic) see intermediate positions, not a
+    // single teleport from source to target.
+    const STEPS = 6;
+    for (let i = 1; i <= STEPS; i++) {
+      const x = src.x + ((dst.x - src.x) * i) / STEPS;
+      const y = src.y + ((dst.y - src.y) * i) / STEPS;
+      await this.c.Input.dispatchMouseEvent({ type: 'mouseMoved', x, y, button: 'left' });
+      await sleep(30);
+    }
+    await this.c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: dst.x, y: dst.y, button: 'left', clickCount: 1 });
+    await sleep(200);
+  }
+
+  async blur(nodeId: string): Promise<void> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    let objectId: string | undefined;
+    try {
+      const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+      objectId = object.objectId;
+      if (!objectId) return;
+      await this.c.Runtime.callFunctionOn({
+        objectId,
+        functionDeclaration: 'function () { this.blur(); }',
+        returnByValue: true,
+      });
+    } finally {
+      if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {});
+    }
+    await sleep(100);
+  }
+
+  async mouse(kind: 'move' | 'down' | 'up', x: number, y: number): Promise<void> {
+    await this.c.Page.bringToFront().catch(() => {});
+    const type = kind === 'move' ? 'mouseMoved' : kind === 'down' ? 'mousePressed' : 'mouseReleased';
+    await this.c.Input.dispatchMouseEvent({ type, x, y, button: 'left', clickCount: 1 });
+    await sleep(kind === 'move' ? 50 : 150);
+  }
+
+  async openTab(url: string): Promise<string> {
+    const target = await CDP.New({ port: this.opts.port, url });
+    const id = (target as { id?: string }).id ?? (target as { targetId?: string }).targetId!;
+    const client = await CDP({ port: this.opts.port, target: id });
+    await Promise.all([
+      client.Page.enable(),
+      client.Runtime.enable(),
+      client.Debugger.enable(),
+      client.DOM.enable(),
+      client.Accessibility.enable(),
+    ]);
+    // capture attaches ONCE here and travels with this client across switches
+    // (see the otherTabs doc comment) — never re-attached in switchTab().
+    const capture = await attachCapture(client);
+    this.otherTabs.set(id, { client, capture });
+    this.openOrder.push(id);
+    return id;
+  }
+
+  /** idOrIndex accepts either the literal id openTab() returned (what the live
+   * navigator references — see history text) OR the numeric replay convention
+   * a recorded script uses: 0 = the tab launch() started with, N (>=1) = the
+   * Nth tab openTab() created (creation order) — see recorder/script.ts's
+   * tabIndexFor. A raw runtime id would not exist on a later replay run;
+   * the numeric form is what actually survives. */
+  private resolveTabIndex(idOrIndex: string | number): string {
+    if (typeof idOrIndex === 'string') return idOrIndex;
+    if (idOrIndex === 0) {
+      if (!this.mainTabId) throw new Error('switchTab(0): no main tab recorded (launch() first)');
+      return this.mainTabId;
+    }
+    const id = this.openOrder[idOrIndex - 1];
+    if (!id) throw new Error(`switchTab(${idOrIndex}): no tab was opened at that index`);
+    return id;
+  }
+
+  async switchTab(idOrIndex: string | number): Promise<void> {
+    const targetId = this.resolveTabIndex(idOrIndex);
+    if (targetId === this.tabId) return; // already active
+    const target = this.otherTabs.get(targetId);
+    if (!target) {
+      throw new Error(`switchTab: unknown tab id "${targetId}" — open it with openTab() first`);
+    }
+    // Stash the currently active tab (client + its ALREADY-attached capture —
+    // never re-attach) so it stays reachable for a later switchTab().
+    if (this.tabId && this.client && this.capture) {
+      this.otherTabs.set(this.tabId, { client: this.client, capture: this.capture });
+    }
+    this.otherTabs.delete(targetId);
+    this.client = target.client;
+    this.capture = target.capture;
+    this.tabId = targetId;
+    this.nodeMap.clear();
+  }
+
+  async closeTab(id: string): Promise<void> {
+    if (id === this.tabId) {
+      throw new Error('closeTab: cannot close the active tab — switchTab() to another tab first');
+    }
+    const target = this.otherTabs.get(id);
+    if (target) {
+      await target.client.close().catch(() => {});
+      this.otherTabs.delete(id);
+    }
+    await CDP.Close({ port: this.opts.port, id }).catch(() => {});
+  }
+
   /** Read the field's live `.value` (Runtime.evaluate is NOT node-scoped — go
    * via DOM.resolveNode → Runtime.callFunctionOn on the resolved objectId). */
   private async liveValue(backendNodeId: number): Promise<string | undefined> {
@@ -315,6 +449,11 @@ export class CdpBrowser implements BrowserPort {
   }
 
   async close(): Promise<void> {
+    for (const [id, tab] of this.otherTabs) {
+      try { await tab.client.close(); } catch { /* already closed */ }
+      try { await CDP.Close({ port: this.opts.port, id }); } catch { /* gone */ }
+    }
+    this.otherTabs.clear();
     if (!this.client) return;
     try { await this.client.close(); } catch { /* already closed */ }
     if (this.tabId) {
@@ -322,6 +461,8 @@ export class CdpBrowser implements BrowserPort {
     }
     this.client = null;
     this.tabId = null;
+    this.mainTabId = null;
+    this.openOrder = [];
     this.capture = null;
     this.nodeMap.clear();
   }

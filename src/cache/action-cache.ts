@@ -189,6 +189,18 @@ export function toCachedActionValue(action: Action, target?: StepTarget): Cached
         key: action.key,
         ...(action.pattern && { pattern: action.pattern }),
       };
+    // Phase 9/10 parity actions are non-idempotent, stateful, or unsafe to
+    // replay from a locator-only record (file paths, tab ids, mouse coords,
+    // scripted sequences) — deliberately NOT cached. loop.ts catches this
+    // rejection and simply skips caching that step.
+    case 'upload_file':
+    case 'drag_and_drop':
+    case 'blur':
+    case 'mouse':
+    case 'open_tab':
+    case 'switch_tab':
+    case 'close_tab':
+    case 'script':
     case 'assert_visual':
     case 'finish':
       throw new ActionCacheRejectedError(`${action.type} is not stored in the action cache`);
@@ -303,7 +315,9 @@ export function verifyActionEffect(
   }
 
   if (action.type === 'extract') {
-    const node = findNode(after.ax.root, action.nodeId) ?? (target ? findByCachedTarget(after.ax.root, target) : undefined);
+    const node =
+      (action.nodeId ? findNode(after.ax.root, action.nodeId) : undefined) ??
+      (target ? findByCachedTarget(after.ax.root, target) : undefined);
     const text = node ? nodeText(node) : '';
     if (!text) return { ok: false, reason: 'extract target has no visible text', changes };
     if (action.pattern) {
@@ -458,6 +472,22 @@ function actionIntentForKey(action: Action, target?: StepTarget): string {
       return `extract:${tgt}:key=${textForKey(action.key)}:pattern=${textForKey(action.pattern ?? '')}`;
     case 'assert_visual':
       return `assert_visual:${textForKey(action.expectation)}`;
+    case 'upload_file':
+      return `upload_file:${tgt}:n=${action.paths.length}`;
+    case 'drag_and_drop':
+      return `drag_and_drop:${action.sourceId}->${action.targetId}`;
+    case 'blur':
+      return `blur:${tgt}`;
+    case 'mouse':
+      return `mouse:${action.kind}:${action.x},${action.y}`;
+    case 'open_tab':
+      return `open_tab:${normalizeUrlForActionCache(action.url)}`;
+    case 'switch_tab':
+      return `switch_tab:${action.tabId}`;
+    case 'close_tab':
+      return `close_tab:${action.tabId}`;
+    case 'script':
+      return `script:steps=${action.steps.length}`;
     case 'finish':
       return `finish:${action.verdict}:${textForKey(action.reason)}`;
   }

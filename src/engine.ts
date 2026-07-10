@@ -34,24 +34,37 @@ import { CliPlannerAdapter } from './router/adapters/cli-planner.js';
 import { openAiGatewayOptions } from './router/gateway.js';
 import { defaultModelFor, type PlannerMode, type ProviderId } from './vibe/settings.js';
 import { ArtifactStore } from './report/artifacts.js';
-import { runDriverLoop } from './driver/loop.js';
+import { runDriverLoop, type StepInfo } from './driver/loop.js';
 import { Vault } from './vault/vault.js';
 import type { Report } from './report/report.js';
 import { diffScripts, loadScript, saveScript, scriptFromReport, type QaScript } from './recorder/script.js';
 import { replayScript } from './recorder/replay.js';
+import { matchReplayScript } from './recorder/matcher.js';
 import { startClipRecorder, type ClipRecorder } from './clip/screencast.js';
 import { FileActionCache } from './cache/action-cache.js';
+import { getDefaultTracer } from './telemetry/env.js';
+import type { ActiveSpan } from './telemetry/tracer.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 export interface QaRunOptions {
   maxSteps?: number;
   /** Record a passed run to generated-tests/ (default true). */
   record?: boolean;
+  /** Phase 14 pre-run replay matcher: when true (default) and a confident
+   * matching recorded script exists for this task+url, replay it
+   * deterministically ($0) instead of running a fresh AI pass; on replay
+   * failure this falls back to a fresh AI run automatically. CLI: `--no-replay`
+   * sets this false. Also forced false internally when qaReplay's `--heal`
+   * re-engages the driver on a specific script, so healing never re-matches
+   * and re-replays the very script that just failed. */
+  replay?: boolean;
   config?: Partial<QaConfig>;
   /** Progress lines (CLI prints them; MCP ignores). */
   onProgress?: (line: string) => void;
   /** Structured per-step hook (vibe panel animates these). Threaded into the
    * driver loop by the planner-side work; forwarded as vibe.step events. */
-  onStep?: (info: { index: number; kind: 'plan' | 'click' | 'type' | 'hover' | 'key' | 'select' | 'navigate' | 'assert' | 'extract' | 'wait' | 'finish'; text: string; ok?: boolean }) => void;
+  onStep?: (info: StepInfo) => void;
   /** Caller-owned bridge (extension mode). When the panel already drives an
    * attached Chrome, the daemon reuses this bridge instead of spawning its own;
    * ownership (and close()) stays with the caller. */
@@ -83,6 +96,10 @@ export interface QaRunOptions {
 export interface QaRunResult extends Report {
   /** Path of the recorded script, when the run passed and recording is on. */
   recordedScript?: string;
+  /** Set when this result came from a matched $0 replay (Phase 14) rather than
+   * a fresh AI run — the matched script's name and match score. Absent on a
+   * fresh AI-driven run. */
+  replayMatch?: { name: string; score: number };
 }
 
 /** Browser-only session — the transport (CdpBrowser or ExtensionBrowser) plus
@@ -329,8 +346,73 @@ function targetHostCandidates(url: string): string[] {
   return host.startsWith('www.') ? [host, host.slice(4)] : [host, `www.${host}`];
 }
 
+/** Best-effort re-persist of report.json AFTER engine.ts adds a field the
+ * module that originally wrote the file (driver/loop.ts, recorder/replay.ts —
+ * neither owned here) doesn't know about, mirroring the existing clip-path
+ * re-save further down. Never throws — a write failure here must not fail
+ * the run; the field is still present on the in-memory result either way. */
+function persistReportPatch(artifactsDir: string, report: Report): void {
+  try {
+    fs.writeFileSync(path.join(artifactsDir, report.runId, 'report.json'), JSON.stringify(report, null, 2));
+  } catch {
+    /* best-effort */
+  }
+}
+
 export async function qaRun(task: string, url: string, opts: QaRunOptions = {}): Promise<QaRunResult> {
   const progress = opts.onProgress ?? (() => {});
+  const tracer = getDefaultTracer();
+  const runSpan = tracer.startSpan('qa.run', { task, url });
+  try {
+    // Phase 14: pre-run replay matcher — a confident match replays
+    // deterministically at $0 before a fresh AI run is even considered.
+    if (opts.replay ?? true) {
+      const match = matchReplayScript(task, url);
+      runSpan.addEvent('replay.match', { found: Boolean(match), name: match?.name, score: match?.score });
+      if (match) {
+        progress(`matched replay ${match.name} (score ${match.score.toFixed(2)}) — using $0 replay (override with --no-replay)`);
+        try {
+          const replayed = await qaReplay(match.name, {
+            config: opts.config,
+            onProgress: progress,
+            bridge: opts.bridge,
+          });
+          if (replayed.verdict !== 'fail') {
+            runSpan.addEvent('replay.used', { name: match.name, verdict: replayed.verdict });
+            const result: QaRunResult = { ...replayed, replayMatch: { name: match.name, score: match.score } };
+            persistReportPatch(loadConfig(opts.config ?? {}).artifactsDir, result);
+            runSpan.end({ verdict: result.verdict, source: 'replay', runId: result.runId });
+            return result;
+          }
+          progress('matched replay failed — falling back to a fresh AI run');
+          runSpan.addEvent('replay.fallback', { reason: 'replay-failed', name: match.name });
+        } catch (e) {
+          progress(`matched replay errored (${e instanceof Error ? e.message : String(e)}) — falling back to a fresh AI run`);
+          runSpan.addEvent('replay.fallback', { reason: 'replay-error', name: match.name, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+    }
+
+    const result = await runFreshAiPass(task, url, opts, progress, runSpan);
+    runSpan.end({ verdict: result.verdict, source: 'ai', runId: result.runId });
+    return result;
+  } catch (e) {
+    runSpan.fail(e);
+    throw e;
+  }
+}
+
+/** The AI-driven exploration path — everything qaRun used to do inline before
+ * the Phase 14 replay matcher was added in front of it. Split out so the
+ * matcher's early-return (a matched $0 replay) never pays for opening a
+ * browser session / building the model ladder at all. */
+async function runFreshAiPass(
+  task: string,
+  url: string,
+  opts: QaRunOptions,
+  progress: (line: string) => void,
+  runSpan: ActiveSpan,
+): Promise<QaRunResult> {
   const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId });
   const { cfg, browser, nano } = session;
 
@@ -358,6 +440,8 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
   const artifacts = new ArtifactStore(cfg.artifactsDir);
   const actionCache = cfg.actionCache ? new FileActionCache(cfg.actionCacheDir) : undefined;
   progress(`run ${artifacts.runId}: "${task}" on ${url}`);
+  runSpan.setAttribute('runId', artifacts.runId);
+  runSpan.addEvent('session.opened', { via: cfg.via, navigator: navigatorName ?? 'nano', brain: plannerName ?? 'nano' });
 
   try {
     // replay clip: the ghost cursor + captions render in-page, so the
@@ -386,15 +470,19 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
       ? [...cfg.allowedHosts, ...targetHostCandidates(url)]
       : cfg.allowedHosts;
 
-    const report: QaRunResult = await runDriverLoop(browser, router, artifacts, task, url, {
-      maxSteps: opts.maxSteps ?? cfg.maxSteps,
-      onStep: opts.onStep,
-      allowedHosts,
-      vault,
-      signal: opts.signal,
-      assertionPolicy: cfg.assertionPolicy,
-      actionCache,
-    });
+    const driverTracer = getDefaultTracer();
+    const report: QaRunResult = await driverTracer.trace('qa.run.driver_loop', { runId: artifacts.runId, task, url }, () =>
+      runDriverLoop(browser, router, artifacts, task, url, {
+        maxSteps: opts.maxSteps ?? cfg.maxSteps,
+        onStep: opts.onStep,
+        allowedHosts,
+        vault,
+        signal: opts.signal,
+        assertionPolicy: cfg.assertionPolicy,
+        actionCache,
+        videoAssertions: cfg.videoAssertions,
+      }),
+    );
     if (clip) {
       const gif = await clip.stop().catch(() => null);
       if (gif) {
@@ -404,11 +492,13 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
       }
     }
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);
+    runSpan.addEvent('driver.loop.completed', { verdict: report.verdict, steps: report.steps.length, durationMs: report.durationMs });
 
     if (report.verdict === 'pass' && (opts.record ?? true)) {
       const { jsonPath, specPath } = saveScript(scriptFromReport(report));
       report.recordedScript = jsonPath;
       progress(`recorded: ${jsonPath} (+ Playwright twin ${specPath}) — replay at $0 with \`qa replay\``);
+      runSpan.addEvent('script.recorded', { jsonPath });
     }
     return report;
   } finally {
@@ -435,6 +525,9 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   const script: QaScript = loadScript(nameOrPath);
   progress(`replaying "${script.name}" (${script.steps.length} steps, recorded ${script.createdAt}) — no planner, $0`);
 
+  const tracer = getDefaultTracer();
+  const replaySpan = tracer.startSpan('qa.replay', { scriptName: script.name, task: script.task, url: script.url });
+
   const session = await openSession(opts.config ?? {}, { bridge: opts.bridge });
   const artifacts = new ArtifactStore(session.cfg.artifactsDir);
 
@@ -442,14 +535,20 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   try {
     report = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress });
     progress(`replay verdict: ${report.verdict} (${Math.round(report.durationMs / 1000)}s)`);
+    replaySpan.setAttribute('runId', report.runId);
+  } catch (e) {
+    replaySpan.fail(e);
+    throw e;
   } finally {
     await session.close();
   }
 
   if (report.verdict === 'fail' && opts.heal) {
+    replaySpan.addEvent('heal.start', { runId: report.runId, failedStep: report.failing_step?.index ?? -1 });
     progress(`self-heal: replay failed at step ${report.failing_step ? report.failing_step.index + 1 : '?'} — re-engaging the driver on the original task`);
     const healed = await qaRun(script.task, script.url, {
       record: false, // we re-emit manually to keep the script's name + lineage
+      replay: false, // never let the matcher re-find and re-replay THIS SAME failing script
       config: opts.config,
       onProgress: progress,
     });
@@ -464,11 +563,14 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
       progress(`what changed: ${diffScripts(script, newScript)}`);
       const { jsonPath } = saveScript(newScript);
       progress(`self-heal succeeded — script re-emitted: ${jsonPath}`);
+      replaySpan.end({ verdict: report.verdict, healed: true, runId: report.runId });
       return { ...healed, healed: true, recordedScript: jsonPath };
     }
     progress('self-heal failed too — the app is genuinely broken, reporting the AI run verdict');
+    replaySpan.end({ verdict: report.verdict, healed: false, runId: report.runId });
     return { ...healed, healed: false };
   }
 
+  replaySpan.end({ verdict: report.verdict, runId: report.runId });
   return report;
 }

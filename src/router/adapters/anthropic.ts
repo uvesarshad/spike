@@ -2,7 +2,12 @@
  * (no SDK dep, matching the rest of the router), image as a base64 content block,
  * JSON steered in-prompt + parsed with extractJson. Default model is the cheapest
  * current Haiku (claude-haiku-4-5) so the "CLI/cheap model" expectation holds for
- * the API path too. Unavailable (cleanly) when no key is configured. */
+ * the API path too. Unavailable (cleanly) when no key is configured.
+ *
+ * Screenshot-only (Phase 8): the Messages API has no equivalent of Gemini's
+ * Files-API video upload + judge path, so this adapter never sets
+ * supportsVideo/videoVerdict — a video assertion routed here falls back to the
+ * screenshot verdict path (see ModelRouter.videoVerdict / hasVideoVerdict). */
 
 import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson, withSchemaInstruction } from '../adapter.js';
@@ -22,6 +27,10 @@ export interface AnthropicOptions {
 export class AnthropicAdapter implements ModelAdapter {
   readonly name: string;
   readonly rung = 2 as const;
+  /** Explicit false (not just "absent") — makes the screenshot-only contract
+   * checkable at the type level, e.g. `adapter.supportsVideo` reads cleanly
+   * instead of needing a cast through the ModelAdapter interface. */
+  readonly supportsVideo = false;
   lastUsage?: AdapterUsage;
 
   constructor(private readonly opts: AnthropicOptions) {

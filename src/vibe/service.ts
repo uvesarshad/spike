@@ -193,6 +193,7 @@ export class VibeService {
         navigator: settings.navigator,
         debugMode: settings.debugMode,
         debugAgent: settings.debugAgent,
+        videoAssertions: settings.videoAssertions ?? false,
         providers,
       };
     });
@@ -225,6 +226,7 @@ export class VibeService {
       }
       if (p.debugMode !== undefined) patch.debugMode = p.debugMode;
       if (p.debugAgent !== undefined) patch.debugAgent = p.debugAgent;
+      if (p.videoAssertions !== undefined) patch.videoAssertions = Boolean(p.videoAssertions);
       return new SettingsStore().write(patch);
     });
 

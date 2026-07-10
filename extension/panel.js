@@ -123,6 +123,7 @@ const setNavNanoDownload = $('setNavNanoDownload');
 const setDebugAgentRow = $('setDebugAgentRow');
 const setDebugAgent = $('setDebugAgent');
 const setAutoFix = $('setAutoFix');
+const setVideoAssert = $('setVideoAssert');
 const setAutoFixNote = $('setAutoFixNote');
 const setAutoFixNoteText = $('setAutoFixNoteText');
 const connectApp = $('connectApp');
@@ -1174,6 +1175,9 @@ function renderSettings(cfg) {
   // debug mode → auto-fix toggle
   setAutoFix.checked = (cfg.debugMode || 'prompt') === 'auto';
 
+  // opt-in video assertions (paid, slower)
+  if (setVideoAssert) setVideoAssert.checked = Boolean(cfg.videoAssertions);
+
   // debug agent
   if (cfg.debugAgent) setDebugAgent.value = cfg.debugAgent;
 
@@ -1333,6 +1337,7 @@ settingsSave.addEventListener('click', () => {
     },
     debugMode: selectedDebugMode(),
     debugAgent: setDebugAgent.value,
+    videoAssertions: Boolean(setVideoAssert && setVideoAssert.checked),
   });
   closeSettings();
 });

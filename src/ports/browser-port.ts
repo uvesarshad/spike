@@ -61,6 +61,33 @@ export interface BrowserPort {
   selectOption(nodeId: string, value: string): Promise<void>;
   reload(): Promise<void>;
   goBack(): Promise<void>;
+  /** Set the files on a native `<input type="file">` behind `nodeId`. Paths are
+   * whatever the caller resolved them to (recorded scripts keep them relative —
+   * see recorder/script.ts); the driver never invents or embeds secrets here. */
+  uploadFile(nodeId: string, paths: string[]): Promise<void>;
+  /** Press on `sourceId`'s center, glide to `targetId`'s center, release —
+   * drives mouse-event-based drag interactions (sortable lists, sliders,
+   * custom drop zones). Native HTML5 `draggable` drag/drop (which needs an OS
+   * drag gesture, not just mouse events) is out of scope. */
+  dragAndDrop(sourceId: string, targetId: string): Promise<void>;
+  /** Remove focus from the node behind `nodeId` (fires blur/change handlers). */
+  blur(nodeId: string): Promise<void>;
+  /** Discrete mouse primitive at PAGE coordinates (not a nodeId) — 'move' for
+   * mousemove-driven UI (custom drag handles, hover-tracking widgets), 'down'/
+   * 'up' to compose gestures the click()/dragAndDrop() helpers don't cover. */
+  mouse(kind: 'move' | 'down' | 'up', x: number, y: number): Promise<void>;
+  /** Open a new tab/target at `url` WITHOUT switching the active session to it;
+   * returns an opaque id usable with switchTab()/closeTab(). */
+  openTab(url: string): Promise<string>;
+  /** Switch the active session to a previously-opened tab (by the id openTab()
+   * returned, or a transport-defined index). The tab that WAS active becomes
+   * switchable back to. Extension transports that cannot manage tabs without
+   * additional bridge/chrome.tabs plumbing throw a clear "not supported"
+   * error instead of a silent no-op. */
+  switchTab(idOrIndex: string | number): Promise<void>;
+  /** Close a tab previously opened with openTab(). Throws if `id` is the
+   * currently active tab — switchTab() away first. */
+  closeTab(id: string): Promise<void>;
   screenshot(): Promise<Buffer>;
   setLogpoint(spec: LogpointSpec): Promise<void>;
   /** Everything captured since the previous drain — per-step evidence correlation. */

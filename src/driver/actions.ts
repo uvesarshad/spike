@@ -3,6 +3,7 @@
  * the zod schema validates whatever comes back. */
 
 import { z } from 'zod';
+import { ScriptRunnerStepSchema, SCRIPT_MAX_STEPS, SCRIPT_STEP_JSON_SCHEMA } from './script-runner/schema.js';
 
 export const ActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('navigate'), url: z.string() }),
@@ -13,10 +14,44 @@ export const ActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('select_option'), nodeId: z.string(), value: z.string() }),
   z.object({ type: z.literal('reload') }),
   z.object({ type: z.literal('go_back') }),
+  // Phase 9 — action parity: file upload, drag/drop, discrete mouse, blur, tabs.
+  z.object({ type: z.literal('upload_file'), nodeId: z.string(), paths: z.array(z.string()).min(1).max(10) }),
+  z.object({
+    type: z.literal('drag_and_drop'),
+    sourceId: z.string(),
+    targetId: z.string(),
+    // Resolved by the driver loop AFTER execution from the live a11y tree —
+    // NEVER emitted by the model (absent from PLAN_JSON_SCHEMA below). This is
+    // what lets the recorder distill a role+name-locator replay step without a
+    // second StepRecord.target slot (StepRecord only carries one).
+    sourceTarget: z.object({ role: z.string(), name: z.string().optional(), nth: z.number().int().optional() }).optional(),
+    targetTarget: z.object({ role: z.string(), name: z.string().optional(), nth: z.number().int().optional() }).optional(),
+  }),
+  z.object({ type: z.literal('blur'), nodeId: z.string() }),
+  z.object({ type: z.literal('mouse'), kind: z.enum(['move', 'down', 'up']), x: z.number(), y: z.number() }),
+  z.object({ type: z.literal('open_tab'), url: z.string() }),
+  z.object({ type: z.literal('switch_tab'), tabId: z.string() }),
+  z.object({ type: z.literal('close_tab'), tabId: z.string() }),
   z.object({ type: z.literal('assert_visual'), expectation: z.string(), mode: z.enum(['screenshot', 'video']).optional() }),
   z.object({ type: z.literal('assert_dom'), nodeId: z.string(), contains: z.string() }),
-  z.object({ type: z.literal('extract'), nodeId: z.string(), key: z.string(), pattern: z.string().optional() }),
+  // Phase 15 — extract gains an optional model-assisted mode: when `prompt` is
+  // present, a cheap text adapter pulls a structured value out of the page/
+  // subtree text instead of the $0 DOM-text/regex path. `nodeId` becomes
+  // optional so a prompt can target the whole page (e.g. "the order number
+  // shown anywhere on this page") rather than one specific node's subtree.
+  z.object({
+    type: z.literal('extract'),
+    nodeId: z.string().optional(),
+    key: z.string(),
+    pattern: z.string().optional(),
+    prompt: z.string().optional(),
+  }),
   z.object({ type: z.literal('wait'), ms: z.number().int().min(50).max(10_000) }),
+  // Phase 10 — secure script runner: a small allowlisted declarative step list
+  // over BrowserPort verbs (see src/driver/script-runner/). Validated BEFORE
+  // execution; a validation failure rejects the whole action (loop.ts treats
+  // that as a stuck/escalate condition, never a partial execution).
+  z.object({ type: z.literal('script'), steps: z.array(ScriptRunnerStepSchema).min(1).max(SCRIPT_MAX_STEPS) }),
   z.object({
     type: z.literal('finish'),
     verdict: z.enum(['pass', 'fail']),
@@ -73,10 +108,18 @@ export const PLAN_JSON_SCHEMA = {
               'select_option',
               'reload',
               'go_back',
+              'upload_file',
+              'drag_and_drop',
+              'blur',
+              'mouse',
+              'open_tab',
+              'switch_tab',
+              'close_tab',
               'assert_visual',
               'assert_dom',
               'extract',
               'wait',
+              'script',
               'finish',
             ],
           },
@@ -89,7 +132,22 @@ export const PLAN_JSON_SCHEMA = {
           mode: { type: 'string', enum: ['screenshot', 'video'] },
           contains: { type: 'string' },
           pattern: { type: 'string' },
+          prompt: { type: 'string', description: 'when set on extract, ask a cheap text model to pull the value instead of DOM-text/regex' },
           ms: { type: 'integer' },
+          paths: { type: 'array', items: { type: 'string' }, description: 'upload_file: file paths to set on the input' },
+          sourceId: { type: 'string', description: 'drag_and_drop: nodeId to press on' },
+          targetId: { type: 'string', description: 'drag_and_drop: nodeId to release on' },
+          kind: { type: 'string', enum: ['move', 'down', 'up'], description: 'mouse: which discrete event to dispatch' },
+          x: { type: 'number', description: 'mouse: page x coordinate' },
+          y: { type: 'number', description: 'mouse: page y coordinate' },
+          tabId: { type: 'string', description: 'switch_tab/close_tab: id returned by a prior open_tab' },
+          steps: {
+            type: 'array',
+            minItems: 1,
+            maxItems: SCRIPT_MAX_STEPS,
+            description: 'script: a small allowlisted step list over the SAME verbs (no assert_visual/finish/script — see docs/modules/script-runner.md)',
+            items: SCRIPT_STEP_JSON_SCHEMA,
+          },
           verdict: { type: 'string', enum: ['pass', 'fail'] },
           reason: { type: 'string' },
         },
@@ -141,3 +199,41 @@ export const GOAL_PLAN_JSON_SCHEMA = {
     reason: { type: 'string', description: 'why the verdict was reached' },
   },
 } as const;
+
+/* ------------------------------------------------------------------------- *
+ * Phase 15 — model-assisted structured extraction. When an `extract` action
+ * carries a `prompt`, loop.ts asks a cheap plan-step-capable TEXT adapter
+ * (router.planJson — the SAME call the navigator uses, no new router surface)
+ * to pull a structured value out of the serialized page/subtree text. This is
+ * NOT a visual call — no image, no vision adapter, no extra router method.
+ * ------------------------------------------------------------------------- */
+
+export const ExtractResultSchema = z.object({
+  value: z.string().nullable().optional(),
+});
+
+export type ExtractResult = z.infer<typeof ExtractResultSchema>;
+
+export const EXTRACT_JSON_SCHEMA = {
+  type: 'object',
+  required: [],
+  additionalProperties: false,
+  properties: {
+    value: {
+      type: ['string', 'null'],
+      description: 'the extracted value as plain text, or null if it is not present in the given text',
+    },
+  },
+} as const;
+
+export function buildExtractPrompt(input: { prompt: string; key: string; text: string }): string {
+  return `Extract a single value from the page text below.
+
+WHAT TO EXTRACT: ${input.prompt}
+(this will be stored as {{run.${input.key}}} for later steps)
+
+PAGE TEXT:
+${input.text.slice(0, 4000)}
+
+Respond with ONLY JSON: {"value": "<the extracted text>"} or {"value": null} if it is not present. Do not invent a value that is not visibly present in the text above.`;
+}

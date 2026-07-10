@@ -4221,9 +4221,9 @@ var require_decoder = __commonJS({
         return a < 0 ? 0 : a > 255 ? 255 : a;
       }
       constructor.prototype = {
-        load: function load(path3) {
+        load: function load(path4) {
           var xhr = new XMLHttpRequest();
-          xhr.open("GET", path3, true);
+          xhr.open("GET", path4, true);
           xhr.responseType = "arraybuffer";
           xhr.onload = (function() {
             var data = new Uint8Array(xhr.response || xhr.mozResponseArrayBuffer);
@@ -4815,6 +4815,12 @@ Question: ${expectation}
 Judge strictly from what is visible. List concrete issues if any.
 Respond with ONLY a JSON object: {"verdict":"pass"|"fail"|"uncertain","summary":string,"issues":string[]}`;
 }
+function videoVerdictPrompt(expectation) {
+  return `You are a QA assistant reviewing a short screen-recording clip of a web page interaction.
+Question: ${expectation}
+Judge strictly from what is visible across the clip (including transient UI such as toasts, loading states, or animations that a single screenshot could miss). List concrete issues if any.
+Respond with ONLY a JSON object: {"verdict":"pass"|"fail"|"uncertain","summary":string,"issues":string[]}`;
+}
 
 // src/router/model-router.ts
 var ModelRouter = class {
@@ -4922,6 +4928,56 @@ var ModelRouter = class {
   /** Available visual candidates in the same order visualVerdict() would use. */
   async visualVerdictCandidates() {
     return (await this.candidates("visual-verdict")).map((a) => ({ name: a.name, rung: a.rung }));
+  }
+  /** True iff a video-capable visual adapter is configured AND available right
+   * now. The driver gates `assert_visual { mode: 'video' }` on cfg.videoAssertions
+   * FIRST, then calls this to decide whether to actually record/upload a clip or
+   * fall back to the screenshot path with a report note. */
+  async hasVideoVerdict() {
+    const ladder = await this.candidates("visual-verdict");
+    return ladder.some((a) => a.supportsVideo && typeof a.videoVerdict === "function");
+  }
+  /** Judge a recorded clip on disk. Picks the FIRST available visual-verdict
+   * candidate (same ladder/pin ordering as visualVerdict()) that declares
+   * supportsVideo. Returns the same NanoVerdict shape visualVerdict() returns.
+   * Throws when no candidate supports video — callers (the driver) catch this
+   * and fall back to a screenshot verdict rather than fail the run. */
+  async videoVerdict(videoPath, expectation, step) {
+    const ladder = await this.candidates("visual-verdict");
+    const adapter = ladder.find((a) => a.supportsVideo && typeof a.videoVerdict === "function");
+    if (!adapter || !adapter.videoVerdict) {
+      throw new Error("no video-capable visual-verdict adapter available");
+    }
+    const t0 = Date.now();
+    try {
+      const raw = await adapter.videoVerdict(videoPath, expectation);
+      const verdict = {
+        verdict: raw.verdict === "pass" || raw.verdict === "fail" ? raw.verdict : "uncertain",
+        summary: raw.summary ?? "",
+        issues: Array.isArray(raw.issues) ? raw.issues : []
+      };
+      this.trace.push({
+        step,
+        capability: "visual-verdict",
+        rung: adapter.rung,
+        adapter: adapter.name,
+        ms: Date.now() - t0,
+        note: "video",
+        usage: adapter.lastUsage
+      });
+      return verdict;
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      this.trace.push({
+        step,
+        capability: "visual-verdict",
+        rung: adapter.rung,
+        adapter: adapter.name,
+        ms: Date.now() - t0,
+        note: `video error: ${err.message.slice(0, 120)}`
+      });
+      throw err;
+    }
   }
   /** Call a specific visual adapter by candidate name/rung and record the normal model trace.
    * Used by assertion consensus policies that need independent primary/secondary calls. */
@@ -5133,7 +5189,23 @@ function describeAction(a) {
     case "assert_dom":
       return `dom check: ${a.nodeId} contains ${JSON.stringify(a.contains)}`;
     case "extract":
-      return `extract ${a.key} from ${a.nodeId}${a.pattern ? ` matching ${JSON.stringify(a.pattern)}` : ""}`;
+      return `extract ${a.key} from ${a.nodeId ?? "page"}${a.prompt ? " (model)" : a.pattern ? ` matching ${JSON.stringify(a.pattern)}` : ""}`;
+    case "upload_file":
+      return `upload ${a.paths.length} file(s) to ${a.nodeId}`;
+    case "drag_and_drop":
+      return `drag ${a.sourceId} onto ${a.targetId}`;
+    case "blur":
+      return `blur ${a.nodeId}`;
+    case "mouse":
+      return `mouse ${a.kind} at (${a.x}, ${a.y})`;
+    case "open_tab":
+      return `open tab ${a.url}`;
+    case "switch_tab":
+      return `switch to tab ${a.tabId}`;
+    case "close_tab":
+      return `close tab ${a.tabId}`;
+    case "script":
+      return `run script (${a.steps.length} step${a.steps.length === 1 ? "" : "s"})`;
     case "wait":
       return `wait ${a.ms}ms`;
     case "finish":
@@ -5637,8 +5709,8 @@ function getErrorMap() {
 // node_modules/zod/v3/helpers/parseUtil.js
 init_buffer_shim();
 var makeIssue = (params) => {
-  const { data, path: path3, errorMaps, issueData } = params;
-  const fullPath = [...path3, ...issueData.path || []];
+  const { data, path: path4, errorMaps, issueData } = params;
+  const fullPath = [...path4, ...issueData.path || []];
   const fullIssue = {
     ...issueData,
     path: fullPath
@@ -5758,11 +5830,11 @@ var errorUtil;
 
 // node_modules/zod/v3/types.js
 var ParseInputLazyPath = class {
-  constructor(parent, value, path3, key) {
+  constructor(parent, value, path4, key) {
     this._cachedPath = [];
     this.parent = parent;
     this.data = value;
-    this._path = path3;
+    this._path = path4;
     this._key = key;
   }
   get path() {
@@ -9204,6 +9276,67 @@ var coerce = {
 };
 var NEVER = INVALID;
 
+// src/driver/script-runner/schema.ts
+init_buffer_shim();
+var SCRIPT_MAX_STEPS = 20;
+var SCRIPT_MAX_WALL_MS = 3e4;
+var ScriptRunnerStepSchema = external_exports.discriminatedUnion("type", [
+  external_exports.object({ type: external_exports.literal("navigate"), url: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("click"), nodeId: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("type"), nodeId: external_exports.string(), text: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("hover"), nodeId: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("press_key"), key: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("select_option"), nodeId: external_exports.string(), value: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("reload") }).strict(),
+  external_exports.object({ type: external_exports.literal("go_back") }).strict(),
+  external_exports.object({ type: external_exports.literal("wait"), ms: external_exports.number().int().min(50).max(1e4) }).strict(),
+  external_exports.object({ type: external_exports.literal("assert_dom"), nodeId: external_exports.string(), contains: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("extract"), nodeId: external_exports.string(), key: external_exports.string(), pattern: external_exports.string().optional() }).strict(),
+  external_exports.object({ type: external_exports.literal("upload_file"), nodeId: external_exports.string(), paths: external_exports.array(external_exports.string()).min(1).max(10) }).strict(),
+  external_exports.object({ type: external_exports.literal("drag_and_drop"), sourceId: external_exports.string(), targetId: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("blur"), nodeId: external_exports.string() }).strict(),
+  external_exports.object({ type: external_exports.literal("mouse"), kind: external_exports.enum(["move", "down", "up"]), x: external_exports.number(), y: external_exports.number() }).strict()
+]);
+var SCRIPT_RUNNER_VERBS = [
+  "navigate",
+  "click",
+  "type",
+  "hover",
+  "press_key",
+  "select_option",
+  "reload",
+  "go_back",
+  "wait",
+  "assert_dom",
+  "extract",
+  "upload_file",
+  "drag_and_drop",
+  "blur",
+  "mouse"
+];
+var SCRIPT_STEP_JSON_SCHEMA = {
+  type: "object",
+  required: ["type"],
+  additionalProperties: false,
+  properties: {
+    type: { type: "string", enum: [...SCRIPT_RUNNER_VERBS] },
+    url: { type: "string" },
+    nodeId: { type: "string" },
+    text: { type: "string" },
+    key: { type: "string" },
+    value: { type: "string" },
+    contains: { type: "string" },
+    pattern: { type: "string" },
+    ms: { type: "integer" },
+    paths: { type: "array", items: { type: "string" } },
+    sourceId: { type: "string" },
+    targetId: { type: "string" },
+    kind: { type: "string", enum: ["move", "down", "up"] },
+    x: { type: "number" },
+    y: { type: "number" }
+  }
+};
+
 // src/driver/actions.ts
 var ActionSchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("navigate"), url: external_exports.string() }),
@@ -9214,10 +9347,44 @@ var ActionSchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("select_option"), nodeId: external_exports.string(), value: external_exports.string() }),
   external_exports.object({ type: external_exports.literal("reload") }),
   external_exports.object({ type: external_exports.literal("go_back") }),
+  // Phase 9 — action parity: file upload, drag/drop, discrete mouse, blur, tabs.
+  external_exports.object({ type: external_exports.literal("upload_file"), nodeId: external_exports.string(), paths: external_exports.array(external_exports.string()).min(1).max(10) }),
+  external_exports.object({
+    type: external_exports.literal("drag_and_drop"),
+    sourceId: external_exports.string(),
+    targetId: external_exports.string(),
+    // Resolved by the driver loop AFTER execution from the live a11y tree —
+    // NEVER emitted by the model (absent from PLAN_JSON_SCHEMA below). This is
+    // what lets the recorder distill a role+name-locator replay step without a
+    // second StepRecord.target slot (StepRecord only carries one).
+    sourceTarget: external_exports.object({ role: external_exports.string(), name: external_exports.string().optional(), nth: external_exports.number().int().optional() }).optional(),
+    targetTarget: external_exports.object({ role: external_exports.string(), name: external_exports.string().optional(), nth: external_exports.number().int().optional() }).optional()
+  }),
+  external_exports.object({ type: external_exports.literal("blur"), nodeId: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("mouse"), kind: external_exports.enum(["move", "down", "up"]), x: external_exports.number(), y: external_exports.number() }),
+  external_exports.object({ type: external_exports.literal("open_tab"), url: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("switch_tab"), tabId: external_exports.string() }),
+  external_exports.object({ type: external_exports.literal("close_tab"), tabId: external_exports.string() }),
   external_exports.object({ type: external_exports.literal("assert_visual"), expectation: external_exports.string(), mode: external_exports.enum(["screenshot", "video"]).optional() }),
   external_exports.object({ type: external_exports.literal("assert_dom"), nodeId: external_exports.string(), contains: external_exports.string() }),
-  external_exports.object({ type: external_exports.literal("extract"), nodeId: external_exports.string(), key: external_exports.string(), pattern: external_exports.string().optional() }),
+  // Phase 15 — extract gains an optional model-assisted mode: when `prompt` is
+  // present, a cheap text adapter pulls a structured value out of the page/
+  // subtree text instead of the $0 DOM-text/regex path. `nodeId` becomes
+  // optional so a prompt can target the whole page (e.g. "the order number
+  // shown anywhere on this page") rather than one specific node's subtree.
+  external_exports.object({
+    type: external_exports.literal("extract"),
+    nodeId: external_exports.string().optional(),
+    key: external_exports.string(),
+    pattern: external_exports.string().optional(),
+    prompt: external_exports.string().optional()
+  }),
   external_exports.object({ type: external_exports.literal("wait"), ms: external_exports.number().int().min(50).max(1e4) }),
+  // Phase 10 — secure script runner: a small allowlisted declarative step list
+  // over BrowserPort verbs (see src/driver/script-runner/). Validated BEFORE
+  // execution; a validation failure rejects the whole action (loop.ts treats
+  // that as a stuck/escalate condition, never a partial execution).
+  external_exports.object({ type: external_exports.literal("script"), steps: external_exports.array(ScriptRunnerStepSchema).min(1).max(SCRIPT_MAX_STEPS) }),
   external_exports.object({
     type: external_exports.literal("finish"),
     verdict: external_exports.enum(["pass", "fail"]),
@@ -9259,10 +9426,18 @@ var PLAN_JSON_SCHEMA = {
               "select_option",
               "reload",
               "go_back",
+              "upload_file",
+              "drag_and_drop",
+              "blur",
+              "mouse",
+              "open_tab",
+              "switch_tab",
+              "close_tab",
               "assert_visual",
               "assert_dom",
               "extract",
               "wait",
+              "script",
               "finish"
             ]
           },
@@ -9275,7 +9450,22 @@ var PLAN_JSON_SCHEMA = {
           mode: { type: "string", enum: ["screenshot", "video"] },
           contains: { type: "string" },
           pattern: { type: "string" },
+          prompt: { type: "string", description: "when set on extract, ask a cheap text model to pull the value instead of DOM-text/regex" },
           ms: { type: "integer" },
+          paths: { type: "array", items: { type: "string" }, description: "upload_file: file paths to set on the input" },
+          sourceId: { type: "string", description: "drag_and_drop: nodeId to press on" },
+          targetId: { type: "string", description: "drag_and_drop: nodeId to release on" },
+          kind: { type: "string", enum: ["move", "down", "up"], description: "mouse: which discrete event to dispatch" },
+          x: { type: "number", description: "mouse: page x coordinate" },
+          y: { type: "number", description: "mouse: page y coordinate" },
+          tabId: { type: "string", description: "switch_tab/close_tab: id returned by a prior open_tab" },
+          steps: {
+            type: "array",
+            minItems: 1,
+            maxItems: SCRIPT_MAX_STEPS,
+            description: "script: a small allowlisted step list over the SAME verbs (no assert_visual/finish/script \u2014 see docs/modules/script-runner.md)",
+            items: SCRIPT_STEP_JSON_SCHEMA
+          },
           verdict: { type: "string", enum: ["pass", "fail"] },
           reason: { type: "string" }
         }
@@ -9319,6 +9509,31 @@ var GOAL_PLAN_JSON_SCHEMA = {
     reason: { type: "string", description: "why the verdict was reached" }
   }
 };
+var ExtractResultSchema = external_exports.object({
+  value: external_exports.string().nullable().optional()
+});
+var EXTRACT_JSON_SCHEMA = {
+  type: "object",
+  required: [],
+  additionalProperties: false,
+  properties: {
+    value: {
+      type: ["string", "null"],
+      description: "the extracted value as plain text, or null if it is not present in the given text"
+    }
+  }
+};
+function buildExtractPrompt(input) {
+  return `Extract a single value from the page text below.
+
+WHAT TO EXTRACT: ${input.prompt}
+(this will be stored as {{run.${input.key}}} for later steps)
+
+PAGE TEXT:
+${input.text.slice(0, 4e3)}
+
+Respond with ONLY JSON: {"value": "<the extracted text>"} or {"value": null} if it is not present. Do not invent a value that is not visibly present in the text above.`;
+}
 
 // src/driver/planner-prompt.ts
 init_buffer_shim();
@@ -9402,9 +9617,15 @@ Work on the CURRENT GOAL. Decide the next 1-3 actions. Rules:
 - typing into a field REPLACES its content; no need to clear first.
 - Use select_option for native select/combobox controls when the desired value or visible option text is known.
 - Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
-- Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text.
+- Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text. When the value isn't a clean single line (e.g. "the order number somewhere in this confirmation paragraph"), give a "prompt" instead of/with "pattern" \u2014 a cheap text model reads the (subtree or whole-page) text and pulls the value out; omit nodeId to search the whole page.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
-- Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode.
+- Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode. Video judging is an opt-in, costly feature \u2014 when it is off the run still gets a screenshot verdict, just not of the animation mid-flight.
+- Use upload_file to set files on a native file input (an <input type="file"> element) \u2014 pass real, existing paths.
+- Use drag_and_drop for mouse-driven drag interactions (sortable lists, sliders, custom drop zones) \u2014 press on sourceId, glide to targetId, release. It does NOT fire native HTML5 draggable dragstart/drop events (those need an OS gesture); only use it on UI that reacts to raw mouse events.
+- Use blur to move focus off a field (fires blur/change handlers some forms rely on for validation).
+- Use mouse for a single discrete mouse event ("move"/"down"/"up") at page coordinates x,y \u2014 for gestures click()/hover()/dragAndDrop() don't cover.
+- Use open_tab to open a URL in a NEW tab without leaving the current one; it returns an id you'll see quoted in the next step's history (e.g. "Open new tab (id: 7A2B)") \u2014 copy that id VERBATIM into a later switch_tab/close_tab. Use switch_tab to make another tab the active one (this ends the batch \u2014 the tree you see next describes the NEW tab). Use close_tab to close a tab you are NOT currently on.
+- Use script for a short (<=20 step) sequence of ordinary actions (navigate/click/type/hover/press_key/select_option/reload/go_back/wait/assert_dom/extract/upload_file/drag_and_drop/blur/mouse) you want to run back-to-back as ONE step without waiting for a reply between each \u2014 useful for a fixed multi-field flow you already know by heart. It CANNOT contain assert_visual, finish, or another script, and every field must be a plain value (no code, no expressions) \u2014 an invalid script is rejected outright and counts as a failed step.
 - Console errors / failed network requests after an action are strong evidence the app is broken \u2014 investigate or finish with verdict "fail" and cite them.
 - If the page shows an error message after your action (e.g. "Invalid email or password"), do NOT retry the same input \u2014 the input is wrong. finish with verdict "fail" and quote the visible error so the user can correct their task.
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
@@ -9417,8 +9638,8 @@ BATCHING: PREFER returning 2-3 actions when you are confident they are independe
 - fill several fields then click submit: [type email, type password, click "Sign in"].
 - act on the page then move on: [click "Add Widget to cart", click "Go to cart"] \u2014 the add-to-cart click updates the page in place; the navigating click goes LAST.
 Rules:
-- After any action that navigates or could meaningfully change the page (a click that submits a form or navigates, or a navigate action), the remaining actions in your batch are DISCARDED and you will be asked again with the new page. So the ONLY navigating/submitting action in a batch must be the LAST one; everything before it must keep you on the same page.
-- finish, assert_visual and assert_dom must be the ONLY action in their batch (return exactly one action).
+- After any action that navigates or could meaningfully change the page (a click that submits a form or navigates, a navigate action, or a switch_tab), the remaining actions in your batch are DISCARDED and you will be asked again with the new page. So the ONLY navigating/submitting/tab-switching action in a batch must be the LAST one; everything before it must keep you on the same page.
+- finish, assert_visual, assert_dom, and script must be the ONLY action in their batch (return exactly one action).
 - When unsure whether an earlier action changes the page, return a single action.
 
 Action types:
@@ -9430,9 +9651,17 @@ Action types:
 - {"type":"select_option","nodeId":string,"value":string}
 - {"type":"reload"}
 - {"type":"go_back"}
+- {"type":"upload_file","nodeId":string,"paths":[string]}
+- {"type":"drag_and_drop","sourceId":string,"targetId":string}
+- {"type":"blur","nodeId":string}
+- {"type":"mouse","kind":"move"|"down"|"up","x":number,"y":number}
+- {"type":"open_tab","url":string}
+- {"type":"switch_tab","tabId":string}
+- {"type":"close_tab","tabId":string}
 - {"type":"assert_dom","nodeId":string,"contains":string}   // cheap text check
 - {"type":"assert_visual","expectation":string,"mode":"screenshot"|"video"} // visual check; video mode falls back to screenshot if no clip route is available
-- {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}
+- {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}; or {"type":"extract","key":string,"prompt":string} for model-assisted extraction (nodeId optional)
+- {"type":"script","steps":[{...same verbs as above, no assert_visual/finish/script}]}
 - {"type":"wait","ms":number}
 - {"type":"finish","verdict":"pass"|"fail","reason":string}
 
@@ -9555,6 +9784,85 @@ function toModelResult(candidate, verdict) {
   };
 }
 
+// src/driver/script-runner/index.ts
+init_buffer_shim();
+
+// src/driver/script-runner/validator.ts
+init_buffer_shim();
+var DANGEROUS_PATTERNS = [
+  /\bimport\s*\(/i,
+  /\brequire\s*\(/i,
+  /\bprocess\s*\./i,
+  /\beval\s*\(/i,
+  /\bnew\s+Function\b/i,
+  /\bFunction\s*\(/i,
+  /__proto__/i,
+  /\.constructor\s*[[(]/i,
+  /\bprototype\s*[[.]/i,
+  /\bchild_process\b/i,
+  /\bfs\s*\.\s*[a-zA-Z]/i,
+  /\bXMLHttpRequest\b/i,
+  /\bfetch\s*\(/i,
+  /\bWebSocket\s*\(/i,
+  /`[^`]*\$\{/
+  // template-literal interpolation — no expression evaluation allowed
+];
+var DANGEROUS_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+function scanForDangerousText(value, path4, hits) {
+  if (hits.length) return;
+  if (typeof value === "string") {
+    for (const re of DANGEROUS_PATTERNS) {
+      if (re.test(value)) {
+        hits.push(`${path4}: matched disallowed pattern ${re.source}`);
+        return;
+      }
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) scanForDangerousText(value[i], `${path4}[${i}]`, hits);
+    return;
+  }
+  if (value && typeof value === "object") {
+    for (const [k, v] of Object.entries(value)) {
+      if (DANGEROUS_KEYS.has(k)) {
+        hits.push(`${path4}.${k}: disallowed key`);
+        return;
+      }
+      scanForDangerousText(v, `${path4}.${k}`, hits);
+      if (hits.length) return;
+    }
+  }
+}
+function validateScriptSteps(input) {
+  if (!Array.isArray(input)) {
+    return { ok: false, steps: [], reason: "script.steps must be an array" };
+  }
+  if (input.length === 0) {
+    return { ok: false, steps: [], reason: "script.steps must not be empty" };
+  }
+  if (input.length > SCRIPT_MAX_STEPS) {
+    return { ok: false, steps: [], reason: `script.steps exceeds the ${SCRIPT_MAX_STEPS}-step cap (${input.length} given)` };
+  }
+  const steps = [];
+  for (let i = 0; i < input.length; i++) {
+    const parsed = ScriptRunnerStepSchema.safeParse(input[i]);
+    if (!parsed.success) {
+      return { ok: false, steps: [], reason: `step ${i}: ${parsed.error.message.slice(0, 200)}` };
+    }
+    const hits = [];
+    scanForDangerousText(parsed.data, `step[${i}]`, hits);
+    if (hits.length) {
+      return { ok: false, steps: [], reason: `step ${i}: ${hits[0]}` };
+    }
+    steps.push(parsed.data);
+  }
+  return { ok: true, steps };
+}
+
+// src/driver/script-runner/executor.ts
+init_buffer_shim();
+
 // src/run-data/index.ts
 init_buffer_shim();
 
@@ -9638,6 +9946,119 @@ function resolveRunPlaceholders(text, state, opts = {}) {
     return value;
   });
   return { text: output, resolved };
+}
+
+// src/driver/script-runner/executor.ts
+var SECRET_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
+function resolveSecrets(text, vault) {
+  if (!SECRET_RE.test(text)) return text;
+  SECRET_RE.lastIndex = 0;
+  return text.replace(SECRET_RE, (_m, name) => {
+    const value = vault?.get(name);
+    if (value === void 0) {
+      throw new Error(`secret "${name}" not found \u2014 add it with: qa secret set ${name}`);
+    }
+    return value;
+  });
+}
+async function runScriptSteps(browser, steps, runData, vault, opts = {}) {
+  const maxWallMs = opts.maxWallMs ?? SCRIPT_MAX_WALL_MS;
+  const deadline = Date.now() + maxWallMs;
+  let executedSteps = 0;
+  for (const step of steps) {
+    if (Date.now() > deadline) {
+      return { ok: false, executedSteps, error: `script exceeded its ${maxWallMs}ms wall-time budget after ${executedSteps} step(s)` };
+    }
+    try {
+      await runOneStep(browser, step, runData, vault);
+    } catch (e) {
+      return { ok: false, executedSteps, error: `step ${executedSteps} (${step.type}): ${e instanceof Error ? e.message : String(e)}` };
+    }
+    executedSteps++;
+  }
+  return { ok: true, executedSteps };
+}
+async function runOneStep(browser, step, runData, vault) {
+  switch (step.type) {
+    case "navigate":
+      return browser.navigate(step.url);
+    case "click":
+      return browser.click(step.nodeId);
+    case "type": {
+      const resolvedRun = resolveRunPlaceholders(step.text, runData).text;
+      const resolved = resolveSecrets(resolvedRun, vault);
+      return browser.type(step.nodeId, resolved);
+    }
+    case "hover":
+      return browser.hover(step.nodeId);
+    case "press_key":
+      return browser.pressKey(step.key);
+    case "select_option":
+      return browser.selectOption(step.nodeId, step.value);
+    case "reload":
+      return browser.reload();
+    case "go_back":
+      return browser.goBack();
+    case "wait":
+      return new Promise((resolve) => setTimeout(resolve, step.ms));
+    case "assert_dom": {
+      const ax = await browser.axTree();
+      const node = findNode(ax.root, step.nodeId);
+      const hay = node ? subtreeText(node) : "";
+      if (!hay.toLowerCase().includes(step.contains.toLowerCase())) {
+        throw new Error(`expected ${JSON.stringify(step.contains)} in ${step.nodeId}, found: ${hay.slice(0, 150)}`);
+      }
+      return;
+    }
+    case "extract": {
+      const ax = await browser.axTree();
+      const node = findNode(ax.root, step.nodeId);
+      if (!node) throw new Error(`nodeId ${step.nodeId} not in current tree`);
+      const value = extractValue(subtreeText(node).trim(), step.pattern);
+      if (!value) throw new Error(`could not extract ${step.key} from ${step.nodeId}`);
+      recordExtraction(runData, { key: step.key, value, source: "dom", label: node.name });
+      return;
+    }
+    case "upload_file":
+      return browser.uploadFile(step.nodeId, step.paths);
+    case "drag_and_drop":
+      return browser.dragAndDrop(step.sourceId, step.targetId);
+    case "blur":
+      return browser.blur(step.nodeId);
+    case "mouse":
+      return browser.mouse(step.kind, step.x, step.y);
+  }
+}
+function findNode(root, id) {
+  if (root.id === id) return root;
+  for (const c of root.children ?? []) {
+    const hit = findNode(c, id);
+    if (hit) return hit;
+  }
+  return void 0;
+}
+function subtreeText(node) {
+  const parts = [];
+  const walk = (n) => {
+    if (n.name) parts.push(n.name);
+    if (n.value) parts.push(n.value);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(node);
+  return parts.join(" ");
+}
+function extractValue(text, pattern) {
+  const trimmed = text.trim();
+  if (!pattern) return trimmed || null;
+  let re;
+  try {
+    re = new RegExp(pattern);
+  } catch {
+    return null;
+  }
+  const match = re.exec(trimmed);
+  if (!match) return null;
+  return (match[1] ?? match[0]).trim() || null;
 }
 
 // src/cache/action-cache.ts
@@ -9736,6 +10157,18 @@ function toCachedActionValue(action, target) {
         key: action.key,
         ...action.pattern && { pattern: action.pattern }
       };
+    // Phase 9/10 parity actions are non-idempotent, stateful, or unsafe to
+    // replay from a locator-only record (file paths, tab ids, mouse coords,
+    // scripted sequences) — deliberately NOT cached. loop.ts catches this
+    // rejection and simply skips caching that step.
+    case "upload_file":
+    case "drag_and_drop":
+    case "blur":
+    case "mouse":
+    case "open_tab":
+    case "switch_tab":
+    case "close_tab":
+    case "script":
     case "assert_visual":
     case "finish":
       throw new ActionCacheRejectedError(`${action.type} is not stored in the action cache`);
@@ -9823,7 +10256,7 @@ function verifyActionEffect(before, after, action, target) {
     }
   }
   if (action.type === "assert_dom") {
-    const node = findNode(after.ax.root, action.nodeId) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
+    const node = findNode2(after.ax.root, action.nodeId) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
     const hay = node ? nodeText(node) : "";
     if (hay.toLowerCase().includes(action.contains.toLowerCase())) {
       return { ok: true, reason: "DOM assertion condition is satisfied", changes };
@@ -9831,7 +10264,7 @@ function verifyActionEffect(before, after, action, target) {
     return { ok: false, reason: "DOM assertion condition is not satisfied", changes };
   }
   if (action.type === "extract") {
-    const node = findNode(after.ax.root, action.nodeId) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
+    const node = (action.nodeId ? findNode2(after.ax.root, action.nodeId) : void 0) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
     const text = node ? nodeText(node) : "";
     if (!text) return { ok: false, reason: "extract target has no visible text", changes };
     if (action.pattern) {
@@ -9878,6 +10311,22 @@ function actionIntentForKey(action, target) {
       return `extract:${tgt}:key=${textForKey(action.key)}:pattern=${textForKey(action.pattern ?? "")}`;
     case "assert_visual":
       return `assert_visual:${textForKey(action.expectation)}`;
+    case "upload_file":
+      return `upload_file:${tgt}:n=${action.paths.length}`;
+    case "drag_and_drop":
+      return `drag_and_drop:${action.sourceId}->${action.targetId}`;
+    case "blur":
+      return `blur:${tgt}`;
+    case "mouse":
+      return `mouse:${action.kind}:${action.x},${action.y}`;
+    case "open_tab":
+      return `open_tab:${normalizeUrlForActionCache(action.url)}`;
+    case "switch_tab":
+      return `switch_tab:${action.tabId}`;
+    case "close_tab":
+      return `close_tab:${action.tabId}`;
+    case "script":
+      return `script:steps=${action.steps.length}`;
     case "finish":
       return `finish:${action.verdict}:${textForKey(action.reason)}`;
   }
@@ -9963,10 +10412,10 @@ function findByCachedTarget(root, target) {
   walk(root);
   return matches[target.nth ?? 0];
 }
-function findNode(root, id) {
+function findNode2(root, id) {
   if (root.id === id) return root;
   for (const child of root.children ?? []) {
-    const hit = findNode(child, id);
+    const hit = findNode2(child, id);
     if (hit) return hit;
   }
   return void 0;
@@ -10074,13 +10523,13 @@ var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 var DEFAULT_MAX_STEPS = 40;
 var DEFAULT_PER_GOAL_STEPS = 12;
 var MAX_BRAIN_ESCALATIONS = 2;
-var SECRET_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
+var SECRET_RE2 = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
 var SecretNotFoundError = class extends Error {
 };
-function resolveSecrets(text, vault) {
-  if (!SECRET_RE.test(text)) return text;
-  SECRET_RE.lastIndex = 0;
-  return text.replace(SECRET_RE, (_m, name) => {
+function resolveSecrets2(text, vault) {
+  if (!SECRET_RE2.test(text)) return text;
+  SECRET_RE2.lastIndex = 0;
+  return text.replace(SECRET_RE2, (_m, name) => {
     const value = vault?.get(name);
     if (value === void 0) {
       throw new SecretNotFoundError(
@@ -10128,6 +10577,20 @@ function stepKind(action) {
       return "assert";
     case "extract":
       return "extract";
+    case "upload_file":
+      return "upload";
+    case "drag_and_drop":
+      return "drag";
+    case "blur":
+      return "blur";
+    case "mouse":
+      return "mouse";
+    case "open_tab":
+    case "switch_tab":
+    case "close_tab":
+      return "tab";
+    case "script":
+      return "script";
   }
 }
 function humanizeAction(action, target) {
@@ -10158,7 +10621,23 @@ function humanizeAction(action, target) {
     case "assert_dom":
       return `Check ${tgt ?? action.nodeId} contains "${action.contains}"`;
     case "extract":
-      return `Extract ${action.key} from ${tgt ?? action.nodeId}`;
+      return action.prompt ? `Extract ${action.key} (model-assisted: ${action.prompt.slice(0, 60)})` : `Extract ${action.key} from ${tgt ?? action.nodeId ?? "page"}`;
+    case "upload_file":
+      return `Upload ${action.paths.length} file(s) to ${tgt ?? action.nodeId}`;
+    case "drag_and_drop":
+      return `Drag ${tgt ?? action.sourceId} to ${action.targetTarget ? action.targetTarget.name ? `${action.targetTarget.role} "${action.targetTarget.name}"` : action.targetTarget.role : action.targetId}`;
+    case "blur":
+      return `Blur ${tgt ?? action.nodeId}`;
+    case "mouse":
+      return `Mouse ${action.kind} at (${Math.round(action.x)}, ${Math.round(action.y)})`;
+    case "open_tab":
+      return `Open new tab: ${action.url}`;
+    case "switch_tab":
+      return `Switch to tab ${action.tabId}`;
+    case "close_tab":
+      return `Close tab ${action.tabId}`;
+    case "script":
+      return `Run script (${action.steps.length} step(s))`;
   }
 }
 function drainHasPageError(consoleEntries, networkEntries) {
@@ -10192,6 +10671,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const perGoalMaxSteps = opts.perGoalMaxSteps ?? Math.min(maxSteps, DEFAULT_PER_GOAL_STEPS);
   const assertionPolicy = opts.assertionPolicy ?? "single-ladder";
+  const videoAssertions = opts.videoAssertions ?? false;
   const assertionTrace = [];
   const runData = createRunDataState();
   const actionCache = opts.actionCache;
@@ -10516,7 +10996,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       if (outcome === "end") break;
       continue;
     }
-    if (actions[0].type === "finish" || actions[0].type === "assert_visual" || actions[0].type === "assert_dom") {
+    if (actions[0].type === "finish" || actions[0].type === "assert_visual" || actions[0].type === "assert_dom" || actions[0].type === "script") {
       actions = [actions[0]];
     }
     const firstSig = actions.length === 1 ? JSON.stringify(actions[0]) : null;
@@ -10540,7 +11020,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         reason = "cancelled by user";
         break;
       }
-      if (action.type === "click" || action.type === "type" || action.type === "select_option" || action.type === "press_key") {
+      if (action.type === "click" || action.type === "type" || action.type === "select_option" || action.type === "press_key" || action.type === "upload_file" || action.type === "drag_and_drop" || action.type === "blur" || action.type === "mouse" || action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "script") {
         const host = hostOf(await browser.url());
         if (host && !hostAllowed(host, allowedHosts)) {
           readOnlyBlock = host;
@@ -10559,8 +11039,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         network: [],
         ts: Date.now()
       };
-      if ("nodeId" in action) {
-        const t = findNode2(ax.root, action.nodeId);
+      if ("nodeId" in action && typeof action.nodeId === "string") {
+        const t = findNode3(ax.root, action.nodeId);
         if (t) {
           record.target = { role: t.role, ...t.name && { name: t.name } };
           const { count, index } = rankByRoleName(ax.root, t.role, t.name, action.nodeId);
@@ -10572,6 +11052,27 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             } catch {
             }
           }
+        }
+      } else if (action.type === "drag_and_drop") {
+        const src = findNode3(ax.root, action.sourceId);
+        const dst = findNode3(ax.root, action.targetId);
+        if (src) {
+          record.target = { role: src.role, ...src.name && { name: src.name } };
+          const srcRank = rankByRoleName(ax.root, src.role, src.name, action.sourceId);
+          if (srcRank.count > 1 && srcRank.index >= 0) record.target.nth = srcRank.index;
+        }
+        const sourceTarget = src ? { role: src.role, ...src.name && { name: src.name }, ...record.target?.nth !== void 0 && { nth: record.target.nth } } : void 0;
+        let targetTarget;
+        if (dst) {
+          const dstRank = rankByRoleName(ax.root, dst.role, dst.name, action.targetId);
+          targetTarget = {
+            role: dst.role,
+            ...dst.name && { name: dst.name },
+            ...dstRank.count > 1 && dstRank.index >= 0 && { nth: dstRank.index }
+          };
+        }
+        if (sourceTarget || targetTarget) {
+          record.action = { ...action, ...sourceTarget && { sourceTarget }, ...targetTarget && { targetTarget } };
         }
       }
       steps.push(record);
@@ -10587,13 +11088,39 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             if (outcome === "continue") finishReplan = true;
           }
         } else if (action.type === "assert_visual") {
-          const videoRecorder = action.mode === "video" && browser.cdpClient ? await startAssertionClip(browser.cdpClient(), artifacts) : null;
+          const wantsVideo = action.mode === "video";
+          const videoRecorder = wantsVideo && browser.cdpClient ? await startAssertionClip(browser.cdpClient(), artifacts) : null;
           if (videoRecorder) await sleep(500);
           const png = await browser.screenshot();
           record.screenshot = artifacts.saveScreenshot(i, png);
           const videoPath = videoRecorder ? await videoRecorder.stop().catch(() => null) : null;
           if (videoPath) record.video = videoPath;
-          const v = await runVisualAssertion(router, png, action.expectation, i, assertionPolicy);
+          let v = null;
+          if (wantsVideo && videoAssertions && videoPath) {
+            try {
+              if (await router.hasVideoVerdict()) {
+                const videoVerdict = await router.videoVerdict(videoPath, action.expectation, i);
+                v = {
+                  verdict: videoVerdict,
+                  trace: {
+                    step: i,
+                    policy: assertionPolicy,
+                    expectation: action.expectation,
+                    verdict: videoVerdict.verdict,
+                    summary: `[video] ${videoVerdict.summary}`,
+                    disagreement: false
+                  }
+                };
+              }
+            } catch {
+              v = null;
+            }
+          } else if (wantsVideo && !videoAssertions) {
+            record.description += " (video assertion requested but disabled \u2014 screenshot fallback)";
+          }
+          if (!v) {
+            v = await runVisualAssertion(router, png, action.expectation, i, assertionPolicy);
+          }
           assertionTrace.push(v.trace);
           record.visual = v.verdict;
           if (v.verdict.verdict === "fail") {
@@ -10602,8 +11129,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             failingStep = { index: i, action, description: record.description };
           }
         } else if (action.type === "assert_dom") {
-          const t = findNode2(ax.root, action.nodeId);
-          const hay = t ? subtreeText(t) : "";
+          const t = findNode3(ax.root, action.nodeId);
+          const hay = t ? subtreeText2(t) : "";
           if (!t) {
             record.ok = false;
             record.error = `nodeId ${action.nodeId} not in current tree`;
@@ -10613,21 +11140,75 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
           }
         } else if (action.type === "type") {
           const resolvedRun = resolveRunPlaceholders(action.text, runData).text;
-          const resolved = resolveSecrets(resolvedRun, vault);
+          const resolved = resolveSecrets2(resolvedRun, vault);
           await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
         } else if (action.type === "extract") {
-          const t = findNode2(ax.root, action.nodeId);
-          if (!t) {
-            record.ok = false;
-            record.error = `nodeId ${action.nodeId} not in current tree`;
-          } else {
-            const hay = subtreeText(t).trim();
-            const value = extractValue(hay, action.pattern);
-            if (!value) {
+          if (action.prompt) {
+            const source = action.nodeId ? findNode3(ax.root, action.nodeId) : void 0;
+            if (action.nodeId && !source) {
               record.ok = false;
-              record.error = `could not extract ${action.key} from ${action.nodeId}`;
+              record.error = `nodeId ${action.nodeId} not in current tree`;
             } else {
-              recordExtraction(runData, { key: action.key, value, source: "dom", label: record.target?.name });
+              const text = source ? subtreeText2(source).trim() : ax.text;
+              try {
+                const raw = await router.planJson(
+                  buildExtractPrompt({ prompt: action.prompt, key: action.key, text }),
+                  EXTRACT_JSON_SCHEMA,
+                  i
+                );
+                const parsed = ExtractResultSchema.safeParse(raw);
+                const value = parsed.success ? parsed.data.value : null;
+                if (!value) {
+                  record.ok = false;
+                  record.error = `model extraction found no value for ${action.key}`;
+                } else {
+                  recordExtraction(runData, { key: action.key, value, source: "model", label: record.target?.name });
+                }
+              } catch (e) {
+                record.ok = false;
+                record.error = `model extraction failed: ${e instanceof Error ? e.message : String(e)}`;
+              }
+            }
+          } else if (!action.nodeId) {
+            record.ok = false;
+            record.error = "extract without a prompt requires nodeId";
+          } else {
+            const t = findNode3(ax.root, action.nodeId);
+            if (!t) {
+              record.ok = false;
+              record.error = `nodeId ${action.nodeId} not in current tree`;
+            } else {
+              const hay = subtreeText2(t).trim();
+              const value = extractValue2(hay, action.pattern);
+              if (!value) {
+                record.ok = false;
+                record.error = `could not extract ${action.key} from ${action.nodeId}`;
+              } else {
+                recordExtraction(runData, { key: action.key, value, source: "dom", label: record.target?.name });
+              }
+            }
+          }
+        } else if (action.type === "drag_and_drop") {
+          await browser.dragAndDrop(action.sourceId, action.targetId);
+        } else if (action.type === "open_tab") {
+          const tabId = await browser.openTab(action.url);
+          record.target = { role: "tab", name: tabId };
+        } else if (action.type === "switch_tab") {
+          await browser.switchTab(action.tabId);
+          record.target = { role: "tab", name: action.tabId };
+        } else if (action.type === "close_tab") {
+          await browser.closeTab(action.tabId);
+          record.target = { role: "tab", name: action.tabId };
+        } else if (action.type === "script") {
+          const validated = validateScriptSteps(action.steps);
+          if (!validated.ok) {
+            record.ok = false;
+            record.error = `script rejected: ${validated.reason}`;
+          } else {
+            const result = await runScriptSteps(browser, validated.steps, runData, vault);
+            if (!result.ok) {
+              record.ok = false;
+              record.error = `script failed after ${result.executedSteps} step(s): ${result.error}`;
             }
           }
         } else {
@@ -10677,10 +11258,13 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       onStep({
         index: i,
         kind: stepKind(action),
-        text: humanizeAction(action, record.target),
+        // record.action may have been re-shaped post-resolution (e.g.
+        // drag_and_drop gains sourceTarget/targetTarget) — humanize THAT so the
+        // progress line can show the resolved drop-target name.
+        text: humanizeAction(record.action, record.target),
         ok: record.ok
       });
-      if (record.ok && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "press_key" || action.type === "select_option" || action.type === "navigate" || action.type === "reload" || action.type === "go_back")) {
+      if (record.ok && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "press_key" || action.type === "select_option" || action.type === "navigate" || action.type === "reload" || action.type === "go_back" || action.type === "upload_file" || action.type === "drag_and_drop" || action.type === "blur" || action.type === "mouse" || action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "script")) {
         brainEscalations = 0;
       }
       if (verdict !== "uncertain" || action.type === "finish") {
@@ -10691,7 +11275,9 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       if (a < actions.length - 1) {
         if (!record.ok) break;
         if (drainHasPageError(record.console, record.network)) break;
-        if (action.type === "navigate" || action.type === "reload" || action.type === "go_back") break;
+        if (action.type === "navigate" || action.type === "reload" || action.type === "go_back" || action.type === "switch_tab") {
+          break;
+        }
         const nowUrl = await browser.url();
         if (nowUrl !== batchUrl) break;
       }
@@ -10853,10 +11439,10 @@ async function executeWithRetry(browser, action, planTree) {
   try {
     await executeOnce(browser, action);
   } catch (firstErr) {
-    if (action.type !== "click" && action.type !== "type" && action.type !== "hover" && action.type !== "select_option") {
+    if (action.type !== "click" && action.type !== "type" && action.type !== "hover" && action.type !== "select_option" && action.type !== "upload_file" && action.type !== "blur") {
       throw firstErr;
     }
-    const target = findNode2(planTree, action.nodeId);
+    const target = findNode3(planTree, action.nodeId);
     if (!target) throw firstErr;
     const fresh = await browser.axTree();
     const match = findByRoleName(fresh.root, target.role, target.name);
@@ -10882,6 +11468,12 @@ async function executeOnce(browser, action) {
       return browser.reload();
     case "go_back":
       return browser.goBack();
+    case "upload_file":
+      return browser.uploadFile(action.nodeId, action.paths);
+    case "blur":
+      return browser.blur(action.nodeId);
+    case "mouse":
+      return browser.mouse(action.kind, action.x, action.y);
     case "wait":
       return sleep(action.ms);
     default:
@@ -10891,27 +11483,28 @@ async function executeOnce(browser, action) {
 async function executeCacheAction(browser, action, planTree, runData, vault) {
   if (action.type === "type") {
     const resolvedRun = resolveRunPlaceholders(action.text, runData).text;
-    const resolved = resolveSecrets(resolvedRun, vault);
+    const resolved = resolveSecrets2(resolvedRun, vault);
     await executeWithRetry(browser, { ...action, text: resolved }, planTree);
     return;
   }
   if (action.type === "assert_dom") {
-    const t = findNode2(planTree, action.nodeId);
-    const hay = t ? subtreeText(t) : "";
+    const t = findNode3(planTree, action.nodeId);
+    const hay = t ? subtreeText2(t) : "";
     if (!t || !hay.toLowerCase().includes(action.contains.toLowerCase())) {
       throw new Error(`cached DOM assertion failed for ${action.nodeId}`);
     }
     return;
   }
   if (action.type === "extract") {
-    const t = findNode2(planTree, action.nodeId);
+    if (!action.nodeId) throw new Error(`cached extract for ${action.key} has no nodeId (model-assisted extraction is not cacheable)`);
+    const t = findNode3(planTree, action.nodeId);
     if (!t) throw new Error(`cached extract target ${action.nodeId} not in current tree`);
-    const value = extractValue(subtreeText(t).trim(), action.pattern);
+    const value = extractValue2(subtreeText2(t).trim(), action.pattern);
     if (!value) throw new Error(`cached extract ${action.key} produced no value`);
     recordExtraction(runData, { key: action.key, value, source: "dom", label: t.name });
     return;
   }
-  if (action.type === "assert_visual" || action.type === "finish") {
+  if (action.type === "assert_visual" || action.type === "finish" || action.type === "drag_and_drop" || action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "script") {
     throw new Error(`cached ${action.type} is not executable through the action cache`);
   }
   await executeWithRetry(browser, action, planTree);
@@ -10923,10 +11516,10 @@ async function startAssertionClip(cdpClient, artifacts) {
     return null;
   }
 }
-function findNode2(root, id) {
+function findNode3(root, id) {
   if (root.id === id) return root;
   for (const c of root.children ?? []) {
-    const hit = findNode2(c, id);
+    const hit = findNode3(c, id);
     if (hit) return hit;
   }
   return void 0;
@@ -10952,7 +11545,7 @@ function findByRoleName(root, role, name) {
   }
   return void 0;
 }
-function subtreeText(node) {
+function subtreeText2(node) {
   const parts = [];
   const walk = (n) => {
     if (n.name) parts.push(n.name);
@@ -10962,7 +11555,7 @@ function subtreeText(node) {
   walk(node);
   return parts.join(" ");
 }
-function extractValue(text, pattern) {
+function extractValue2(text, pattern) {
   const trimmed = text.trim();
   if (!pattern) return trimmed || null;
   let re;
@@ -11053,6 +11646,10 @@ var AnthropicAdapter = class {
   opts;
   name;
   rung = 2;
+  /** Explicit false (not just "absent") — makes the screenshot-only contract
+   * checkable at the type level, e.g. `adapter.supportsVideo` reads cleanly
+   * instead of needing a cast through the ModelAdapter interface. */
+  supportsVideo = false;
   lastUsage;
   async available() {
     return Boolean(this.opts.apiKey);
@@ -11116,6 +11713,9 @@ var OpenAiCompatibleAdapter = class {
   opts;
   name;
   rung = 2;
+  /** Explicit false — screenshot-only (see file header): no gpt/openrouter/glm
+   * route currently uploads+judges a video clip. */
+  supportsVideo = false;
   lastUsage;
   supportsVision;
   async available() {
@@ -11170,6 +11770,20 @@ var OpenAiCompatibleAdapter = class {
 
 // src/router/adapters/byok-gemini.ts
 init_buffer_shim();
+import fs3 from "fs";
+import path3 from "path";
+function mimeTypeForClip(clipPath) {
+  switch (path3.extname(clipPath).toLowerCase()) {
+    case ".webm":
+      return "video/webm";
+    case ".mp4":
+      return "video/mp4";
+    case ".gif":
+      return "image/gif";
+    default:
+      return "application/octet-stream";
+  }
+}
 var ByokGeminiAdapter = class {
   constructor(opts) {
     this.opts = opts;
@@ -11178,6 +11792,7 @@ var ByokGeminiAdapter = class {
   opts;
   name;
   rung = 2;
+  supportsVideo = true;
   lastUsage;
   async available() {
     return Boolean(this.opts.apiKey);
@@ -11224,6 +11839,115 @@ var ByokGeminiAdapter = class {
     }
     const text = body.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
     return extractJson(text);
+  }
+  /** Upload the clip to the Gemini Files API, wait for it to leave PROCESSING,
+   * then ask for a schema-enforced verdict referencing the uploaded file.
+   * Returns the raw parsed JSON (ModelRouter.videoVerdict() normalizes it into
+   * NanoVerdict, same as generateJson() does for a screenshot verdict). */
+  async videoVerdict(clipPath, expectation) {
+    if (!this.opts.apiKey) throw new Error("byok-gemini: no API key configured");
+    const mimeType = mimeTypeForClip(clipPath);
+    const uploaded = await this.uploadFile(clipPath, mimeType);
+    const file = await this.waitUntilActive(uploaded);
+    this.lastUsage = void 0;
+    const prompt = withSchemaInstruction(videoVerdictPrompt(expectation), VERDICT_JSON_SCHEMA);
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${this.opts.model}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-goog-api-key": this.opts.apiKey
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [{ fileData: { fileUri: file.uri, mimeType: file.mimeType ?? mimeType } }, { text: prompt }]
+            }
+          ],
+          generationConfig: { responseMimeType: "application/json" }
+        }),
+        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 12e4)
+      }
+    );
+    if (!res.ok) {
+      throw new Error(`gemini api (video) ${res.status}: ${(await res.text()).slice(0, 400)}`);
+    }
+    const body = await res.json();
+    const um = body.usageMetadata;
+    if (um) {
+      const usage = {};
+      if (typeof um.promptTokenCount === "number") usage.promptTokens = um.promptTokenCount;
+      if (typeof um.candidatesTokenCount === "number") usage.outputTokens = um.candidatesTokenCount;
+      if (typeof um.totalTokenCount === "number") usage.totalTokens = um.totalTokenCount;
+      if (typeof um.cachedContentTokenCount === "number") usage.cachedTokens = um.cachedContentTokenCount;
+      if (Object.keys(usage).length) this.lastUsage = usage;
+    }
+    const text = body.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
+    return extractJson(text);
+  }
+  /** Multipart upload to the Files API (`X-Goog-Upload-Protocol: multipart`) —
+   * a single request, no resumable-upload session needed for clip-sized files. */
+  async uploadFile(clipPath, mimeType) {
+    const data = fs3.readFileSync(clipPath);
+    const boundary = `qa-video-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const metadata = JSON.stringify({ file: { display_name: path3.basename(clipPath) } });
+    const body = import_buffer.Buffer.concat([
+      import_buffer.Buffer.from(`--${boundary}\r
+Content-Type: application/json; charset=UTF-8\r
+\r
+${metadata}\r
+`),
+      import_buffer.Buffer.from(`--${boundary}\r
+Content-Type: ${mimeType}\r
+\r
+`),
+      data,
+      import_buffer.Buffer.from(`\r
+--${boundary}--`)
+    ]);
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${this.opts.apiKey}`,
+      {
+        method: "POST",
+        headers: {
+          "X-Goog-Upload-Protocol": "multipart",
+          "Content-Type": `multipart/related; boundary=${boundary}`
+        },
+        body,
+        signal: AbortSignal.timeout(this.opts.timeoutMs ?? 12e4)
+      }
+    );
+    if (!res.ok) {
+      throw new Error(`gemini files upload ${res.status}: ${(await res.text()).slice(0, 400)}`);
+    }
+    const json = await res.json();
+    if (!json.file?.uri || !json.file.name) {
+      throw new Error("gemini files upload: response had no file uri/name");
+    }
+    return json.file;
+  }
+  /** Poll GET /v1beta/{name} until the upload leaves PROCESSING. Video files
+   * are not immediately queryable by generateContent — small clips are
+   * typically ACTIVE within a few seconds. Bounded to ~30s so a stuck upload
+   * fails fast rather than hanging the driver step. */
+  async waitUntilActive(file) {
+    let current = file;
+    const deadline = Date.now() + 3e4;
+    while (current.state === "PROCESSING" && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2e3));
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/${current.name}?key=${this.opts.apiKey}`,
+        { signal: AbortSignal.timeout(1e4) }
+      );
+      if (!res.ok) break;
+      current = await res.json();
+    }
+    if (current.state === "FAILED") {
+      throw new Error("gemini files upload: file processing failed");
+    }
+    return current;
   }
 };
 
@@ -11656,6 +12380,67 @@ var LiteExtensionBrowser = class {
     await Promise.race([loaded, sleep2(15e3)]);
     await sleep2(300);
   }
+  async uploadFile(nodeId, paths) {
+    const backendNodeId = this.backendNodeId(nodeId);
+    this.emitCursor({ kind: "caption", caption: "Uploading file(s) to " + this.nodeLabel(nodeId) });
+    await this.c.DOM.setFileInputFiles({ files: paths, backendNodeId });
+    await sleep2(150);
+  }
+  async dragAndDrop(sourceId, targetId) {
+    const src = await this.centerOf(this.backendNodeId(sourceId));
+    const dst = await this.centerOf(this.backendNodeId(targetId));
+    this.emitCursor({ kind: "move", x: src.x, y: src.y, caption: "Dragging " + this.nodeLabel(sourceId) + " to " + this.nodeLabel(targetId) });
+    await this.c.Input.dispatchMouseEvent({ type: "mouseMoved", x: src.x, y: src.y });
+    await this.c.Input.dispatchMouseEvent({ type: "mousePressed", x: src.x, y: src.y, button: "left", clickCount: 1 });
+    const STEPS = 6;
+    for (let i = 1; i <= STEPS; i++) {
+      const x = src.x + (dst.x - src.x) * i / STEPS;
+      const y = src.y + (dst.y - src.y) * i / STEPS;
+      await this.c.Input.dispatchMouseEvent({ type: "mouseMoved", x, y, button: "left" });
+      await sleep2(30);
+    }
+    await this.c.Input.dispatchMouseEvent({ type: "mouseReleased", x: dst.x, y: dst.y, button: "left", clickCount: 1 });
+    this.emitCursor({ kind: "click", x: dst.x, y: dst.y });
+    await sleep2(200);
+  }
+  async blur(nodeId) {
+    const backendNodeId = this.backendNodeId(nodeId);
+    let objectId;
+    try {
+      const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+      objectId = object.objectId;
+      if (!objectId) return;
+      await this.c.Runtime.callFunctionOn({
+        objectId,
+        functionDeclaration: "function () { this.blur(); }",
+        returnByValue: true
+      });
+    } finally {
+      if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {
+      });
+    }
+    await sleep2(100);
+  }
+  async mouse(kind, x, y) {
+    await this.c.Page.bringToFront().catch(() => {
+    });
+    const type = kind === "move" ? "mouseMoved" : kind === "down" ? "mousePressed" : "mouseReleased";
+    await this.c.Input.dispatchMouseEvent({ type, x, y, button: "left", clickCount: 1 });
+    await sleep2(kind === "move" ? 50 : 150);
+  }
+  /** Tab primitives are NOT implemented for the lite extension transport: the
+   * SW deps injected here (LiteBrowserDeps) don't expose chrome.tabs
+   * create/update/remove, only the single tab this instance is attached to.
+   * Throw a clear error instead of a silent no-op. */
+  async openTab(_url) {
+    throw new Error("openTab() is not supported in the lite extension transport (single-tab attach only)");
+  }
+  async switchTab(_idOrIndex) {
+    throw new Error("switchTab() is not supported in the lite extension transport (single-tab attach only)");
+  }
+  async closeTab(_id) {
+    throw new Error("closeTab() is not supported in the lite extension transport (single-tab attach only)");
+  }
   /** Read the field's live `.value` via DOM.resolveNode → Runtime.callFunctionOn. */
   async liveValue(backendNodeId) {
     const { object } = await this.c.DOM.resolveNode({ backendNodeId });
@@ -11858,7 +12643,8 @@ var DEFAULT_SETTINGS = {
   // automatically when Nano can't drive a step (or has no plan-step support yet).
   navigator: { provider: "nano", mode: "ondevice" },
   debugMode: "prompt",
-  debugAgent: "auto"
+  debugAgent: "auto",
+  videoAssertions: false
 };
 var NAVIGATOR_MODELS = {
   "gemini:api": "gemini-3-flash-preview",
@@ -11941,6 +12727,22 @@ function humanizeStep(step) {
       return `checked ${targetPhrase ?? "the page"} contained ${JSON.stringify(a.contains)}`;
     case "extract":
       return `extracted ${a.key} from ${targetPhrase ?? "the page"}`;
+    case "upload_file":
+      return `uploaded ${a.paths.length === 1 ? "a file" : `${a.paths.length} files`} to ${targetPhrase ?? "a field"}`;
+    case "drag_and_drop":
+      return `dragged ${targetPhrase ?? "an element"} onto another`;
+    case "blur":
+      return `moved focus away from ${targetPhrase ?? "a field"}`;
+    case "mouse":
+      return `moved the mouse (${a.kind}) to (${a.x}, ${a.y})`;
+    case "open_tab":
+      return `opened a new tab at ${a.url}`;
+    case "switch_tab":
+      return "switched to another tab";
+    case "close_tab":
+      return "closed a tab";
+    case "script":
+      return `ran a ${a.steps.length}-step scripted sequence`;
     case "wait":
       return `waited ${Math.round(a.ms / 100) / 10}s for the page to settle`;
     case "finish":
@@ -12142,6 +12944,7 @@ function buildLiteConfig(keys, settings) {
     navigator: settings.navigator,
     debugMode: settings.debugMode,
     debugAgent: settings.debugAgent,
+    videoAssertions: settings.videoAssertions ?? false,
     providers,
     mode: "lite"
   };

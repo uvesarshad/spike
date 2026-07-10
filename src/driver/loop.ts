@@ -22,6 +22,9 @@ import type { ModelRouter } from '../router/model-router.js';
 import type { ArtifactStore } from '../report/artifacts.js';
 import { describeAction, type FailingStep, type Report, type StepRecord, type RunVerdict } from '../report/report.js';
 import {
+  buildExtractPrompt,
+  EXTRACT_JSON_SCHEMA,
+  ExtractResultSchema,
   GOAL_PLAN_JSON_SCHEMA,
   GoalPlanSchema,
   PLAN_JSON_SCHEMA,
@@ -32,7 +35,8 @@ import {
 } from './actions.js';
 import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
 import type { Vault } from '../vault/vault.js';
-import { runVisualAssertion, type AssertionPolicy, type AssertionTraceEntry } from '../assertions/policy.js';
+import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
+import { validateScriptSteps, runScriptSteps } from './script-runner/index.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders, RunDataNotFoundError } from '../run-data/index.js';
 import {
   ActionCacheRejectedError,
@@ -103,7 +107,24 @@ function hostAllowed(host: string, allowedHosts: string[]): boolean {
 }
 
 /** Step-progress callback shape — VibeService forwards these verbatim to the UI. */
-export type StepKind = 'plan' | 'click' | 'type' | 'hover' | 'key' | 'select' | 'navigate' | 'assert' | 'extract' | 'wait' | 'finish';
+export type StepKind =
+  | 'plan'
+  | 'click'
+  | 'type'
+  | 'hover'
+  | 'key'
+  | 'select'
+  | 'navigate'
+  | 'assert'
+  | 'extract'
+  | 'wait'
+  | 'finish'
+  | 'upload'
+  | 'drag'
+  | 'blur'
+  | 'mouse'
+  | 'tab'
+  | 'script';
 export interface StepInfo {
   index: number;
   kind: StepKind;
@@ -133,6 +154,11 @@ export interface LoopOptions {
   /** Visual assertion policy. Defaults to the existing cheap single-ladder behavior. */
   assertionPolicy?: AssertionPolicy;
   actionCache?: FileActionCache;
+  /** Phase 8: opt-in real video verdicts for `assert_visual { mode: 'video' }`.
+   * OFF by default (it is costly) — MODELS lane's cfg.videoAssertions flows in
+   * here via the engine. When false, mode:'video' does a safe screenshot
+   * fallback and the step description notes it was disabled. */
+  videoAssertions?: boolean;
 }
 
 /** Map an action to its onStep kind. */
@@ -161,6 +187,20 @@ function stepKind(action: Action): StepKind {
       return 'assert';
     case 'extract':
       return 'extract';
+    case 'upload_file':
+      return 'upload';
+    case 'drag_and_drop':
+      return 'drag';
+    case 'blur':
+      return 'blur';
+    case 'mouse':
+      return 'mouse';
+    case 'open_tab':
+    case 'switch_tab':
+    case 'close_tab':
+      return 'tab';
+    case 'script':
+      return 'script';
   }
 }
 
@@ -194,7 +234,25 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
     case 'assert_dom':
       return `Check ${tgt ?? action.nodeId} contains "${action.contains}"`;
     case 'extract':
-      return `Extract ${action.key} from ${tgt ?? action.nodeId}`;
+      return action.prompt
+        ? `Extract ${action.key} (model-assisted: ${action.prompt.slice(0, 60)})`
+        : `Extract ${action.key} from ${tgt ?? action.nodeId ?? 'page'}`;
+    case 'upload_file':
+      return `Upload ${action.paths.length} file(s) to ${tgt ?? action.nodeId}`;
+    case 'drag_and_drop':
+      return `Drag ${tgt ?? action.sourceId} to ${action.targetTarget ? (action.targetTarget.name ? `${action.targetTarget.role} "${action.targetTarget.name}"` : action.targetTarget.role) : action.targetId}`;
+    case 'blur':
+      return `Blur ${tgt ?? action.nodeId}`;
+    case 'mouse':
+      return `Mouse ${action.kind} at (${Math.round(action.x)}, ${Math.round(action.y)})`;
+    case 'open_tab':
+      return `Open new tab: ${action.url}`;
+    case 'switch_tab':
+      return `Switch to tab ${action.tabId}`;
+    case 'close_tab':
+      return `Close tab ${action.tabId}`;
+    case 'script':
+      return `Run script (${action.steps.length} step(s))`;
   }
 }
 
@@ -246,6 +304,7 @@ export async function runDriverLoop(
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const perGoalMaxSteps = opts.perGoalMaxSteps ?? Math.min(maxSteps, DEFAULT_PER_GOAL_STEPS);
   const assertionPolicy = opts.assertionPolicy ?? 'single-ladder';
+  const videoAssertions = opts.videoAssertions ?? false;
   const assertionTrace: AssertionTraceEntry[] = [];
   const runData = createRunDataState();
   const actionCache = opts.actionCache;
@@ -639,9 +698,14 @@ export async function runDriverLoop(
       if (outcome === 'end') break;
       continue;
     }
-    // finish / asserts must be alone in their batch — if the model bundled
-    // extras, keep only the first action (these never batch)
-    if (actions[0].type === 'finish' || actions[0].type === 'assert_visual' || actions[0].type === 'assert_dom') {
+    // finish / asserts / script must be alone in their batch — if the model
+    // bundled extras, keep only the first action (these never batch)
+    if (
+      actions[0].type === 'finish' ||
+      actions[0].type === 'assert_visual' ||
+      actions[0].type === 'assert_dom' ||
+      actions[0].type === 'script'
+    ) {
       actions = [actions[0]];
     }
 
@@ -686,7 +750,15 @@ export async function runDriverLoop(
         action.type === 'click' ||
         action.type === 'type' ||
         action.type === 'select_option' ||
-        action.type === 'press_key'
+        action.type === 'press_key' ||
+        action.type === 'upload_file' ||
+        action.type === 'drag_and_drop' ||
+        action.type === 'blur' ||
+        action.type === 'mouse' ||
+        action.type === 'open_tab' ||
+        action.type === 'switch_tab' ||
+        action.type === 'close_tab' ||
+        action.type === 'script'
       ) {
         const host = hostOf(await browser.url());
         if (host && !hostAllowed(host, allowedHosts)) {
@@ -709,8 +781,11 @@ export async function runDriverLoop(
         ts: Date.now(),
       };
       // remember WHAT the action touches (role+name) — this is what makes the
-      // run replayable later; nodeIds die with the snapshot
-      if ('nodeId' in action) {
+      // run replayable later; nodeIds die with the snapshot. `extract`'s nodeId
+      // is optional (Phase 15 model-assisted mode may target the whole page) —
+      // the typeof guard both narrows action.nodeId to `string` and correctly
+      // skips a nodeId-less extract.
+      if ('nodeId' in action && typeof action.nodeId === 'string') {
         const t = findNode(ax.root, action.nodeId);
         if (t) {
           record.target = { role: t.role, ...(t.name && { name: t.name }) };
@@ -728,6 +803,35 @@ export async function runDriverLoop(
               /* best-effort: a stamp failure must not fail the step */
             }
           }
+        }
+      } else if (action.type === 'drag_and_drop') {
+        // drag_and_drop has TWO targets (sourceId/targetId) — StepRecord.target
+        // only has one slot, so we record the SOURCE there (matches the
+        // click/hover convention: the node you act FROM) and resolve BOTH as
+        // sourceTarget/targetTarget on the action itself (never model-emitted —
+        // see actions.ts) so the recorder can distill a full replay step
+        // without needing a second target slot on StepRecord.
+        const src = findNode(ax.root, action.sourceId);
+        const dst = findNode(ax.root, action.targetId);
+        if (src) {
+          record.target = { role: src.role, ...(src.name && { name: src.name }) };
+          const srcRank = rankByRoleName(ax.root, src.role, src.name, action.sourceId);
+          if (srcRank.count > 1 && srcRank.index >= 0) record.target.nth = srcRank.index;
+        }
+        const sourceTarget = src
+          ? { role: src.role, ...(src.name && { name: src.name }), ...(record.target?.nth !== undefined && { nth: record.target.nth }) }
+          : undefined;
+        let targetTarget: { role: string; name?: string; nth?: number } | undefined;
+        if (dst) {
+          const dstRank = rankByRoleName(ax.root, dst.role, dst.name, action.targetId);
+          targetTarget = {
+            role: dst.role,
+            ...(dst.name && { name: dst.name }),
+            ...(dstRank.count > 1 && dstRank.index >= 0 && { nth: dstRank.index }),
+          };
+        }
+        if (sourceTarget || targetTarget) {
+          record.action = { ...action, ...(sourceTarget && { sourceTarget }), ...(targetTarget && { targetTarget }) };
         }
       }
       steps.push(record);
@@ -750,8 +854,9 @@ export async function runDriverLoop(
             if (outcome === 'continue') finishReplan = true;
           }
         } else if (action.type === 'assert_visual') {
+          const wantsVideo = action.mode === 'video';
           const videoRecorder =
-            action.mode === 'video' && browser.cdpClient
+            wantsVideo && browser.cdpClient
               ? await startAssertionClip(browser.cdpClient(), artifacts)
               : null;
           if (videoRecorder) await sleep(500);
@@ -759,7 +864,39 @@ export async function runDriverLoop(
           record.screenshot = artifacts.saveScreenshot(i, png);
           const videoPath = videoRecorder ? await videoRecorder.stop().catch(() => null) : null;
           if (videoPath) record.video = videoPath;
-          const v = await runVisualAssertion(router, png, action.expectation, i, assertionPolicy);
+
+          // Phase 8: route a video-mode assertion to a REAL video verdict only
+          // when the (costly, opt-in) videoAssertions flag is on AND a clip was
+          // captured AND the ladder actually has a video-capable adapter. Any
+          // failure here — including the capability probe — falls back to the
+          // existing screenshot verdict path below (graceful degrade, never a
+          // hard failure just because video judging didn't work out).
+          let v: AssertionResult | null = null;
+          if (wantsVideo && videoAssertions && videoPath) {
+            try {
+              if (await router.hasVideoVerdict()) {
+                const videoVerdict = await router.videoVerdict(videoPath, action.expectation, i);
+                v = {
+                  verdict: videoVerdict,
+                  trace: {
+                    step: i,
+                    policy: assertionPolicy,
+                    expectation: action.expectation,
+                    verdict: videoVerdict.verdict,
+                    summary: `[video] ${videoVerdict.summary}`,
+                    disagreement: false,
+                  },
+                };
+              }
+            } catch {
+              v = null; // graceful fallback to the screenshot verdict below
+            }
+          } else if (wantsVideo && !videoAssertions) {
+            record.description += ' (video assertion requested but disabled — screenshot fallback)';
+          }
+          if (!v) {
+            v = await runVisualAssertion(router, png, action.expectation, i, assertionPolicy);
+          }
           assertionTrace.push(v.trace);
           record.visual = v.verdict;
           if (v.verdict.verdict === 'fail') {
@@ -785,18 +922,85 @@ export async function runDriverLoop(
           const resolved = resolveSecrets(resolvedRun, vault);
           await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
         } else if (action.type === 'extract') {
-          const t = findNode(ax.root, action.nodeId);
-          if (!t) {
-            record.ok = false;
-            record.error = `nodeId ${action.nodeId} not in current tree`;
-          } else {
-            const hay = subtreeText(t).trim();
-            const value = extractValue(hay, action.pattern);
-            if (!value) {
+          if (action.prompt) {
+            // Phase 15 — model-assisted extraction: TEXT-only, via the SAME
+            // plan-step-capable adapter the navigator already uses
+            // (router.planJson) — no vision call, no new router surface.
+            // nodeId optional: absent → search the whole serialized page text.
+            const source = action.nodeId ? findNode(ax.root, action.nodeId) : undefined;
+            if (action.nodeId && !source) {
               record.ok = false;
-              record.error = `could not extract ${action.key} from ${action.nodeId}`;
+              record.error = `nodeId ${action.nodeId} not in current tree`;
             } else {
-              recordExtraction(runData, { key: action.key, value, source: 'dom', label: record.target?.name });
+              const text = source ? subtreeText(source).trim() : ax.text;
+              try {
+                const raw = await router.planJson(
+                  buildExtractPrompt({ prompt: action.prompt, key: action.key, text }),
+                  EXTRACT_JSON_SCHEMA,
+                  i,
+                );
+                const parsed = ExtractResultSchema.safeParse(raw);
+                const value = parsed.success ? parsed.data.value : null;
+                if (!value) {
+                  record.ok = false;
+                  record.error = `model extraction found no value for ${action.key}`;
+                } else {
+                  // never persist secrets — extracted values follow the same
+                  // non-secret run-data rules as any other {{run.*}} value.
+                  recordExtraction(runData, { key: action.key, value, source: 'model', label: record.target?.name });
+                }
+              } catch (e) {
+                record.ok = false;
+                record.error = `model extraction failed: ${e instanceof Error ? e.message : String(e)}`;
+              }
+            }
+          } else if (!action.nodeId) {
+            record.ok = false;
+            record.error = 'extract without a prompt requires nodeId';
+          } else {
+            const t = findNode(ax.root, action.nodeId);
+            if (!t) {
+              record.ok = false;
+              record.error = `nodeId ${action.nodeId} not in current tree`;
+            } else {
+              const hay = subtreeText(t).trim();
+              const value = extractValue(hay, action.pattern);
+              if (!value) {
+                record.ok = false;
+                record.error = `could not extract ${action.key} from ${action.nodeId}`;
+              } else {
+                recordExtraction(runData, { key: action.key, value, source: 'dom', label: record.target?.name });
+              }
+            }
+          }
+        } else if (action.type === 'drag_and_drop') {
+          await browser.dragAndDrop(action.sourceId, action.targetId);
+        } else if (action.type === 'open_tab') {
+          const tabId = await browser.openTab(action.url);
+          // reuse the single StepTarget slot to carry the runtime tab id — the
+          // recorder correlates later switch_tab/close_tab steps against it.
+          record.target = { role: 'tab', name: tabId };
+        } else if (action.type === 'switch_tab') {
+          await browser.switchTab(action.tabId);
+          record.target = { role: 'tab', name: action.tabId };
+        } else if (action.type === 'close_tab') {
+          await browser.closeTab(action.tabId);
+          record.target = { role: 'tab', name: action.tabId };
+        } else if (action.type === 'script') {
+          // Phase 10 — secure script runner: VALIDATE before executing anything;
+          // a rejected script never runs a single step. A validation/execution
+          // failure surfaces as a normal failed step — the navigator sees it in
+          // history next call and the existing stuck machinery (repeated action,
+          // blocked, per-goal overflow) escalates to the brain if it persists.
+          const validated = validateScriptSteps(action.steps);
+          if (!validated.ok) {
+            record.ok = false;
+            record.error = `script rejected: ${validated.reason}`;
+          } else {
+            const result = await runScriptSteps(browser, validated.steps, runData, vault);
+            if (!result.ok) {
+              record.ok = false;
+              record.error = `script failed after ${result.executedSteps} step(s): ${result.error}`;
             }
           }
         } else {
@@ -853,7 +1057,10 @@ export async function runDriverLoop(
       onStep({
         index: i,
         kind: stepKind(action),
-        text: humanizeAction(action, record.target),
+        // record.action may have been re-shaped post-resolution (e.g.
+        // drag_and_drop gains sourceTarget/targetTarget) — humanize THAT so the
+        // progress line can show the resolved drop-target name.
+        text: humanizeAction(record.action, record.target),
         ok: record.ok,
       });
 
@@ -868,7 +1075,15 @@ export async function runDriverLoop(
           action.type === 'select_option' ||
           action.type === 'navigate' ||
           action.type === 'reload' ||
-          action.type === 'go_back'
+          action.type === 'go_back' ||
+          action.type === 'upload_file' ||
+          action.type === 'drag_and_drop' ||
+          action.type === 'blur' ||
+          action.type === 'mouse' ||
+          action.type === 'open_tab' ||
+          action.type === 'switch_tab' ||
+          action.type === 'close_tab' ||
+          action.type === 'script'
         )
       ) {
         brainEscalations = 0;
@@ -887,7 +1102,16 @@ export async function runDriverLoop(
       if (a < actions.length - 1) {
         if (!record.ok) break;
         if (drainHasPageError(record.console, record.network)) break;
-        if (action.type === 'navigate' || action.type === 'reload' || action.type === 'go_back') break;
+        // navigate-like actions AND a tab switch end the batch — the a11y tree
+        // captured at batch start (`ax`) no longer describes the active page.
+        if (
+          action.type === 'navigate' ||
+          action.type === 'reload' ||
+          action.type === 'go_back' ||
+          action.type === 'switch_tab'
+        ) {
+          break;
+        }
         const nowUrl = await browser.url();
         if (nowUrl !== batchUrl) break;
       }
@@ -1094,7 +1318,14 @@ async function executeWithRetry(browser: BrowserPort, action: Action, planTree: 
   } catch (firstErr) {
     // DOM may have shifted between snapshot and execution: re-resolve the
     // target by role+name in a FRESH tree and retry once
-    if (action.type !== 'click' && action.type !== 'type' && action.type !== 'hover' && action.type !== 'select_option') {
+    if (
+      action.type !== 'click' &&
+      action.type !== 'type' &&
+      action.type !== 'hover' &&
+      action.type !== 'select_option' &&
+      action.type !== 'upload_file' &&
+      action.type !== 'blur'
+    ) {
       throw firstErr;
     }
     const target = findNode(planTree, action.nodeId);
@@ -1124,6 +1355,12 @@ async function executeOnce(browser: BrowserPort, action: Action): Promise<void> 
       return browser.reload();
     case 'go_back':
       return browser.goBack();
+    case 'upload_file':
+      return browser.uploadFile(action.nodeId, action.paths);
+    case 'blur':
+      return browser.blur(action.nodeId);
+    case 'mouse':
+      return browser.mouse(action.kind, action.x, action.y);
     case 'wait':
       return sleep(action.ms);
     default:
@@ -1153,6 +1390,9 @@ async function executeCacheAction(
     return;
   }
   if (action.type === 'extract') {
+    // model-assisted (prompt-driven) extraction is never cached — only the $0
+    // DOM-text/regex path (which always has a nodeId) reaches this function.
+    if (!action.nodeId) throw new Error(`cached extract for ${action.key} has no nodeId (model-assisted extraction is not cacheable)`);
     const t = findNode(planTree, action.nodeId);
     if (!t) throw new Error(`cached extract target ${action.nodeId} not in current tree`);
     const value = extractValue(subtreeText(t).trim(), action.pattern);
@@ -1160,7 +1400,15 @@ async function executeCacheAction(
     recordExtraction(runData, { key: action.key, value, source: 'dom', label: t.name });
     return;
   }
-  if (action.type === 'assert_visual' || action.type === 'finish') {
+  if (
+    action.type === 'assert_visual' ||
+    action.type === 'finish' ||
+    action.type === 'drag_and_drop' ||
+    action.type === 'open_tab' ||
+    action.type === 'switch_tab' ||
+    action.type === 'close_tab' ||
+    action.type === 'script'
+  ) {
     throw new Error(`cached ${action.type} is not executable through the action cache`);
   }
   await executeWithRetry(browser, action, planTree);

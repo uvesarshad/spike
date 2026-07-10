@@ -70,6 +70,16 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
       <div class="card"><b>Gadget</b> â€” $25.00 <button class="add" data-name="Gadget" data-price="25.00">Add Gadget to cart</button></div>
       <p id="cart-status">Cart: 0 items</p>
       <button id="goto-cart">Go to cart</button>
+      <div class="card">
+        <label>Receipt upload <input id="receipt-upload" type="file"></label>
+        <p id="upload-status">No file uploaded</p>
+      </div>
+      <div class="card">
+        <div id="drag-source" style="display:inline-block;padding:8px 14px;background:#e0e2ff;border-radius:8px;cursor:grab">Drag me</div>
+        <div id="drop-zone" style="display:inline-block;padding:8px 14px;margin-left:12px;background:#f0f0f5;border:1px dashed #aaa;border-radius:8px">Drop zone</div>
+        <p id="drop-status">Nothing dropped yet</p>
+      </div>
+      <button id="open-support-tab">Open support in a new tab</button>
       <script>
       const cart = JSON.parse(sessionStorage.getItem('cart') || '[]');
       const render = () => document.getElementById('cart-status').textContent = 'Cart: ' + cart.length + ' items';
@@ -79,8 +89,40 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
         render();
       }));
       document.getElementById('goto-cart').addEventListener('click', () => location.href = '/cart');
+      document.getElementById('receipt-upload').addEventListener('change', (e) => {
+        const f = e.target.files[0];
+        document.getElementById('upload-status').textContent = f ? ('Uploaded: ' + f.name) : 'No file uploaded';
+      });
+      // Mouse-driven drag (not native HTML5 draggable/dragstart) so it reacts
+      // to BrowserPort.dragAndDrop()'s Input.dispatchMouseEvent press/move/release.
+      (function () {
+        const source = document.getElementById('drag-source');
+        const zone = document.getElementById('drop-zone');
+        let dragging = false;
+        source.addEventListener('mousedown', () => { dragging = true; });
+        document.addEventListener('mousemove', (e) => {
+          if (!dragging) return;
+          const r = zone.getBoundingClientRect();
+          zone.style.background = (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) ? '#d0ffd8' : '#f0f0f5';
+        });
+        document.addEventListener('mouseup', (e) => {
+          if (!dragging) return;
+          dragging = false;
+          const r = zone.getBoundingClientRect();
+          if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+            document.getElementById('drop-status').textContent = 'Dropped: Widget';
+          }
+          zone.style.background = '#f0f0f5';
+        });
+      })();
+      document.getElementById('open-support-tab').addEventListener('click', () => window.open('/support', '_blank'));
       render();
       </script>`,
+    ),
+
+    '/support': page(
+      'Support â€” Acme Shop',
+      `<h2>Support</h2><div class="card"><p id="support-message">Need help? This is a second tab opened from Products.</p></div>`,
     ),
 
     '/cart': page(

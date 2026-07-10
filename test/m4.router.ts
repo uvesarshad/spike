@@ -4,6 +4,7 @@
  * verdict on the spike's bad.png screenshot. */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.js';
@@ -112,6 +113,74 @@ const png = Buffer.from('fakepng');
   );
 }
 
+/* ---------- part 1.5 (Phase 13): config drift — settings migration + env precedence ---------- */
+
+{
+  // isolate LOCALAPPDATA so this never touches the real machine's settings.json
+  const savedLocalAppData = process.env.LOCALAPPDATA;
+  const savedEnv: Record<string, string | undefined> = {};
+  for (const k of ['QA_PLANNER_PROVIDER', 'QA_PLANNER_MODE', 'QA_PLANNER_MODEL', 'QA_NAVIGATOR_PROVIDER', 'QA_NAVIGATOR_MODE', 'QA_NAVIGATOR_MODEL']) {
+    savedEnv[k] = process.env[k];
+    delete process.env[k];
+  }
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-config-drift-'));
+  process.env.LOCALAPPDATA = tmp;
+  const settingsPath = path.join(tmp, 'qa-subagent', 'settings.json');
+
+  try {
+    // a fresh machine (no settings.json at all) resolves the DAEMON's own
+    // defaults (claude:cli brain, nano navigator) — not the shared lite
+    // DEFAULT_SETTINGS.planner (claude:api), which would silently drift.
+    const fresh = loadConfig();
+    check(
+      'no settings.json → daemon default brain is claude:cli (not lite claude:api)',
+      fresh.planner.provider === 'claude' && fresh.planner.mode === 'cli',
+    );
+    check('no settings.json → navigator defaults to nano', fresh.navigator.provider === 'nano');
+
+    // a settings.json still pinned to the dead gemini:cli free tier (and
+    // missing `navigator`, pre-split) migrates to the daemon defaults and the
+    // migration is PERSISTED back to disk.
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ planner: { provider: 'gemini', mode: 'cli', model: 'gemini-3-flash-preview' }, debugMode: 'prompt', debugAgent: 'auto' }),
+    );
+    const migrated = loadConfig();
+    check('dead gemini:cli planner migrates to claude:cli', migrated.planner.provider === 'claude' && migrated.planner.mode === 'cli');
+    check('missing navigator migrates to nano', migrated.navigator.provider === 'nano' && migrated.navigator.mode === 'ondevice');
+    const onDisk = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as { planner?: { provider?: string; mode?: string }; navigator?: { provider?: string } };
+    check('migration is rewritten to disk (planner)', onDisk.planner?.provider === 'claude' && onDisk.planner?.mode === 'cli');
+    check('migration is rewritten to disk (navigator)', onDisk.navigator?.provider === 'nano');
+
+    // env still overrides the (migrated) settings-store value.
+    process.env.QA_PLANNER_PROVIDER = 'glm';
+    process.env.QA_PLANNER_MODE = 'api';
+    const envOverridden = loadConfig();
+    check('env (QA_PLANNER_PROVIDER/MODE) overrides the settings store', envOverridden.planner.provider === 'glm' && envOverridden.planner.mode === 'api');
+    delete process.env.QA_PLANNER_PROVIDER;
+    delete process.env.QA_PLANNER_MODE;
+
+    // a LONE QA_*_MODEL env var partial-merges onto provider/mode rather than
+    // wiping them back to config.ts's raw DEFAULTS.
+    process.env.QA_PLANNER_MODEL = 'claude-opus-9';
+    const partial = loadConfig();
+    check(
+      'a lone QA_PLANNER_MODEL merges onto the migrated provider/mode (no wipe)',
+      partial.planner.provider === 'claude' && partial.planner.mode === 'cli' && partial.planner.model === 'claude-opus-9',
+    );
+    delete process.env.QA_PLANNER_MODEL;
+  } finally {
+    if (savedLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = savedLocalAppData;
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 /* ---------- part 2: live google-cli (skips when absent) ---------- */
 
 const cfg = loadConfig();
@@ -125,14 +194,22 @@ if (await cli.available()) {
   const here = path.dirname(fileURLToPath(import.meta.url));
   const bad = path.join(here, '..', 'spikes', 'cdp-logpoint', 'shots', 'bad.png');
   if (fs.existsSync(bad)) {
-    const t0 = Date.now();
-    const raw = (await cli.generateJson({
-      prompt: verdictPrompt('Does this dashboard page render correctly with no error messages?'),
-      schema: VERDICT_JSON_SCHEMA,
-      imagePng: fs.readFileSync(bad),
-    })) as { verdict?: string };
-    console.log(`live google-cli verdict in ${Date.now() - t0} ms:`, JSON.stringify(raw));
-    check('live google-cli returns fail on bad.png', raw.verdict === 'fail');
+    try {
+      const t0 = Date.now();
+      const raw = (await cli.generateJson({
+        prompt: verdictPrompt('Does this dashboard page render correctly with no error messages?'),
+        schema: VERDICT_JSON_SCHEMA,
+        imagePng: fs.readFileSync(bad),
+      })) as { verdict?: string };
+      console.log(`live google-cli verdict in ${Date.now() - t0} ms:`, JSON.stringify(raw));
+      check('live google-cli returns fail on bad.png', raw.verdict === 'fail');
+    } catch (e) {
+      // "skips gracefully" per the header comment above: the binary being on
+      // PATH doesn't mean it can actually authenticate (e.g. the Gemini CLI
+      // free tier died 2026-06-18 — see CLAUDE.md's gotchas). A live-call
+      // failure here is an environment fact, not a router/adapter regression.
+      console.log(`SKIP  live google-cli (call failed: ${(e as Error).message.slice(0, 200)})`);
+    }
   } else {
     console.log('SKIP  live google-cli (no bad.png — run spike capture-shots)');
   }

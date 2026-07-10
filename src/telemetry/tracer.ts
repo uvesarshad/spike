@@ -41,11 +41,28 @@ export interface TelemetryTracer {
 }
 
 export class NoopTelemetryExporter implements TelemetryExporter {
+  /** Test/observability hook only — never read by product code. Incremented on
+   * every (discarded) export so callers can confirm spans are actually being
+   * constructed and handed to a sink, not skipped, even with no real exporter
+   * configured (Phase 11: "always-on structured spans"). */
+  exportCount = 0;
+
   export(): void {
-    // default sink intentionally does nothing
+    // default sink intentionally discards the span — zero external calls.
+    this.exportCount++;
   }
 }
 
+/** Shared default sink used by `createTelemetryTracer()` when the caller does
+ * not configure a real exporter. Spans are still fully constructed against
+ * this sink (attributes sanitized, start/end timestamps recorded, events
+ * captured) — it just discards them instead of shipping them anywhere. This
+ * keeps tracing always-on structurally (Phase 11) while remaining zero
+ * behavior change and zero external calls by default. */
+export const defaultNoopExporter = new NoopTelemetryExporter();
+
+/** True bypass for perf-sensitive call sites that want to skip span
+ * construction entirely (not the default — see `createTelemetryTracer()`). */
 export class NoopTelemetryTracer implements TelemetryTracer {
   startSpan(): ActiveSpan {
     return NOOP_SPAN;
@@ -56,9 +73,15 @@ export class NoopTelemetryTracer implements TelemetryTracer {
   }
 }
 
+/**
+ * Build a tracer. With no `opts.exporter`, spans are still ALWAYS constructed
+ * (Phase 11) — they just flow into `defaultNoopExporter`, a shared sink that
+ * discards them (zero external calls, zero behavior change for the caller).
+ * Pass a real `TelemetryExporter` (e.g. `OtlpHttpExporter`) to actually ship
+ * spans somewhere; that's the only opt-in step external export needs.
+ */
 export function createTelemetryTracer(opts: TelemetryTracerOptions = {}): TelemetryTracer {
-  if (!opts.exporter) return new NoopTelemetryTracer();
-  return new ExportingTelemetryTracer(opts.exporter, opts.redaction ?? {});
+  return new ExportingTelemetryTracer(opts.exporter ?? defaultNoopExporter, opts.redaction ?? {});
 }
 
 class ExportingTelemetryTracer implements TelemetryTracer {

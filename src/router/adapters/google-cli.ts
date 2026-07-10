@@ -70,7 +70,8 @@ export class GoogleCliAdapter implements ModelAdapter {
   readonly name: string;
   readonly rung = 1 as const;
   lastUsage?: AdapterUsage;
-  private availableCache: boolean | null = null;
+  private availableCache: { value: boolean; at: number } | null = null;
+  private static readonly AVAIL_TTL_MS = 30_000;
   private workDirCache: string | null = null;
   private callSeq = 0;
 
@@ -89,14 +90,21 @@ export class GoogleCliAdapter implements ModelAdapter {
     return this.workDirCache;
   }
 
+  /** Short-TTL cached probe (mirrors ollama.ts's pattern): a `--version` spawn is
+   * slow enough that re-probing on EVERY plan-step call across a long run (hours
+   * of navigator steps per CLAUDE.md) would add real overhead, but caching
+   * forever would also mean a CLI installed/fixed mid-run (e.g. `npm i -g` while
+   * the daemon is running) never gets picked back up. 30s balances both. */
   async available(): Promise<boolean> {
-    if (this.availableCache !== null) return this.availableCache;
-    this.availableCache = await new Promise<boolean>((resolve) => {
+    const cached = this.availableCache;
+    if (cached && Date.now() - cached.at < GoogleCliAdapter.AVAIL_TTL_MS) return cached.value;
+    const value = await new Promise<boolean>((resolve) => {
       const child = spawn(`${this.opts.bin} --version`, { shell: true, stdio: 'ignore' });
       child.once('error', () => resolve(false));
       child.once('exit', (code) => resolve(code === 0));
     });
-    return this.availableCache;
+    this.availableCache = { value, at: Date.now() };
+    return value;
   }
 
   supports(_cap: Capability): boolean {

@@ -41,6 +41,22 @@ export function humanizeStep(step: StepRecord): string {
       return `checked ${targetPhrase ?? 'the page'} contained ${JSON.stringify(a.contains)}`;
     case 'extract':
       return `extracted ${a.key} from ${targetPhrase ?? 'the page'}`;
+    case 'upload_file':
+      return `uploaded ${a.paths.length === 1 ? 'a file' : `${a.paths.length} files`} to ${targetPhrase ?? 'a field'}`;
+    case 'drag_and_drop':
+      return `dragged ${targetPhrase ?? 'an element'} onto another`;
+    case 'blur':
+      return `moved focus away from ${targetPhrase ?? 'a field'}`;
+    case 'mouse':
+      return `moved the mouse (${a.kind}) to (${a.x}, ${a.y})`;
+    case 'open_tab':
+      return `opened a new tab at ${a.url}`;
+    case 'switch_tab':
+      return 'switched to another tab';
+    case 'close_tab':
+      return 'closed a tab';
+    case 'script':
+      return `ran a ${a.steps.length}-step scripted sequence`;
     case 'wait':
       return `waited ${Math.round(a.ms / 100) / 10}s for the page to settle`;
     case 'finish':

@@ -3,7 +3,7 @@
 > Scope: BrowserPort interface and all implementations — CdpBrowser, ExtensionBrowser, bridge, and Nano ports.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-07-07
+> Last updated: 2026-07-09
 
 ## Overview
 
@@ -25,6 +25,13 @@ Key methods on BrowserPort:
 - selectOption(nodeId, value) — set a native select/combobox value and dispatch input/change events.
 - reload() — reload the active page and wait for it to settle.
 - goBack() — navigate back in the active tab history.
+- uploadFile(nodeId, paths) — set files on a native `<input type="file">` (CDP: `DOM.setFileInputFiles`). Paths are whatever the caller resolved (recorded scripts keep them relative — see recorder.md); never invents or embeds secrets.
+- dragAndDrop(sourceId, targetId) — press on sourceId's center, glide to targetId's center over several intermediate `mouseMoved` events, release (CDP: `Input.dispatchMouseEvent` press→move×N→release). Drives MOUSE-EVENT-based drag UI (sortable lists, sliders, custom drop zones) — it does NOT fire native HTML5 `draggable`/`dragstart`/`drop` events, which need an OS-level drag gesture CDP mouse events can't fake.
+- blur(nodeId) — remove focus from the node (fires blur/change handlers some forms rely on for validation).
+- mouse(kind, x, y) — a single discrete mouse event ('move'/'down'/'up') at PAGE coordinates (not a nodeId) — composes gestures click()/hover()/dragAndDrop() don't cover.
+- openTab(url) — open a new tab/target WITHOUT switching the active session to it; returns an opaque id usable with switchTab()/closeTab().
+- switchTab(idOrIndex) — switch the active session to a previously-opened tab. Accepts either the literal id openTab() returned (what the live navigator references, learned from step history text) OR CdpBrowser's numeric replay convention: 0 = the tab launch() started with, N (>=1) = the Nth tab openTab() created, in creation order — this is what a recorded script replays with (see recorder.md), since a raw runtime CDP target id would not exist on a later replay run. Ends the current action batch (mirrors navigate) since the a11y tree captured at batch start no longer describes the active page.
+- closeTab(id) — close a tab previously opened with openTab(). Throws if `id` is the currently active tab (switchTab() away first).
 - screenshot() — capture a PNG buffer via Page.captureScreenshot.
 - axTree() — return an AxSnapshot: { text: string, root: AxNode }. text is the compact pruned tree; root is the structured tree for node lookup.
 - drainConsole() — return and clear buffered ConsoleEntry[] since last drain.
@@ -41,11 +48,15 @@ The real browser implementation. Uses chrome-remote-interface to connect to Chro
 
 AGENT NOTE: CdpBrowser runs a HEADED Chrome (headless: false). This is required for Gemini Nano: the Prompt API refuses to load in headless mode. Never change this to headless without verifying Nano still works.
 
+AGENT NOTE (tabs): CdpBrowser tracks tabs it did not start with in `otherTabs` (a `Map<targetId, {client, capture}>`). Console/network `attachCapture()` runs EXACTLY ONCE per client — in `launch()` for the main tab, in `openTab()` for a new one — and travels with the client when `switchTab()` moves it in/out of `otherTabs`. Re-attaching on every `switchTab()` call was tried and reverted: it registers a SECOND set of `Runtime.consoleAPICalled`/`Network.*` listeners on the same client, which can surface stale/duplicate console entries later (observed via a `Debugger.setBreakpointByUrl` logpoint's conditional-log messages resurfacing after a `goBack()`-triggered back/forward-cache restore). `mainTabId` (set once in `launch()`) and `openOrder` (creation order) back `switchTab()`'s numeric convention: 0 = the original tab, N (>=1) = the Nth `openTab()` call — this is what replay uses (see recorder.md) since raw CDP target ids don't survive across runs.
+
 ## ExtensionBrowser (src/ports/extension-browser.ts)
 
-The vibe-mode browser implementation. Delegates each BrowserPort method to the extension's service worker (sw.js) via JSON-RPC messages over the BridgeServer WebSocket. The CDP operations are proxied by sw.js through chrome.debugger. Driver-required actions stay in parity with CdpBrowser: navigate, click, hover, type, keypress, select, reload, goBack, screenshots, a11y snapshots, console, and network capture. Some CDP domains that CdpBrowser uses directly (e.g., Page.startScreencast) are not exposed through chrome.debugger — these are the known extension-mode limitations documented in TODO.md.
+The vibe-mode browser implementation. Delegates each BrowserPort method to the extension's service worker (sw.js) via JSON-RPC messages over the BridgeServer WebSocket. The CDP operations are proxied by sw.js through chrome.debugger. Driver-required actions stay in parity with CdpBrowser: navigate, click, hover, type, keypress, select, reload, goBack, upload/drag/blur/mouse, screenshots, a11y snapshots, console, and network capture. Some CDP domains that CdpBrowser uses directly (e.g., Page.startScreencast) are not exposed through chrome.debugger — these are the known extension-mode limitations documented in TODO.md.
 
-AGENT AVOID: Do not implement new CdpBrowser features that depend on CDP domains not available in chrome.debugger without also providing an ExtensionBrowser fallback or no-op. The two implementations must stay in functional parity for all capabilities the driver loop requires.
+AGENT NOTE (tabs, extension transports): `openTab`/`switchTab`/`closeTab` are the ONE deliberate gap in ExtensionBrowser/LiteExtensionBrowser parity — both throw a clear "not supported in extension transport" error instead of a silent no-op. `chrome.tabs.create`/`update`/`remove` need a dedicated bridge RPC (`ext.openTab` etc.) the service worker does not expose yet; `chrome.debugger` has no tab-lifecycle surface to proxy. `uploadFile`/`dragAndDrop`/`blur`/`mouse` ARE fully implemented for both (same `DOM.setFileInputFiles`/`Input.dispatchMouseEvent` CDP calls proxied through the shim) — only the three tab primitives are transport-limited.
+
+AGENT AVOID: Do not implement new CdpBrowser features that depend on CDP domains not available in chrome.debugger without also providing an ExtensionBrowser fallback or a documented "not supported" error (see the tabs note above for the current example). The two implementations must stay in functional parity for every OTHER capability the driver loop requires.
 
 ## Bridge (src/bridge/bridge-server.ts and src/bridge/cdp-shim.ts)
 

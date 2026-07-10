@@ -181,6 +181,17 @@
               <span id="setAutoFixNoteText">Auto-fix needs the desktop app (daemon) running. Install it, then turn this on.</span>
             </div>
 
+            <label class="settings-toggle-row" for="setVideoAssert">
+              <span class="settings-toggle-copy">
+                <span class="settings-toggle-label">Video assertions</span>
+                <span class="settings-toggle-sub">Off: judge a screenshot (fast, $0-first). On: record a short clip for "looks right" checks and send it to a paid vision model — slower and costs money. Use for transient UI (toasts, animations).</span>
+              </span>
+              <span class="switch">
+                <input id="setVideoAssert" class="switch-input" type="checkbox" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </span>
+            </label>
+
             <div id="connectApp" class="connect-app" hidden>
               <div class="connect-app-title">Connect the desktop app</div>
               <div class="connect-app-sub">Run this once in a terminal — the daemon then auto-starts on every login and this panel connects on its own.</div>

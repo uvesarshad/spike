@@ -242,6 +242,72 @@ export class LiteExtensionBrowser implements BrowserPort {
     await sleep(300);
   }
 
+  async uploadFile(nodeId: string, paths: string[]): Promise<void> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    this.emitCursor({ kind: 'caption', caption: 'Uploading file(s) to ' + this.nodeLabel(nodeId) });
+    await this.c.DOM.setFileInputFiles({ files: paths, backendNodeId });
+    await sleep(150);
+  }
+
+  async dragAndDrop(sourceId: string, targetId: string): Promise<void> {
+    const src = await this.centerOf(this.backendNodeId(sourceId));
+    const dst = await this.centerOf(this.backendNodeId(targetId));
+    this.emitCursor({ kind: 'move', x: src.x, y: src.y, caption: 'Dragging ' + this.nodeLabel(sourceId) + ' to ' + this.nodeLabel(targetId) });
+    await this.c.Input.dispatchMouseEvent({ type: 'mouseMoved', x: src.x, y: src.y });
+    await this.c.Input.dispatchMouseEvent({ type: 'mousePressed', x: src.x, y: src.y, button: 'left', clickCount: 1 });
+    const STEPS = 6;
+    for (let i = 1; i <= STEPS; i++) {
+      const x = src.x + ((dst.x - src.x) * i) / STEPS;
+      const y = src.y + ((dst.y - src.y) * i) / STEPS;
+      await this.c.Input.dispatchMouseEvent({ type: 'mouseMoved', x, y, button: 'left' });
+      await sleep(30);
+    }
+    await this.c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: dst.x, y: dst.y, button: 'left', clickCount: 1 });
+    this.emitCursor({ kind: 'click', x: dst.x, y: dst.y });
+    await sleep(200);
+  }
+
+  async blur(nodeId: string): Promise<void> {
+    const backendNodeId = this.backendNodeId(nodeId);
+    let objectId: string | undefined;
+    try {
+      const { object } = await this.c.DOM.resolveNode({ backendNodeId });
+      objectId = object.objectId;
+      if (!objectId) return;
+      await this.c.Runtime.callFunctionOn({
+        objectId,
+        functionDeclaration: 'function () { this.blur(); }',
+        returnByValue: true,
+      });
+    } finally {
+      if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {});
+    }
+    await sleep(100);
+  }
+
+  async mouse(kind: 'move' | 'down' | 'up', x: number, y: number): Promise<void> {
+    await this.c.Page.bringToFront().catch(() => {});
+    const type = kind === 'move' ? 'mouseMoved' : kind === 'down' ? 'mousePressed' : 'mouseReleased';
+    await this.c.Input.dispatchMouseEvent({ type, x, y, button: 'left', clickCount: 1 });
+    await sleep(kind === 'move' ? 50 : 150);
+  }
+
+  /** Tab primitives are NOT implemented for the lite extension transport: the
+   * SW deps injected here (LiteBrowserDeps) don't expose chrome.tabs
+   * create/update/remove, only the single tab this instance is attached to.
+   * Throw a clear error instead of a silent no-op. */
+  async openTab(_url: string): Promise<string> {
+    throw new Error('openTab() is not supported in the lite extension transport (single-tab attach only)');
+  }
+
+  async switchTab(_idOrIndex: string | number): Promise<void> {
+    throw new Error('switchTab() is not supported in the lite extension transport (single-tab attach only)');
+  }
+
+  async closeTab(_id: string): Promise<void> {
+    throw new Error('closeTab() is not supported in the lite extension transport (single-tab attach only)');
+  }
+
   /** Read the field's live `.value` via DOM.resolveNode → Runtime.callFunctionOn. */
   private async liveValue(backendNodeId: number): Promise<string | undefined> {
     const { object } = await this.c.DOM.resolveNode({ backendNodeId });
