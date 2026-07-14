@@ -76,6 +76,21 @@ export interface ReportTokens {
   brainTokens: number;
 }
 
+/** A5a (P1) safety: compact spend summary for the done/slim payload — lets the
+ * panel render a "N free · M paid · ~$X spent" meter without walking
+ * model_trace itself. freeCalls = rung-0 (on-device Nano, $0) calls; paidCalls
+ * = every other model call (rung 1+ cloud/CLI, whether or not it reported
+ * token usage). estimatedUsd is a PROXY, not real billing — see driver/loop.ts's
+ * estimatedPaidSpendUsd for the approximation it makes. capUsd mirrors the
+ * run's configured LoopOptions.spendCapUsd (absent when no cap was set). */
+export interface SpendSummary {
+  freeCalls: number;
+  paidCalls: number;
+  totalTokens: number;
+  estimatedUsd: number;
+  capUsd?: number;
+}
+
 export interface ActionCacheStats {
   enabled: boolean;
   hits: number;
@@ -107,16 +122,21 @@ export interface Report {
   /** Real token accounting (always set by the AI driver loop; absent on bare
    * replay reports, which have no planner trace). */
   tokens?: ReportTokens;
+  /** A5a (P1) safety: compact spend summary (always set by the AI driver loop;
+   * absent on bare replay reports, same convention as `tokens`). */
+  spendSummary?: SpendSummary;
 }
 
-/** The 5-field verdict an MCP/CLI caller pays for. */
-export function slimReport(r: Report): Pick<Report, 'verdict' | 'failing_step' | 'console_error' | 'evidence_paths' | 'reason'> {
+/** The verdict an MCP/CLI caller pays for, plus (A5a) a compact spend summary
+ * so the panel can render a meter without re-deriving it from model_trace. */
+export function slimReport(r: Report): Pick<Report, 'verdict' | 'failing_step' | 'console_error' | 'evidence_paths' | 'reason' | 'spendSummary'> {
   return {
     verdict: r.verdict,
     failing_step: r.failing_step,
     console_error: r.console_error,
     evidence_paths: r.evidence_paths,
     reason: r.reason,
+    spendSummary: r.spendSummary,
   };
 }
 

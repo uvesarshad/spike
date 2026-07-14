@@ -9,6 +9,14 @@
  *   ext→daemon response: { id, result? | error? }
  *   ext→daemon event   : { event, params }   (forwarded chrome.debugger events + lifecycle)
  *
+ * PROTOCOL VERSION HANDSHAKE (A4): our `hello` carries `protocolVersion`
+ * (this build's wire-protocol version); a daemon that understands the
+ * handshake replies with `{event:'bridge.hello', params:{protocolVersion}}`.
+ * If that ack never arrives (pre-handshake daemon) or reports a version below
+ * MIN_DAEMON_PROTOCOL_VERSION, we treat the daemon as outdated — connected at
+ * the socket level, but NOT reported to the panel as healthy — see
+ * handleDaemonHello/bridge-status below and src/bridge/bridge-server.ts.
+ *
  * MV3 realities handled here:
  *   - no window/DOM: use self/globalThis; WebSocket is available in the SW.
  *   - the SW can be torn down at any time: reconnect loop with backoff, and a
@@ -57,9 +65,26 @@ try {
 const DEBUGGER_VERSION = '1.3';
 const NAVIGATE_TIMEOUT_MS = 30_000;
 
+// Bridge wire-protocol version this extension build speaks — bump in lockstep
+// with PROTOCOL_VERSION in src/bridge/bridge-server.ts whenever the daemon↔
+// extension wire protocol changes in a way both sides must agree on.
+const PROTOCOL_VERSION = 1;
+// Lowest daemon protocol version this build can drive reliably. A daemon that
+// never acks the handshake (pre-handshake code) or acks below this is treated
+// as outdated: we'd rather tell the user to update than show a green dot over
+// a connection that silently can't run tests correctly.
+const MIN_DAEMON_PROTOCOL_VERSION = 1;
+// How long to wait for the daemon's `bridge.hello` ack before assuming it
+// predates the handshake (localhost round-trip is normally near-instant).
+const HANDSHAKE_TIMEOUT_MS = 4000;
+
 let ws = null;
 let reconnectDelay = 500; // backoff, capped below
 let connecting = false;
+// Daemon protocol-version handshake state — reset on every fresh connection.
+let daemonProtocolVersion = null; // number once acked, else null (unknown/pending)
+let daemonCompatible = null;      // true | false | null (null = handshake still pending)
+let handshakeTimer = null;
 
 /** tabIds we have an attached chrome.debugger session for. */
 const attached = new Set();
@@ -183,8 +208,43 @@ function sendOverlayEnd(tabId) {
   }
 }
 
+/** True once the socket is open AND the protocol handshake didn't come back
+ * incompatible. Gates every daemon-only UI affordance (auto-fix, clips) — a
+ * daemon that's merely socket-connected but too old to speak our protocol
+ * must not be treated as usable. */
+function bridgeHealthy() {
+  return daemonConnected() && daemonCompatible !== false;
+}
+
+/** Build the { kind:'bridge-status', ... } payload the panel renders. */
+function bridgeStatusPayload() {
+  const connected = daemonConnected();
+  return {
+    kind: 'bridge-status',
+    connected,
+    protocolVersion: connected ? daemonProtocolVersion : null,
+    compatible: connected ? daemonCompatible : null,
+  };
+}
+
+/** Handle the daemon's { event:'bridge.hello', params:{protocolVersion} } ack
+ * (see src/bridge/bridge-server.ts). Resolves the handshake and pushes the
+ * result to every open panel immediately, rather than waiting for the next
+ * 3s bridge-status poll. */
+function handleDaemonHello(params) {
+  if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null; }
+  const v = params && typeof params.protocolVersion === 'number' ? params.protocolVersion : null;
+  daemonProtocolVersion = v;
+  daemonCompatible = v !== null && v >= MIN_DAEMON_PROTOCOL_VERSION;
+  broadcastToPanels(bridgeStatusPayload());
+}
+
 /** Dispatch a daemon event frame { event, params }. */
 function handleBridgeEvent(event, params) {
+  if (event === 'bridge.hello') {
+    handleDaemonHello(params);
+    return;
+  }
   if (event === 'vibe.cursor') {
     routeCursorToOverlay(params);
   }
@@ -233,6 +293,9 @@ async function getSettings() {
     debugMode: s.debugMode || DEFAULT_SETTINGS.debugMode,
     debugAgent: s.debugAgent || DEFAULT_SETTINGS.debugAgent,
     videoAssertions: Boolean(s.videoAssertions ?? DEFAULT_SETTINGS.videoAssertions),
+    // safety guardrails: read-only defaults ON (first runs never mutate); spend cap OFF (undefined) unless set.
+    readOnly: Boolean(s.readOnly ?? DEFAULT_SETTINGS.readOnly),
+    spendCapUsd: typeof s.spendCapUsd === 'number' && s.spendCapUsd > 0 ? s.spendCapUsd : undefined,
   };
 }
 async function liteSetKey(provider, key) {
@@ -259,6 +322,13 @@ async function liteSetSettings(patch) {
     debugAgent: patch.debugAgent || cur.debugAgent,
     videoAssertions:
       patch.videoAssertions !== undefined ? Boolean(patch.videoAssertions) : Boolean(cur.videoAssertions),
+    readOnly:
+      patch.readOnly !== undefined ? Boolean(patch.readOnly) : Boolean(cur.readOnly),
+    // number > 0 sets a cap; 0 / null / non-number clears it (OFF).
+    spendCapUsd:
+      patch.spendCapUsd !== undefined
+        ? (typeof patch.spendCapUsd === 'number' && patch.spendCapUsd > 0 ? patch.spendCapUsd : undefined)
+        : cur.spendCapUsd,
     planner: { ...cur.planner, ...(patch.planner || {}) },        // BRAIN role
     navigator: { ...cur.navigator, ...(patch.navigator || {}) },  // NAVIGATOR role
   };
@@ -337,6 +407,8 @@ async function runLiteFromPanel(port, msg) {
       navigator: settings.navigator,   // NAVIGATOR role
       browserDeps: makeLiteBrowserDeps(tabId),
       nanoDeps: liteNanoDeps,
+      readOnly: settings.readOnly,        // safety: skip mutating actions when ON (default)
+      spendCapUsd: settings.spendCapUsd,  // safety: abort if estimated paid spend exceeds this
       onProgress: (line) => broadcastToPanels({ kind: 'progress', line }),
       onStep: (info) => broadcastToPanels({ kind: 'step', ...info }),
       signal: liteAbort.signal,
@@ -361,7 +433,10 @@ chrome.runtime.onConnect.addListener((port) => {
     try {
       switch (msg.kind) {
         case 'run': {
-          if (!daemonConnected()) { await runLiteFromPanel(port, msg); break; }
+          // A4: an outdated (protocol-incompatible) daemon is treated like no
+          // daemon at all — fall back to lite mode (BYOK, in-SW) rather than
+          // forwarding to a pro-mode path that might silently misbehave.
+          if (!bridgeHealthy()) { await runLiteFromPanel(port, msg); break; }
           try {
             // The panel targets the user's CURRENT tab (tabId/url from
             // chrome.tabs.query). Remember it so the overlay end signal lands there.
@@ -452,7 +527,7 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'bridge-status': {
-          port.postMessage({ kind: 'bridge-status', connected: !!(ws && ws.readyState === WebSocket.OPEN) });
+          port.postMessage(bridgeStatusPayload());
           break;
         }
         case 'config-get': {
@@ -1034,9 +1109,24 @@ function connect() {
     connecting = false;
     reconnectDelay = 500;
     log('connected to bridge', socket.url);
+    // Fresh connection: the handshake starts over. Until the daemon acks (or
+    // the timeout below fires), compatibility is unknown — bridge-status
+    // reports it as connected-but-unresolved rather than claiming "healthy".
+    daemonProtocolVersion = null;
+    daemonCompatible = null;
+    if (handshakeTimer) clearTimeout(handshakeTimer);
+    handshakeTimer = setTimeout(() => {
+      handshakeTimer = null;
+      if (daemonProtocolVersion !== null) return; // already acked
+      // No ack within the window: a daemon that predates the handshake (or a
+      // very slow one). Don't show "connected & healthy" without proof.
+      daemonCompatible = false;
+      broadcastToPanels(bridgeStatusPayload());
+    }, HANDSHAKE_TIMEOUT_MS);
     // `caps` advertises this SW's supported methods so a bridge can disambiguate
     // when more than one SW (e.g. a stale install in another Chrome) dials in.
-    emit('hello', { extension: chrome.runtime.id, caps: ['ext.attachTab', 'keepTab'] });
+    // `protocolVersion` is this build's wire-protocol version (A4 handshake).
+    emit('hello', { extension: chrome.runtime.id, caps: ['ext.attachTab', 'keepTab'], protocolVersion: PROTOCOL_VERSION });
   });
 
   socket.addEventListener('message', (ev) => {
@@ -1067,6 +1157,9 @@ function connect() {
   socket.addEventListener('close', () => {
     connecting = false;
     if (ws === socket) ws = null;
+    if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null; }
+    daemonProtocolVersion = null;
+    daemonCompatible = null;
     scheduleReconnect();
   });
 

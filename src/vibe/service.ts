@@ -194,6 +194,11 @@ export class VibeService {
         debugMode: settings.debugMode,
         debugAgent: settings.debugAgent,
         videoAssertions: settings.videoAssertions ?? false,
+        // A5b/A5a (P1 safety): dry-run default + optional spend cap. readOnly
+        // mirrors DEFAULT_SETTINGS' safe-by-default true; spendCapUsd stays
+        // undefined (OFF) unless the user set one.
+        readOnly: settings.readOnly ?? true,
+        spendCapUsd: settings.spendCapUsd,
         providers,
       };
     });
@@ -227,6 +232,14 @@ export class VibeService {
       if (p.debugMode !== undefined) patch.debugMode = p.debugMode;
       if (p.debugAgent !== undefined) patch.debugAgent = p.debugAgent;
       if (p.videoAssertions !== undefined) patch.videoAssertions = Boolean(p.videoAssertions);
+      // A5b: dry-run toggle — plain boolean coercion, same as videoAssertions.
+      if (p.readOnly !== undefined) patch.readOnly = Boolean(p.readOnly);
+      // A5a: optional spend cap — 0/negative/non-finite clears it (explicit OFF),
+      // matching QA_SPEND_CAP_USD's env parsing in config.ts.
+      if (p.spendCapUsd !== undefined) {
+        const n = Number(p.spendCapUsd);
+        patch.spendCapUsd = Number.isFinite(n) && n > 0 ? n : undefined;
+      }
       return new SettingsStore().write(patch);
     });
 

@@ -25,7 +25,10 @@
  *                 { kind:'clip-error', message }
  *                 { kind:'status', busy }
  *                 { kind:'nano', availability }
- *                 { kind:'bridge-status', connected }
+ *                 { kind:'bridge-status', connected, protocolVersion, compatible }
+ *                   (A4: protocolVersion/compatible are null until the daemon
+ *                   acks the handshake or a timeout resolves it; compatible
+ *                   false means "connected but too old — show update UI")
  *                 { kind:'progress', line }       (relayed vibe.progress)
  *                 { kind:'done', ...verdict }     (relayed vibe.done)
  *                 { kind:'error', message }       (relayed vibe.error)
@@ -59,6 +62,7 @@ const STEP_ICON = {
 // ---- elements --------------------------------------------------------------
 const $ = (id) => document.getElementById(id);
 const bridgeDot = $('bridgeDot');
+const bridgeUpdateNote = $('bridgeUpdateNote');
 const nanoLine = $('nanoLine');
 const taskInput = $('task');
 const runBtn = $('runBtn');
@@ -124,9 +128,13 @@ const setDebugAgentRow = $('setDebugAgentRow');
 const setDebugAgent = $('setDebugAgent');
 const setAutoFix = $('setAutoFix');
 const setVideoAssert = $('setVideoAssert');
+const setReadOnly = $('setReadOnly');
+const setSpendCap = $('setSpendCap');
 const setAutoFixNote = $('setAutoFixNote');
 const setAutoFixNoteText = $('setAutoFixNoteText');
 const connectApp = $('connectApp');
+const connectAppTitle = $('connectAppTitle');
+const connectAppSub = $('connectAppSub');
 const connectCmd = $('connectCmd');
 const connectCopy = $('connectCopy');
 const connectNpmToggle = $('connectNpmToggle');
@@ -152,6 +160,20 @@ const INSTALL_CMDS_NPM = {
 let connectOs = 'win';
 // which command set the card is showing: the Raw-script one-liner or the npm form
 let connectUseNpm = false;
+
+// Same one-liner re-runs cleanly to update an existing install (A4: the panel
+// swaps to this copy when the daemon IS connected but the protocol handshake
+// says it's too old — "install" copy would be misleading in that state).
+const CONNECT_APP_COPY = {
+  install: {
+    title: 'Connect the desktop app',
+    sub: 'Run this once in a terminal — the daemon then auto-starts on every login and this panel connects on its own.',
+  },
+  update: {
+    title: 'Update the desktop app',
+    sub: "Your desktop app is out of date and can't run tests reliably with this version of the extension. Re-run the installer below to update it.",
+  },
+};
 function connectCmds() { return connectUseNpm ? INSTALL_CMDS_NPM : INSTALL_CMDS; }
 
 // settings accordions: head button ↔ body element (+ optional summary chip)
@@ -210,9 +232,20 @@ if (themeBtn) {
 let busy = false;
 let fixing = false;
 let fetchingClip = false;
-// whether the desktop app (daemon) is currently connected — gates auto-fix and
-// the download-clip button, both of which are daemon-only capabilities.
+// whether the desktop app (daemon) is currently connected at the socket level.
 let bridgeConnected = false;
+// A4 protocol handshake result: true | false | null (null = not yet resolved).
+// false means the socket is up but the daemon is too old to speak our
+// protocol — see setBridge() below and sw.js's bridge.hello handling.
+let bridgeCompatible = null;
+let bridgeProtocolVersion = null;
+
+/** Gates auto-fix and the download-clip button, both daemon-only capabilities:
+ * connected AND not flagged incompatible. A daemon we can't confirm as
+ * healthy must not be treated as usable, even though its socket is open. */
+function bridgeHealthy() {
+  return bridgeConnected && bridgeCompatible !== false;
+}
 
 // settings: the last config returned by the daemon, and the current debug mode
 // (gates the auto-fix button — only shown when the user opted into auto-fix).
@@ -280,7 +313,7 @@ function onPortMessage(msg) {
 
   switch (msg.kind) {
     case 'bridge-status':
-      setBridge(!!msg.connected);
+      setBridge(msg);
       break;
     case 'nano':
       setNano(msg.availability);
@@ -343,11 +376,25 @@ function onPortMessage(msg) {
 }
 
 // ---- header state ----------------------------------------------------------
-function setBridge(connected) {
-  bridgeConnected = !!connected;
-  bridgeDot.classList.toggle('dot-on', connected);
+// A4: msg is the full bridge-status payload — { connected, protocolVersion,
+// compatible } — not just a boolean, so we can tell "no daemon" apart from
+// "daemon connected but too old to trust" and never show a plain green dot
+// for the latter.
+function setBridge(msg) {
+  const connected = !!(msg && msg.connected);
+  bridgeConnected = connected;
+  bridgeCompatible = connected ? (msg && msg.compatible) : null;
+  bridgeProtocolVersion = connected ? (msg && msg.protocolVersion) || null : null;
+  const outdated = connected && bridgeCompatible === false;
+
+  bridgeDot.classList.toggle('dot-on', connected && !outdated);
+  bridgeDot.classList.toggle('dot-warn', outdated);
   bridgeDot.classList.toggle('dot-off', !connected);
-  bridgeDot.title = connected ? 'Daemon connected' : 'Daemon not connected';
+  bridgeDot.title = outdated
+    ? 'Desktop app is outdated — update it (see Settings)'
+    : connected ? 'Daemon connected' : 'Daemon not connected';
+  if (bridgeUpdateNote) bridgeUpdateNote.hidden = !outdated;
+
   // daemon-gated UI: the auto-fix toggle warning + the download-clip button
   refreshAutoFixGate();
   refreshClipVisibility();
@@ -769,6 +816,17 @@ function renderResult(params) {
     addProgressLine('Done.');
   }
 
+  // spend meter — a compact, honest (estimate-only) cost line from the run's
+  // spendSummary { freeCalls, paidCalls, totalTokens, estimatedUsd, capUsd? }.
+  const spend = params.spendSummary;
+  if (spend && typeof spend === 'object') {
+    const usd = typeof spend.estimatedUsd === 'number' ? `~$${spend.estimatedUsd.toFixed(2)}` : '~$0.00';
+    const cap = typeof spend.capUsd === 'number' ? ` (cap $${spend.capUsd.toFixed(2)})` : '';
+    addProgressLine(
+      `Spend: ${usd} est.${cap} — ${spend.freeCalls ?? 0} free · ${spend.paidCalls ?? 0} paid calls, ${spend.totalTokens ?? 0} tokens.`,
+    );
+  }
+
   // persist to run history
   lastResult = {
     task: (taskInput.value || '').trim(),
@@ -814,7 +872,7 @@ copyBtn.addEventListener('click', async () => {
 // The clip button only appears when BOTH a clip exists for the last run AND the
 // desktop app is connected (the SW fetches the clip over the daemon bridge).
 function refreshClipVisibility() {
-  const show = !!lastClipPath && bridgeConnected && !fetchingClip;
+  const show = !!lastClipPath && bridgeHealthy() && !fetchingClip;
   clipBtn.hidden = !show;
   if (show) {
     clipBtn.disabled = false;
@@ -883,8 +941,10 @@ function resetFixUi() {
 
 autoFixBtn.addEventListener('click', () => {
   if (fixing) return;
-  if (!bridgeConnected) {
-    showError('Auto-fix needs the desktop app (daemon) running. Start it, then try again — or use the fix prompt below.');
+  if (!bridgeHealthy()) {
+    showError(bridgeConnected && bridgeCompatible === false
+      ? "Your desktop app is outdated and can't run auto-fix reliably. Update it (Settings → re-run the installer), then try again."
+      : 'Auto-fix needs the desktop app (daemon) running. Start it, then try again — or use the fix prompt below.');
     return;
   }
   fixing = true;
@@ -1071,27 +1131,38 @@ function refreshSettingsVisibility() {
   refreshAccordionSummaries();
 }
 
-/** Auto-fix needs the desktop app (daemon). When it isn't connected, force the
- * toggle off, show a "install the app" note, and reveal the one-liner connect
- * block so the user can set it up right there. The toggle is otherwise free. */
+/** Auto-fix needs a healthy desktop app (daemon connected AND protocol-
+ * compatible — see bridgeHealthy()). When it isn't, force the toggle off,
+ * show a note explaining why, and reveal the one-liner connect block — its
+ * copy switches between "connect" (no daemon) and "update" (daemon present
+ * but too old) so the instruction always matches reality. The toggle is
+ * otherwise free. */
 function refreshAutoFixGate() {
   if (!setAutoFix) return;
   const wantAuto = setAutoFix.checked;
-  if (wantAuto && !bridgeConnected) {
-    // the user turned it on without the daemon — bounce it back off + explain
+  const healthy = bridgeHealthy();
+  const outdated = bridgeConnected && bridgeCompatible === false;
+  if (wantAuto && !healthy) {
+    // the user turned it on without a healthy daemon — bounce it back off + explain
     setAutoFix.checked = false;
     setAutoFixNote.hidden = false;
-    setAutoFixNoteText.textContent =
-      'Auto-fix needs the desktop app (daemon) running — it hands the fix to your coding agent. Set it up below, then turn this on.';
+    setAutoFixNoteText.textContent = outdated
+      ? 'Auto-fix needs an up-to-date desktop app — yours is outdated. Update it below, then turn this on.'
+      : 'Auto-fix needs the desktop app (daemon) running — it hands the fix to your coding agent. Set it up below, then turn this on.';
     setDebugAgentRow.hidden = true;
   } else {
-    setAutoFixNote.hidden = !(wantAuto && !bridgeConnected);
+    setAutoFixNote.hidden = !(wantAuto && !healthy);
   }
-  // show the connect block whenever the daemon is down (auto-fix is the only
-  // daemon-gated setting in this accordion, so it's the natural home for it)
+  // show the connect block whenever the daemon isn't healthy (auto-fix is the
+  // only daemon-gated setting in this accordion, so it's the natural home for it)
   if (connectApp) {
-    connectApp.hidden = bridgeConnected;
-    if (!bridgeConnected) renderConnectCmd();
+    connectApp.hidden = healthy;
+    if (!healthy) {
+      const copy = outdated ? CONNECT_APP_COPY.update : CONNECT_APP_COPY.install;
+      if (connectAppTitle) connectAppTitle.textContent = copy.title;
+      if (connectAppSub) connectAppSub.textContent = copy.sub;
+      renderConnectCmd();
+    }
   }
 }
 
@@ -1178,6 +1249,10 @@ function renderSettings(cfg) {
   // opt-in video assertions (paid, slower)
   if (setVideoAssert) setVideoAssert.checked = Boolean(cfg.videoAssertions);
 
+  // safety: read-only defaults ON when unset; spend cap blank = no cap
+  if (setReadOnly) setReadOnly.checked = cfg.readOnly !== false;
+  if (setSpendCap) setSpendCap.value = typeof cfg.spendCapUsd === 'number' ? String(cfg.spendCapUsd) : '';
+
   // debug agent
   if (cfg.debugAgent) setDebugAgent.value = cfg.debugAgent;
 
@@ -1229,6 +1304,14 @@ function closeSettings() {
 }
 
 settingsBtn.addEventListener('click', openSettings);
+// header outdated-daemon banner (A4): tap it straight into Settings, where
+// the "Update the desktop app" one-liner lives (see refreshAutoFixGate).
+if (bridgeUpdateNote) {
+  bridgeUpdateNote.addEventListener('click', openSettings);
+  bridgeUpdateNote.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openSettings(); }
+  });
+}
 // click the dimmed backdrop (outside the card) to dismiss
 settingsModal.addEventListener('click', (ev) => {
   if (ev.target === settingsModal) closeSettings();
@@ -1338,6 +1421,11 @@ settingsSave.addEventListener('click', () => {
     debugMode: selectedDebugMode(),
     debugAgent: setDebugAgent.value,
     videoAssertions: Boolean(setVideoAssert && setVideoAssert.checked),
+    readOnly: Boolean(setReadOnly && setReadOnly.checked),
+    spendCapUsd:
+      setSpendCap && setSpendCap.value.trim() !== '' && Number(setSpendCap.value) > 0
+        ? Number(setSpendCap.value)
+        : undefined,
   });
   closeSettings();
 });

@@ -5463,7 +5463,8 @@ function slimReport(r) {
     failing_step: r.failing_step,
     console_error: r.console_error,
     evidence_paths: r.evidence_paths,
-    reason: r.reason
+    reason: r.reason,
+    spendSummary: r.spendSummary
   };
 }
 function describeAction(a) {
@@ -10893,6 +10894,23 @@ function stepKind(action) {
       return "script";
   }
 }
+var MUTATING_ACTION_TYPES = /* @__PURE__ */ new Set([
+  "click",
+  "type",
+  "select_option",
+  "press_key",
+  "upload_file",
+  "drag_and_drop",
+  "blur",
+  "mouse",
+  "open_tab",
+  "switch_tab",
+  "close_tab",
+  "script"
+]);
+function isMutatingAction(action) {
+  return MUTATING_ACTION_TYPES.has(action.type);
+}
 function humanizeAction(action, target) {
   const tgt = target ? target.name ? `${target.role} "${target.name}"` : target.role : void 0;
   switch (action.type) {
@@ -10972,6 +10990,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
   const perGoalMaxSteps = opts.perGoalMaxSteps ?? Math.min(maxSteps, DEFAULT_PER_GOAL_STEPS);
   const assertionPolicy = opts.assertionPolicy ?? "single-ladder";
   const videoAssertions = opts.videoAssertions ?? false;
+  const readOnly = opts.readOnly ?? false;
+  const spendCapUsd = opts.spendCapUsd && opts.spendCapUsd > 0 ? opts.spendCapUsd : void 0;
   const assertionTrace = [];
   const runData = createRunDataState();
   const actionCache = opts.actionCache;
@@ -11168,6 +11188,14 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       reason = "cancelled by user";
       break;
     }
+    if (spendCapUsd !== void 0) {
+      const spentUsd = estimatedPaidSpendUsd(router.trace);
+      if (spentUsd >= spendCapUsd) {
+        verdict = "uncertain";
+        reason = `spend cap reached: estimated spend ~$${spentUsd.toFixed(4)} has reached the configured $${spendCapUsd} cap (proxy: paid model-call token total \xD7 ~$${SPEND_PROXY_USD_PER_MILLION_TOKENS}/1M tokens \u2014 see LoopOptions.spendCapUsd; not exact billing)`;
+        break;
+      }
+    }
     if (currentGoal >= goals.length) {
       const outcome = await runFinishPass(`all ${goals.length} goals completed`);
       if (outcome === "continue") continue;
@@ -11320,7 +11348,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         reason = "cancelled by user";
         break;
       }
-      if (action.type === "click" || action.type === "type" || action.type === "select_option" || action.type === "press_key" || action.type === "upload_file" || action.type === "drag_and_drop" || action.type === "blur" || action.type === "mouse" || action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "script") {
+      if (isMutatingAction(action)) {
         const host = hostOf(await browser.url());
         if (host && !hostAllowed(host, allowedHosts)) {
           readOnlyBlock = host;
@@ -11345,7 +11373,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
           record.target = { role: t.role, ...t.name && { name: t.name } };
           const { count, index } = rankByRoleName(ax.root, t.role, t.name, action.nodeId);
           if (count > 1 && index >= 0) record.target.nth = index;
-          if (!t.name && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "select_option") && browser.stampQaId) {
+          if (!readOnly && !t.name && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "select_option") && browser.stampQaId) {
             try {
               const qaId = await browser.stampQaId(action.nodeId);
               if (qaId) record.target.qaId = qaId;
@@ -11382,8 +11410,13 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         step: i,
         ...action.type === "mouse" && { kind: action.kind }
       });
+      let skippedReadOnly = false;
       try {
-        if (action.type === "finish") {
+        if (readOnly && isMutatingAction(action)) {
+          skippedReadOnly = true;
+          record.ok = true;
+          record.description = `read-only mode: skipped ${record.description}`;
+        } else if (action.type === "finish") {
           if (action.verdict === "fail") {
             verdict = "fail";
             reason = action.reason;
@@ -11533,7 +11566,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       await sleep(150);
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
-      if (actionCache && cacheBefore && record.ok) {
+      if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {
           const cacheAfter = await captureActionEffectState(browser);
           const effect = verifyActionEffect(cacheBefore, cacheAfter, action, record.target);
@@ -11567,11 +11600,12 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         kind: stepKind(action),
         // record.action may have been re-shaped post-resolution (e.g.
         // drag_and_drop gains sourceTarget/targetTarget) — humanize THAT so the
-        // progress line can show the resolved drop-target name.
-        text: humanizeAction(record.action, record.target),
+        // progress line can show the resolved drop-target name. A5b: prefix the
+        // same "read-only mode: skipped" label the step record carries.
+        text: skippedReadOnly ? `read-only mode: skipped ${humanizeAction(record.action, record.target)}` : humanizeAction(record.action, record.target),
         ok: record.ok
       });
-      if (record.ok && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "press_key" || action.type === "select_option" || action.type === "navigate" || action.type === "reload" || action.type === "go_back" || action.type === "upload_file" || action.type === "drag_and_drop" || action.type === "blur" || action.type === "mouse" || action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "script")) {
+      if (record.ok && !skippedReadOnly && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "press_key" || action.type === "select_option" || action.type === "navigate" || action.type === "reload" || action.type === "go_back" || action.type === "upload_file" || action.type === "drag_and_drop" || action.type === "blur" || action.type === "mouse" || action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "script")) {
         brainEscalations = 0;
       }
       if (verdict !== "uncertain" || action.type === "finish") {
@@ -11657,20 +11691,12 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
   ];
   const reportPath = artifacts.saveReport(report);
   report.evidence_paths.unshift(reportPath);
+  report.spendSummary = computeSpendSummary(report, spendCapUsd);
   const tokens = computeTokens(report);
   report.tokens = tokens;
   report.tokenEstimate = tokens.verdictPayloadTokens;
   artifacts.saveReport(report);
   return report;
-}
-function slimForEstimate(r) {
-  return {
-    verdict: r.verdict,
-    failing_step: r.failing_step,
-    console_error: r.console_error,
-    evidence_paths: r.evidence_paths,
-    reason: r.reason
-  };
 }
 function computeTokens(r) {
   let cheapModelTotal = 0;
@@ -11696,7 +11722,7 @@ function computeTokens(r) {
     }
   }
   const verdictPayloadTokens = Math.ceil(
-    JSON.stringify(r.steps.length ? slimForEstimate(r) : {}).length / 4
+    JSON.stringify(r.steps.length ? slimReport(r) : {}).length / 4
   );
   return {
     cheapModelTotal,
@@ -11708,6 +11734,32 @@ function computeTokens(r) {
     visualCalls,
     navigatorTokens,
     brainTokens
+  };
+}
+var SPEND_PROXY_USD_PER_MILLION_TOKENS = 3;
+function estimatedPaidSpendUsd(trace) {
+  let paidTokens = 0;
+  for (const t of trace) {
+    if (t.rung === 0) continue;
+    if (t.usage?.totalTokens) paidTokens += t.usage.totalTokens;
+  }
+  return paidTokens / 1e6 * SPEND_PROXY_USD_PER_MILLION_TOKENS;
+}
+function computeSpendSummary(r, capUsd) {
+  let freeCalls = 0;
+  let paidCalls = 0;
+  let totalTokens = 0;
+  for (const t of r.model_trace) {
+    if (t.rung === 0) freeCalls++;
+    else paidCalls++;
+    if (t.usage?.totalTokens) totalTokens += t.usage.totalTokens;
+  }
+  return {
+    freeCalls,
+    paidCalls,
+    totalTokens,
+    estimatedUsd: estimatedPaidSpendUsd(r.model_trace),
+    ...capUsd !== void 0 && { capUsd }
   };
 }
 async function navigateOnce(router, { prompt, step }) {
@@ -12951,7 +13003,12 @@ var DEFAULT_SETTINGS = {
   navigator: { provider: "nano", mode: "ondevice" },
   debugMode: "prompt",
   debugAgent: "auto",
-  videoAssertions: false
+  videoAssertions: false,
+  // A5b: safe by default — first runs must not click/type until the user
+  // explicitly opts in (panel toggle / QA_READ_ONLY=0).
+  readOnly: true
+  // spendCapUsd intentionally absent here — undefined/OFF is the default; the
+  // user opts in with an explicit positive USD figure.
 };
 var NAVIGATOR_MODELS = {
   "gemini:api": "gemini-3-flash-preview",
@@ -13252,6 +13309,9 @@ function buildLiteConfig(keys, settings) {
     debugMode: settings.debugMode,
     debugAgent: settings.debugAgent,
     videoAssertions: settings.videoAssertions ?? false,
+    // A5b/A5a (P1 safety) — same shape as the daemon's vibe.config.get.
+    readOnly: settings.readOnly ?? true,
+    spendCapUsd: settings.spendCapUsd,
     providers,
     mode: "lite"
   };
@@ -13285,7 +13345,10 @@ async function runLite(opts) {
       maxSteps: opts.maxSteps ?? 12,
       onStep: opts.onStep,
       allowedHosts: opts.allowedHosts,
-      signal: opts.signal
+      signal: opts.signal,
+      // A5b/A5a (P1 safety) — see LiteRunOptions.readOnly/spendCapUsd above.
+      readOnly: opts.readOnly,
+      spendCapUsd: opts.spendCapUsd
       // no vault in lite mode — a {{secret:NAME}} placeholder fails its step.
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1e3)}s)`);

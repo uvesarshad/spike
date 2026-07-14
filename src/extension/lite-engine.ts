@@ -59,6 +59,14 @@ export interface LiteRunOptions {
   planner: PlannerSelection;
   /** NAVIGATOR — cheap/free model, leads plan-step (the per-step call). */
   navigator: PlannerSelection;
+  /** A5b (P1) safety: dry-run/read-only default — forwarded to LoopOptions.
+   * runDriverLoop's OWN default is false (unset → today's mutate-freely
+   * behavior for any caller that doesn't pass it), so pass the resolved
+   * QaSettings.readOnly (product default true) explicitly here. */
+  readOnly?: boolean;
+  /** A5a (P1) safety: optional per-run spend cap in USD — forwarded to
+   * LoopOptions. undefined/absent = no cap. */
+  spendCapUsd?: number;
   /** chrome.debugger transport + lifecycle, injected by the SW. */
   browserDeps: LiteBrowserDeps;
   /** Nano (rung 0) callbacks; omit to skip the on-device visual rung. */
@@ -135,6 +143,9 @@ export function buildLiteConfig(keys: LiteKeys, settings: QaSettings): Record<st
     debugMode: settings.debugMode,
     debugAgent: settings.debugAgent,
     videoAssertions: settings.videoAssertions ?? false,
+    // A5b/A5a (P1 safety) — same shape as the daemon's vibe.config.get.
+    readOnly: settings.readOnly ?? true,
+    spendCapUsd: settings.spendCapUsd,
     providers,
     mode: 'lite',
   };
@@ -175,6 +186,9 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       onStep: opts.onStep,
       allowedHosts: opts.allowedHosts,
       signal: opts.signal,
+      // A5b/A5a (P1 safety) — see LiteRunOptions.readOnly/spendCapUsd above.
+      readOnly: opts.readOnly,
+      spendCapUsd: opts.spendCapUsd,
       // no vault in lite mode — a {{secret:NAME}} placeholder fails its step.
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);

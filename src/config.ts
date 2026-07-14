@@ -74,6 +74,16 @@ export interface QaConfig {
    * screenshot fallback. OFF → mode:'video' still runs, but as a safe screenshot
    * verdict with a report note ("video assertion requested but disabled"). */
   videoAssertions: boolean;
+  /** A5b (P1) safety: dry-run/read-only default — enforced in driver/loop.ts's
+   * single mutation-guard site. A safety layer ON TOP OF allowedHosts (Tier-4),
+   * not a replacement: even an allowed host's mutating actions are skipped
+   * while this is true. Defaults to true (mirrors DEFAULT_SETTINGS.readOnly). */
+  readOnly: boolean;
+  /** A5a (P1) safety: optional per-run spend cap in USD. undefined = no cap
+   * (default). Precise USD isn't derivable (no per-adapter pricing table), so
+   * the driver enforces this against a best-available proxy — see
+   * driver/loop.ts's estimatedPaidSpendUsd. */
+  spendCapUsd?: number;
   /** Keep the FREE rung-1 Google CLI as the first planner even when a BYOK key is
    * present. Default false: providing a key IS the opt-in to spend it for ~3×
    * faster planning (rung-2 HTTP beats the CLI cold-spawn). Set true to keep free
@@ -115,6 +125,9 @@ const DEFAULTS: QaConfig = {
   recordClip: false,
   assertionPolicy: 'single-ladder',
   videoAssertions: false,
+  // A5b: safe by default (mirrors DEFAULT_SETTINGS.readOnly).
+  readOnly: true,
+  // spendCapUsd intentionally absent — undefined/OFF is the default.
   preferFreePlanner: false,
   // BRAIN default: claude CLI — the daemon HAS cli rungs and the former gemini:cli
   // free tier is dead (see settings.ts). (This intentionally differs from
@@ -165,6 +178,11 @@ function fromEnv(): Partial<QaConfig> {
     out.assertionPolicy = e.QA_ASSERTION_POLICY as AssertionPolicy;
   }
   if (e.QA_VIDEO_ASSERTIONS) out.videoAssertions = e.QA_VIDEO_ASSERTIONS !== '0' && e.QA_VIDEO_ASSERTIONS !== 'false';
+  if (e.QA_READ_ONLY) out.readOnly = e.QA_READ_ONLY !== '0' && e.QA_READ_ONLY !== 'false';
+  if (e.QA_SPEND_CAP_USD) {
+    const n = Number(e.QA_SPEND_CAP_USD);
+    if (Number.isFinite(n) && n > 0) out.spendCapUsd = n; // 0/garbage → leave unset (no cap)
+  }
   if (e.QA_PREFER_FREE_PLANNER) out.preferFreePlanner = e.QA_PREFER_FREE_PLANNER !== '0' && e.QA_PREFER_FREE_PLANNER !== 'false';
   // planner (BRAIN) selection — env wins over the SettingsStore (power-users / tests).
   const planner: Partial<PlannerSelection> = {};
@@ -203,6 +221,10 @@ function fromSettings(): Partial<QaConfig> {
     // Only contribute the toggle when the user actually saved it (raw, not the
     // defaulted read) so it never clobbers DEFAULTS.videoAssertions; env still wins.
     if (typeof raw.videoAssertions === 'boolean') out.videoAssertions = raw.videoAssertions;
+    // Same "only when the user actually saved it" rule as videoAssertions above —
+    // readOnly/spendCapUsd must never clobber DEFAULTS with a defaulted read.
+    if (typeof raw.readOnly === 'boolean') out.readOnly = raw.readOnly;
+    if (typeof raw.spendCapUsd === 'number') out.spendCapUsd = raw.spendCapUsd;
     return out;
   } catch {
     return {};

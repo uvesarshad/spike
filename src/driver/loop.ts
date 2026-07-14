@@ -20,7 +20,7 @@ import type { AxNode, AxSnapshot, BrowserPort } from '../ports/browser-port.js';
 import { firstError } from '../capture/console-network.js';
 import type { ModelRouter } from '../router/model-router.js';
 import type { ArtifactStore } from '../report/artifacts.js';
-import { describeAction, type FailingStep, type Report, type StepRecord, type RunVerdict } from '../report/report.js';
+import { describeAction, slimReport, type FailingStep, type Report, type SpendSummary, type StepRecord, type RunVerdict } from '../report/report.js';
 import {
   buildExtractPrompt,
   EXTRACT_JSON_SCHEMA,
@@ -160,6 +160,21 @@ export interface LoopOptions {
    * here via the engine. When false, mode:'video' does a safe screenshot
    * fallback and the step description notes it was disabled. */
   videoAssertions?: boolean;
+  /** A5b (P1) safety: dry-run/read-only mode. When true, mutating actions
+   * (click/type/upload_file/drag_and_drop/blur/mouse/open_tab/switch_tab/
+   * close_tab/script/select_option/press_key) are skipped and recorded as such
+   * instead of executed — navigate/observe/screenshot/asserts stay allowed. A
+   * safety layer ON TOP OF the allowedHosts (Tier-4) guard, not a replacement.
+   * Defaults to FALSE here (unset → today's mutate-freely behavior for any
+   * direct caller, e.g. tests/spikes) — the product's safe-by-default TRUE
+   * lives in DEFAULT_SETTINGS/config.DEFAULTS and must be threaded down
+   * explicitly by the caller (engine.ts / lite-engine.ts). */
+  readOnly?: boolean;
+  /** A5a (P1) safety: optional per-run spend cap in USD. undefined/0 = no cap
+   * (default). Checked once per navigator/brain call (top of the main loop);
+   * see estimatedPaidSpendUsd for the approximation this makes — there is no
+   * real per-adapter USD pricing available here. */
+  spendCapUsd?: number;
 }
 
 /** Map an action to its onStep kind. */
@@ -203,6 +218,30 @@ function stepKind(action: Action): StepKind {
     case 'script':
       return 'script';
   }
+}
+
+/** Action types that mutate the page (as opposed to navigate/observe/assert).
+ * Shared by the Tier-4 allowedHosts guard AND the A5b read-only guard so both
+ * agree on exactly what counts as a "mutation" — navigate/reload/go_back/wait/
+ * assert_visual/assert_dom/extract/finish/hover are deliberately excluded
+ * (hover is read-only; the rest are navigation/observation/verdicts). */
+const MUTATING_ACTION_TYPES = new Set<Action['type']>([
+  'click',
+  'type',
+  'select_option',
+  'press_key',
+  'upload_file',
+  'drag_and_drop',
+  'blur',
+  'mouse',
+  'open_tab',
+  'switch_tab',
+  'close_tab',
+  'script',
+]);
+
+function isMutatingAction(action: Action): boolean {
+  return MUTATING_ACTION_TYPES.has(action.type);
 }
 
 /** A human-readable description of an executed action, preferring the touched
@@ -306,6 +345,11 @@ export async function runDriverLoop(
   const perGoalMaxSteps = opts.perGoalMaxSteps ?? Math.min(maxSteps, DEFAULT_PER_GOAL_STEPS);
   const assertionPolicy = opts.assertionPolicy ?? 'single-ladder';
   const videoAssertions = opts.videoAssertions ?? false;
+  // A5b (P1 safety): see LoopOptions.readOnly's doc comment for the default split.
+  const readOnly = opts.readOnly ?? false;
+  // A5a (P1 safety): undefined/0/negative all mean "no cap" (config.ts/service.ts
+  // already normalize a set value to a positive finite number before it gets here).
+  const spendCapUsd = opts.spendCapUsd && opts.spendCapUsd > 0 ? opts.spendCapUsd : undefined;
   const assertionTrace: AssertionTraceEntry[] = [];
   const runData = createRunDataState();
   const actionCache = opts.actionCache;
@@ -561,6 +605,21 @@ export async function runDriverLoop(
       break;
     }
 
+    // ---- A5a: spend cap — checked once per outer iteration (i.e. once per
+    // navigator call / brain escalation), so it gates the next expensive call
+    // before it's made rather than mid-call. ----
+    if (spendCapUsd !== undefined) {
+      const spentUsd = estimatedPaidSpendUsd(router.trace);
+      if (spentUsd >= spendCapUsd) {
+        verdict = 'uncertain';
+        reason =
+          `spend cap reached: estimated spend ~$${spentUsd.toFixed(4)} has reached the configured ` +
+          `$${spendCapUsd} cap (proxy: paid model-call token total × ~$${SPEND_PROXY_USD_PER_MILLION_TOKENS}` +
+          '/1M tokens — see LoopOptions.spendCapUsd; not exact billing)';
+        break;
+      }
+    }
+
     // all goals consumed but no finish yet — treat as a pass candidate (safety net)
     if (currentGoal >= goals.length) {
       const outcome = await runFinishPass(`all ${goals.length} goals completed`);
@@ -744,23 +803,11 @@ export async function runDriverLoop(
         break;
       }
 
-      // ---- read-only-by-default guard: mutations only on allowed
-      // hosts. Check the LIVE page host, not batchUrl — an earlier action in the
-      // batch may have navigated us elsewhere. navigate/assert/wait stay allowed.
-      if (
-        action.type === 'click' ||
-        action.type === 'type' ||
-        action.type === 'select_option' ||
-        action.type === 'press_key' ||
-        action.type === 'upload_file' ||
-        action.type === 'drag_and_drop' ||
-        action.type === 'blur' ||
-        action.type === 'mouse' ||
-        action.type === 'open_tab' ||
-        action.type === 'switch_tab' ||
-        action.type === 'close_tab' ||
-        action.type === 'script'
-      ) {
+      // ---- Tier-4 guard: mutations only on allowed hosts. Check the LIVE page
+      // host, not batchUrl — an earlier action in the batch may have navigated us
+      // elsewhere. navigate/assert/wait stay allowed. (A5b's read-only guard,
+      // below, is a SEPARATE layer on top of this one — not a replacement.)
+      if (isMutatingAction(action)) {
         const host = hostOf(await browser.url());
         if (host && !hostAllowed(host, allowedHosts)) {
           readOnlyBlock = host;
@@ -796,7 +843,7 @@ export async function runDriverLoop(
           if (count > 1 && index >= 0) record.target.nth = index;
           // #9: a name-less interaction target has no resilient role+name locator
           // — stamp a data-qa-id as a fallback (best-effort; lost on reload).
-          if (!t.name && (action.type === 'click' || action.type === 'type' || action.type === 'hover' || action.type === 'select_option') && browser.stampQaId) {
+          if (!readOnly && !t.name && (action.type === 'click' || action.type === 'type' || action.type === 'hover' || action.type === 'select_option') && browser.stampQaId) {
             try {
               const qaId = await browser.stampQaId(action.nodeId);
               if (qaId) record.target.qaId = qaId;
@@ -850,8 +897,18 @@ export async function runDriverLoop(
         step: i,
         ...(action.type === 'mouse' && { kind: action.kind }),
       });
+      // A5b: dry-run/read-only mode — refuse the action outright instead of
+      // executing it. ONE guard, right at the top of the dispatch, so every
+      // downstream step (span/drain/audit/onStep/batch-abort/progress-tracking
+      // below) sees a normal-shaped, already-"succeeded" step and needs no
+      // special-casing of its own.
+      let skippedReadOnly = false;
       try {
-        if (action.type === 'finish') {
+        if (readOnly && isMutatingAction(action)) {
+          skippedReadOnly = true;
+          record.ok = true;
+          record.description = `read-only mode: skipped ${record.description}`;
+        } else if (action.type === 'finish') {
           // trust a fail immediately; confirm a pass with one visual check
           if (action.verdict === 'fail') {
             verdict = 'fail';
@@ -1031,7 +1088,7 @@ export async function runDriverLoop(
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
 
-      if (actionCache && cacheBefore && record.ok) {
+      if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {
           const cacheAfter = await captureActionEffectState(browser);
           const effect = verifyActionEffect(cacheBefore, cacheAfter, action, record.target);
@@ -1070,14 +1127,21 @@ export async function runDriverLoop(
         kind: stepKind(action),
         // record.action may have been re-shaped post-resolution (e.g.
         // drag_and_drop gains sourceTarget/targetTarget) — humanize THAT so the
-        // progress line can show the resolved drop-target name.
-        text: humanizeAction(record.action, record.target),
+        // progress line can show the resolved drop-target name. A5b: prefix the
+        // same "read-only mode: skipped" label the step record carries.
+        text: skippedReadOnly
+          ? `read-only mode: skipped ${humanizeAction(record.action, record.target)}`
+          : humanizeAction(record.action, record.target),
         ok: record.ok,
       });
 
-      // a real action that landed = navigator progress; reset the stuck counter
+      // a real action that landed = navigator progress; reset the stuck counter.
+      // A5b: a read-only-skipped action did NOT actually land — don't count it,
+      // so a navigator that keeps proposing the same blocked mutation still
+      // trips loop-detection / per-goal-overflow and escalates normally.
       if (
         record.ok &&
+        !skippedReadOnly &&
         (
           action.type === 'click' ||
           action.type === 'type' ||
@@ -1210,22 +1274,16 @@ export async function runDriverLoop(
   ];
   const reportPath = artifacts.saveReport(report);
   report.evidence_paths.unshift(reportPath);
+  // A5a: attach the compact spend summary BEFORE counting tokens — it is part of
+  // the slim payload the caller reads back, so verdictPayloadTokens must include
+  // it (see report.ts's SpendSummary doc comment).
+  report.spendSummary = computeSpendSummary(report, spendCapUsd);
   const tokens = computeTokens(report);
   report.tokens = tokens;
   // tokenEstimate keeps its product-doc meaning: what the calling agent pays.
   report.tokenEstimate = tokens.verdictPayloadTokens;
   artifacts.saveReport(report); // rewrite with final paths + estimate
   return report;
-}
-
-function slimForEstimate(r: Report) {
-  return {
-    verdict: r.verdict,
-    failing_step: r.failing_step,
-    console_error: r.console_error,
-    evidence_paths: r.evidence_paths,
-    reason: r.reason,
-  };
 }
 
 /** Real token accounting. cheapModel* sum the measured per-call usage in the
@@ -1261,8 +1319,10 @@ function computeTokens(r: Report): NonNullable<Report['tokens']> {
       visualCalls++;
     }
   }
+  // count the ACTUAL slim payload the caller reads back (slimReport), so this
+  // never drifts from what report.ts serializes (e.g. when spendSummary was added).
   const verdictPayloadTokens = Math.ceil(
-    JSON.stringify(r.steps.length ? slimForEstimate(r) : {}).length / 4,
+    JSON.stringify(r.steps.length ? slimReport(r) : {}).length / 4,
   );
   return {
     cheapModelTotal,
@@ -1274,6 +1334,50 @@ function computeTokens(r: Report): NonNullable<Report['tokens']> {
     visualCalls,
     navigatorTokens,
     brainTokens,
+  };
+}
+
+/** A5a (P1): crude USD-per-token conversion for the spend cap proxy. Precise
+ * USD isn't derivable here — the router doesn't carry per-adapter pricing, and
+ * real rates vary widely by provider/model/tier. This applies a single blended
+ * rate to every non-$0 (rung >= 1) call's total tokens — a mid-range paid-model
+ * ballpark, deliberately conservative (more likely to OVER- than
+ * UNDER-estimate a cheap-tier call's true cost) so the cap errs toward
+ * stopping a run too early rather than too late. Replace with real
+ * per-adapter pricing if/when the router exposes it. */
+const SPEND_PROXY_USD_PER_MILLION_TOKENS = 3;
+
+/** Best-available USD spend proxy from a model_trace-shaped array: sum the
+ * token usage of every call NOT on rung 0 (rung 0 = $0 on-device Nano) and
+ * apply SPEND_PROXY_USD_PER_MILLION_TOKENS. Used both live (mid-run, against
+ * router.trace, to enforce LoopOptions.spendCapUsd) and post-hoc (against the
+ * finished report, for the spend summary). */
+function estimatedPaidSpendUsd(trace: readonly { rung: number; usage?: { totalTokens?: number } }[]): number {
+  let paidTokens = 0;
+  for (const t of trace) {
+    if (t.rung === 0) continue; // rung 0 = $0 on-device Nano — excluded from the proxy
+    if (t.usage?.totalTokens) paidTokens += t.usage.totalTokens;
+  }
+  return (paidTokens / 1_000_000) * SPEND_PROXY_USD_PER_MILLION_TOKENS;
+}
+
+/** A5a (P1): compact spend summary for the done/slim payload (see report.ts's
+ * SpendSummary doc comment for field meanings and the estimatedUsd caveat). */
+function computeSpendSummary(r: Report, capUsd: number | undefined): SpendSummary {
+  let freeCalls = 0;
+  let paidCalls = 0;
+  let totalTokens = 0;
+  for (const t of r.model_trace) {
+    if (t.rung === 0) freeCalls++;
+    else paidCalls++;
+    if (t.usage?.totalTokens) totalTokens += t.usage.totalTokens;
+  }
+  return {
+    freeCalls,
+    paidCalls,
+    totalTokens,
+    estimatedUsd: estimatedPaidSpendUsd(r.model_trace),
+    ...(capUsd !== undefined && { capUsd }),
   };
 }
 

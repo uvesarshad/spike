@@ -183,12 +183,24 @@ body {
 }
 .dot-on  { background: var(--accent); box-shadow: 0 0 0 4px var(--accent-tint); }
 .dot-off { background: #3a3a42; }
+/* connected at the socket level, but the protocol handshake says the daemon
+ * is too old to drive reliably — deliberately NOT green */
+.dot-warn { background: var(--amber); box-shadow: 0 0 0 4px rgba(245, 194, 74, .28); }
 .nano-line {
   margin-top: 10px;
   font-size: 11.5px;
   color: var(--muted);
 }
 .nano-ok-ico { width: 12px; height: 12px; vertical-align: -2px; color: var(--accent); }
+
+/* header banner for a connected-but-outdated daemon (protocol handshake
+ * failed) — reuses .settings-note/.settings-note-warn, just placed + made
+ * clickable (opens Settings, where the update one-liner lives) */
+.hdr-note {
+  margin-top: 10px;
+  cursor: pointer;
+}
+.hdr-note:hover { border-color: var(--amber); }
 
 /* ---- nano onboarding ------------------------------------------------------- */
 .nano-onboard {

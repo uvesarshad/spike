@@ -481,6 +481,8 @@ async function runFreshAiPass(
         assertionPolicy: cfg.assertionPolicy,
         actionCache,
         videoAssertions: cfg.videoAssertions,
+        readOnly: cfg.readOnly,
+        spendCapUsd: cfg.spendCapUsd,
       }),
     );
     if (clip) {

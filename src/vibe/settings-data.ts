@@ -39,6 +39,24 @@ export interface QaSettings {
    * it lives in the store (never a key). Mirrors config.videoAssertions /
    * QA_VIDEO_ASSERTIONS; env still wins. */
   videoAssertions?: boolean;
+  /** A5b (P1) safety: dry-run/read-only default. When true, the driver may
+   * navigate/observe/screenshot but MUST refuse the mutating actions (click,
+   * type, upload_file, drag_and_drop, blur, mouse, open_tab, switch_tab,
+   * close_tab, script) — it records a clearly-labeled skipped step instead of
+   * executing them. A safety layer ON TOP OF the existing Tier-4 allowedHosts
+   * guard, not a replacement. Defaults to TRUE — first runs are safe by
+   * default; the user opts OUT to let the agent actually click/type. Non-secret,
+   * so it lives in the store. Mirrors config.readOnly / QA_READ_ONLY; env still
+   * wins. */
+  readOnly?: boolean;
+  /** A5a (P1) safety: optional per-run spend cap in USD. undefined/absent = no
+   * cap (off by default). When set, the driver aborts the run once its
+   * best-available spend proxy (paid model-call token total — precise USD
+   * isn't derivable without per-adapter pricing; see driver/loop.ts's
+   * estimatedPaidSpendUsd) reaches this figure, ending cleanly with verdict
+   * 'uncertain' and reason "spend cap reached". Non-secret, so it lives in the
+   * store. Mirrors config.spendCapUsd / QA_SPEND_CAP_USD; env still wins. */
+  spendCapUsd?: number;
 }
 
 export const DEFAULT_SETTINGS: QaSettings = {
@@ -56,6 +74,11 @@ export const DEFAULT_SETTINGS: QaSettings = {
   debugMode: 'prompt',
   debugAgent: 'auto',
   videoAssertions: false,
+  // A5b: safe by default — first runs must not click/type until the user
+  // explicitly opts in (panel toggle / QA_READ_ONLY=0).
+  readOnly: true,
+  // spendCapUsd intentionally absent here — undefined/OFF is the default; the
+  // user opts in with an explicit positive USD figure.
 };
 
 /** NAVIGATOR (cheap) default model per provider+mode. Called on EVERY step, so

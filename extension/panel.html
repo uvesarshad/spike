@@ -31,6 +31,10 @@
         Needs ~22 GB free disk on the drive holding your Chrome profile — testing still works via the cloud free tier.
       </div>
     </div>
+    <div id="bridgeUpdateNote" class="settings-note settings-note-warn hdr-note" hidden role="button" tabindex="0">
+      <span class="ico" data-icon="info"></span>
+      <span>Desktop app is outdated and can't run tests reliably. Tap to update it.</span>
+    </div>
   </header>
 
   <main class="body">
@@ -192,9 +196,28 @@
               </span>
             </label>
 
+            <label class="settings-toggle-row" for="setReadOnly">
+              <span class="settings-toggle-copy">
+                <span class="settings-toggle-label">Read-only (safe) mode</span>
+                <span class="settings-toggle-sub">On (recommended): the agent looks and reports but never clicks, types, or submits — it can't change or delete anything. Off: the agent may interact with the page. Turn off only when you want it to actually drive your app.</span>
+              </span>
+              <span class="switch">
+                <input id="setReadOnly" class="switch-input" type="checkbox" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </span>
+            </label>
+
+            <label class="settings-toggle-row" for="setSpendCap">
+              <span class="settings-toggle-copy">
+                <span class="settings-toggle-label">Spend cap (USD)</span>
+                <span class="settings-toggle-sub">Optional. Stop a run once its estimated model spend passes this amount. Leave blank for no cap. Estimate only — not exact billing.</span>
+              </span>
+              <input id="setSpendCap" class="settings-input" type="number" min="0" step="0.10" inputmode="decimal" placeholder="no cap" style="max-width:6.5rem" />
+            </label>
+
             <div id="connectApp" class="connect-app" hidden>
-              <div class="connect-app-title">Connect the desktop app</div>
-              <div class="connect-app-sub">Run this once in a terminal — the daemon then auto-starts on every login and this panel connects on its own.</div>
+              <div id="connectAppTitle" class="connect-app-title">Connect the desktop app</div>
+              <div id="connectAppSub" class="connect-app-sub">Run this once in a terminal — the daemon then auto-starts on every login and this panel connects on its own.</div>
               <div class="connect-app-os">
                 <button class="connect-os-btn is-active" type="button" data-os="win">Windows</button>
                 <button class="connect-os-btn" type="button" data-os="mac">macOS</button>

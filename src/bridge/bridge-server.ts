@@ -30,11 +30,35 @@
  * was sent to; a `{ id }` response is only accepted from THAT client. The
  * daemon's `id` counter is global (ids are unique across clients), but the
  * origin check hardens against a stray/duplicate frame.
+ *
+ * Protocol-version handshake (A4): a real extension hello (`{event:'hello',
+ * params:{caps:[...], protocolVersion?}}`) gets an immediate `bridge.hello`
+ * event back — `{event:'bridge.hello', params:{protocolVersion:PROTOCOL_VERSION}}`
+ * — addressed to that client. The extension compares this against the minimum
+ * it requires and, if the daemon is too old (or never acks), tells the panel
+ * to show "update the desktop app" instead of a plain green "connected" dot.
+ * Bump PROTOCOL_VERSION whenever the wire protocol changes in a way both
+ * sides must agree on to work correctly.
+ *
+ * Connection hardening (A9): the WS server rejects any handshake whose
+ * `Origin` header is an http(s) page (the main "arbitrary local web page
+ * drives the daemon" threat) before it ever reaches the hello/adopt logic
+ * below. The extension's service worker/offscreen document connects with no
+ * Origin header at all or `chrome-extension://<id>` — both pass through
+ * unchanged, as do our own `ws`-based test/CLI clients (which also send no
+ * Origin header). A full pre-shared pairing token is a stronger follow-up;
+ * see the module's implementation notes for why it isn't done here yet.
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
 
 export const DEFAULT_BRIDGE_PORT = 9410;
+
+/** Daemon↔extension wire-protocol version. Bump when a change requires both
+ * sides to be updated together; the extension refuses to call itself
+ * "connected & healthy" against a daemon reporting a version it doesn't
+ * support (see `sw.js`'s MIN_DAEMON_PROTOCOL_VERSION). */
+export const PROTOCOL_VERSION = 1;
 
 interface Pending {
   resolve: (value: unknown) => void;
@@ -79,12 +103,22 @@ export class BridgeServer {
 
   constructor(private readonly port: number = DEFAULT_BRIDGE_PORT) {
     this.wss = new WebSocketServer({ port: this.port });
-    // Defer adoption until the first frame: a STALE extension copy (old sw.js
-    // in another Chrome profile — its reconnect loop scans our port range)
-    // announces itself with a capability-less hello and gets rejected instead
-    // of joining as a client. Anything else (current SW hello-with-caps, test
-    // clients that talk immediately) adopts as before.
-    this.wss.on('connection', (ws) => {
+    this.wss.on('connection', (ws, req) => {
+      // A9 hardening: reject a handshake carrying an http(s) Origin — that's
+      // a real web page's WebSocket, the main threat on a shared localhost
+      // port. No Origin header (our `ws`-based test/CLI clients) or a
+      // `chrome-extension://` Origin (the real extension) both pass through.
+      const origin = req.headers.origin;
+      if (typeof origin === 'string' && /^https?:\/\//i.test(origin)) {
+        try { ws.close(1008, 'origin not allowed'); } catch { /* already gone */ }
+        return;
+      }
+
+      // Defer adoption until the first frame: a STALE extension copy (old sw.js
+      // in another Chrome profile — its reconnect loop scans our port range)
+      // announces itself with a capability-less hello and gets rejected instead
+      // of joining as a client. Anything else (current SW hello-with-caps, test
+      // clients that talk immediately) adopts as before.
       const probe = (data: { toString(): string }) => {
         let first: Record<string, unknown> | null = null;
         try {
@@ -92,16 +126,24 @@ export class BridgeServer {
         } catch {
           /* malformed — fall through to adopt; onMessage ignores it anyway */
         }
+        let isHello = false;
         if (first && first.event === 'hello') {
           const caps = (first.params as { caps?: unknown } | undefined)?.caps;
           if (!Array.isArray(caps) || caps.length === 0) {
             try { ws.close(); } catch { /* gone */ }
             return; // stale-code SW — do not adopt
           }
+          isHello = true;
         }
         ws.off('message', probe);
         const clientId = this.adopt(ws);
         this.onMessage(clientId, data.toString()); // don't lose the first frame
+        // A4 handshake: a real extension hello gets an immediate ack carrying
+        // OUR protocol version, so it can flag an outdated daemon instead of
+        // reporting "connected & healthy" for a version that can't drive it.
+        if (isHello) {
+          this.sendEvent('bridge.hello', { protocolVersion: PROTOCOL_VERSION }, { clientId });
+        }
       };
       ws.on('message', probe);
     });
