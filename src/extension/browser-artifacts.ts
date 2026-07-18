@@ -37,20 +37,22 @@ export class BrowserArtifactStore {
   }
 
   /** The returned path string only flows into report.evidence_paths/screenshot
-   * fields — it is never opened by the engine, so a synthetic path is fine. */
-  saveScreenshot(stepIndex: number, png: Buffer): string {
+   * fields — it is never opened by the engine, so a synthetic path is fine.
+   * async to match ArtifactStore's now-async contract (A14) — nothing here
+   * actually awaits, it's all in-memory. */
+  async saveScreenshot(stepIndex: number, png: Buffer): Promise<string> {
     const name = `screenshots/step-${String(stepIndex).padStart(2, '0')}.png`;
     this.screenshots.set(name, png.toString('base64'));
     return `${this.dir}/${name}`;
   }
 
-  saveReport(report: Report): string {
+  async saveReport(report: Report): Promise<string> {
     this.report = report;
     return `${this.dir}/report.json`;
   }
 
   /** Append one entry per executed action (already redacted by the caller). */
-  appendAudit(entry: AuditEntry): void {
+  async appendAudit(entry: AuditEntry): Promise<void> {
     this.audit.push(entry);
   }
 

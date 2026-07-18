@@ -46,13 +46,32 @@
  * below. The extension's service worker/offscreen document connects with no
  * Origin header at all or `chrome-extension://<id>` — both pass through
  * unchanged, as do our own `ws`-based test/CLI clients (which also send no
- * Origin header). A full pre-shared pairing token is a stronger follow-up;
- * see the module's implementation notes for why it isn't done here yet.
+ * Origin header).
+ *
+ * Pairing token (A2/A6): the Origin check alone only stops a browser page's
+ * WebSocket (Origin is browser-enforced) — a bare local process can omit or
+ * forge the header entirely, so it can't be the real gate. Every client must
+ * now present a `token` in its first frame's `hello.params`, matched against
+ * a pairing token persisted in the Vault (src/vault/vault.ts) under
+ * `PAIRING_TOKEN_VAULT_KEY`. Trust-on-first-use: the first token ANY client
+ * ever presents is adopted as THE pairing token (the extension mints one on
+ * first install — see extension/sw.js — and persists it in
+ * chrome.storage.local so reconnects keep presenting the same one); every
+ * later connection must match it exactly or the socket is closed before
+ * adoption. This closes the "any local process can connect" hole (A2) and
+ * makes the Origin check's forgeability (A6) moot — Origin remains as a
+ * cheap additional layer, not the primary gate.
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
+import { Vault } from '../vault/vault.js';
 
 export const DEFAULT_BRIDGE_PORT = 9410;
+/** Loopback-only by default (A1) — the WS server used to omit `host`
+ * entirely, which made `ws`/Node default to binding ALL interfaces. */
+export const DEFAULT_BRIDGE_HOST = '127.0.0.1';
+/** Vault key the daemon's half of the pairing token (A2) is stored under. */
+export const PAIRING_TOKEN_VAULT_KEY = 'bridge-pairing-token';
 
 /** Daemon↔extension wire-protocol version. Bump when a change requires both
  * sides to be updated together; the extension refuses to call itself
@@ -100,9 +119,21 @@ export class BridgeServer {
   private readonly requestHandlers = new Map<string, RequestHandler>();
   /** Resolvers waiting on the first (or next) extension connection. */
   private connectWaiters: Array<() => void> = [];
+  /** The pairing token (A2) every client's first frame must present. `null`
+   * until the first-ever client pairs (trust-on-first-use) — persisted in the
+   * Vault so it survives daemon restarts. */
+  private pairingToken: string | null;
 
-  constructor(private readonly port: number = DEFAULT_BRIDGE_PORT) {
-    this.wss = new WebSocketServer({ port: this.port });
+  constructor(
+    private readonly port: number = DEFAULT_BRIDGE_PORT,
+    private readonly host: string = DEFAULT_BRIDGE_HOST,
+  ) {
+    this.wss = new WebSocketServer({ port: this.port, host: this.host });
+    try {
+      this.pairingToken = new Vault().get(PAIRING_TOKEN_VAULT_KEY) ?? null;
+    } catch {
+      this.pairingToken = null; // vault unreadable — treat as unpaired
+    }
     this.wss.on('connection', (ws, req) => {
       // A9 hardening: reject a handshake carrying an http(s) Origin — that's
       // a real web page's WebSocket, the main threat on a shared localhost
@@ -124,17 +155,38 @@ export class BridgeServer {
         try {
           first = JSON.parse(data.toString()) as Record<string, unknown>;
         } catch {
-          /* malformed — fall through to adopt; onMessage ignores it anyway */
+          /* malformed — fall through; the token check below rejects it (no token) */
         }
         let isHello = false;
+        let token: string | undefined;
         if (first && first.event === 'hello') {
-          const caps = (first.params as { caps?: unknown } | undefined)?.caps;
+          const params = first.params as { caps?: unknown; token?: unknown } | undefined;
+          const caps = params?.caps;
           if (!Array.isArray(caps) || caps.length === 0) {
             try { ws.close(); } catch { /* gone */ }
             return; // stale-code SW — do not adopt
           }
           isHello = true;
+          token = typeof params?.token === 'string' ? params.token : undefined;
         }
+
+        // A2: every client must present the current pairing token on its
+        // first frame to be adopted at all — closes the "any local process
+        // can connect with no auth" hole. Trust-on-first-use: the first token
+        // ever presented becomes THE pairing token, persisted so every later
+        // connection (including this one, on reconnect) must match it.
+        if (this.pairingToken === null) {
+          if (!token) {
+            try { ws.close(1008, 'pairing token required'); } catch { /* gone */ }
+            return;
+          }
+          this.pairingToken = token;
+          try { new Vault().set(PAIRING_TOKEN_VAULT_KEY, token); } catch { /* best-effort persist */ }
+        } else if (token !== this.pairingToken) {
+          try { ws.close(1008, 'pairing token mismatch'); } catch { /* gone */ }
+          return;
+        }
+
         ws.off('message', probe);
         const clientId = this.adopt(ws);
         this.onMessage(clientId, data.toString()); // don't lose the first frame
@@ -273,6 +325,15 @@ export class BridgeServer {
   /** Currently-connected client ids (in adoption order). */
   clientIds(): number[] {
     return [...this.clients.keys()];
+  }
+
+  /** True when `clientId` is currently connected — every adopted client
+   * already passed the pairing-token gate in the connection handler (A2), so
+   * this doubles as "authenticated". Reverse-RPC handlers (A3, vibe/service.ts)
+   * should check this explicitly rather than assume any onRequest call is
+   * inherently safe. */
+  isAuthenticated(clientId: number): boolean {
+    return this.clients.has(clientId);
   }
 
   /** Resolve a target clientId: explicit if given, else the default (most-recent). */

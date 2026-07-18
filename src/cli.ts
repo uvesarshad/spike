@@ -247,7 +247,7 @@ program
       process.exit(res.ok ? 0 : 1);
     }
 
-    const bridge = new BridgeServer(port);
+    const bridge = new BridgeServer(port, cfg.bridgeHost);
     const vibe = new VibeService(bridge);
     vibe.start();
     console.log(`vibe daemon listening on ws://localhost:${port} — open the extension side panel`);

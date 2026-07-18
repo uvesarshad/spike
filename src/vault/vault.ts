@@ -18,12 +18,28 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { DpapiKeyProvider } from './dpapi-key-provider.js';
 
 const ALGO = 'aes-256-gcm';
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
+
+/** `{ mode: 0o600 }` has no POSIX-permission effect on Windows — protection
+ * there comes only from inherited NTFS folder ACLs. Lock the file down
+ * explicitly: strip inheritance and grant Full Control to the current user
+ * only. Best-effort — a failure here doesn't affect the vault's encryption,
+ * only this extra layer of defense-in-depth on Windows (inherited ACLs remain
+ * as the fallback, same as before). No-op on POSIX, where the mode bits above
+ * already do the job. */
+function lockdownWindowsAcl(filePath: string): void {
+  if (process.platform !== 'win32') return;
+  try {
+    execFileSync('icacls', [filePath, '/inheritance:r', '/grant:r', `${os.userInfo().username}:F`], { stdio: 'pipe' });
+  } catch { /* best-effort hardening only */ }
+}
 
 /** The key-management seam. Swap FileKeyProvider for an OS-keychain provider
  * later without touching the encryption path or the Vault public API. */
@@ -47,6 +63,7 @@ export class FileKeyProvider implements KeyProvider {
     const key = crypto.randomBytes(KEY_BYTES);
     fs.mkdirSync(path.dirname(this.keyPath), { recursive: true });
     fs.writeFileSync(this.keyPath, key, { mode: 0o600 });
+    lockdownWindowsAcl(this.keyPath);
     return key;
   }
 }
@@ -118,6 +135,7 @@ export class Vault {
     const blob = Buffer.concat([iv, tag, ciphertext]);
     const tmp = this.secretsPath + '.tmp';
     fs.writeFileSync(tmp, blob, { mode: 0o600 });
+    lockdownWindowsAcl(tmp);
     fs.renameSync(tmp, this.secretsPath);
   }
 

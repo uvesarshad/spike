@@ -48,6 +48,54 @@ export interface LogpointSpec {
   expression: string;
 }
 
+/** Mirrors driver/loop.ts's own default allowedHosts — for callers that want
+ * to construct a port with the restrictive default explicitly. NOT applied
+ * automatically when a port's `allowedHosts` option is omitted: engine.ts
+ * constructs CdpBrowser/ExtensionBrowser before it resolves the run's actual
+ * allowedHosts (loop.ts's own Tier-4 default/trustTargetHost widening), so
+ * defaulting the port to localhost-only here would silently break every
+ * non-localhost QA run. Omitted `allowedHosts` therefore means "no additional
+ * port-layer restriction" (unchanged prior behavior) until callers are
+ * updated to thread the resolved list through. */
+export const DEFAULT_ALLOWED_HOSTS: string[] = ['localhost', '127.0.0.1'];
+
+/** Host of a URL, lowercased; '' for unparseable/non-http urls (about:blank
+ * etc). Mirrors driver/loop.ts's hostOf(). */
+export function hostOfUrl(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/** True when host is exactly in allowedHosts or a subdomain of one of them.
+ * Mirrors driver/loop.ts's hostAllowed() so both layers of the Tier-4 guard
+ * (A4) agree on what "allowed" means. */
+export function isHostAllowed(host: string, allowedHosts: string[]): boolean {
+  return allowedHosts.some((allowed) => {
+    const a = allowed.toLowerCase();
+    return host === a || host.endsWith('.' + a);
+  });
+}
+
+/** A4 (P0) defense-in-depth: the port-layer half of the Tier-4 mutation guard.
+ * driver/loop.ts already re-checks browser.url() before every mutating action
+ * (click/type/…), but that check lives ONLY in the loop — a caller driving a
+ * BrowserPort directly (or a raw CDP passthrough on the extension side, see
+ * extension/sw.js) bypasses it entirely. Ports call this before mutating
+ * calls so the guard holds even outside the loop. `allowedHosts` undefined
+ * means the caller didn't opt in to port-level enforcement — no-op, matching
+ * prior behavior (see DEFAULT_ALLOWED_HOSTS's doc comment for why this isn't
+ * defaulted automatically). Throws (never silently no-ops once a list IS
+ * given) so a blocked mutation surfaces as a clear step failure. */
+export function assertMutationHostAllowed(host: string, allowedHosts: string[] | undefined, what: string): void {
+  if (allowedHosts === undefined) return;
+  if (host && !isHostAllowed(host, allowedHosts)) {
+    throw new Error(`${what}: host "${host}" is not in allowedHosts — refusing to mutate`);
+  }
+}
+
 export interface BrowserPort {
   launch(): Promise<void>;
   navigate(url: string): Promise<void>;

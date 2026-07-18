@@ -189,7 +189,7 @@ export async function replayScript(
             break;
           }
           const png = await browser.screenshot();
-          record.screenshot = artifacts.saveScreenshot(i, png);
+          record.screenshot = await artifacts.saveScreenshot(i, png);
           const { verdict: v } = await nano!.verdict(png, s.expectation);
           record.visual = v;
           if (v.verdict === 'fail') {
@@ -209,6 +209,9 @@ export async function replayScript(
       failingStep = { index: i, action: record.action, description: record.description };
     }
 
+    // A13 (P1, best-effort — skipped): see loop.ts's identical note — BrowserPort
+    // has no non-destructive in-flight/idle check to poll here without extending
+    // the port interface, which is out of scope for this pass.
     await sleep(250);
     record.console = browser.drainConsole();
     record.network = browser.drainNetwork();
@@ -239,7 +242,7 @@ export async function replayScript(
   const last = steps[steps.length - 1];
   if (last && !last.screenshot) {
     try {
-      last.screenshot = artifacts.saveScreenshot(last.index, await browser.screenshot());
+      last.screenshot = await artifacts.saveScreenshot(last.index, await browser.screenshot());
     } catch {
       /* page may be gone */
     }
@@ -269,9 +272,9 @@ export async function replayScript(
     durationMs: Date.now() - t0,
     tokenEstimate: 0,
   };
-  const reportPath = artifacts.saveReport(report);
+  const reportPath = await artifacts.saveReport(report);
   report.evidence_paths.unshift(reportPath);
-  artifacts.saveReport(report);
+  await artifacts.saveReport(report);
   return report;
 }
 

@@ -15,6 +15,11 @@ export interface PlannerContext {
 }
 
 const MAX_EVIDENCE_LINES = 8;
+/** A5 (P0): cap how many past steps ride along in every prompt. Without this,
+ * a long run resends its ENTIRE history every call — O(n) per-call, O(n²)
+ * total tokens across the run. Only the tail is useful context; older steps
+ * collapse to a one-line count. */
+const MAX_HISTORY_ENTRIES = 20;
 
 function consoleLines(entries: ConsoleEntry[]): string[] {
   return entries
@@ -31,9 +36,13 @@ function networkLines(entries: NetworkEntry[]): string[] {
 }
 
 /** One line per step + any error/console/network/visual evidence it caused.
- * Shared by every prompt so history reads identically across roles. */
+ * Shared by every prompt so history reads identically across roles. Caps to
+ * the most recent MAX_HISTORY_ENTRIES steps (A5) — earlier ones collapse to a
+ * one-line count so prompt size stays bounded over a long run. */
 function formatHistory(history: StepRecord[]): string {
-  return history
+  const overflow = history.length - MAX_HISTORY_ENTRIES;
+  const recent = overflow > 0 ? history.slice(-MAX_HISTORY_ENTRIES) : history;
+  const lines = recent
     .map((s) => {
       const bits = [`${s.index}. ${s.description} → ${s.ok ? 'ok' : `FAILED: ${s.error ?? 'unknown'}`}`];
       bits.push(...consoleLines(s.console).map((l) => `   ${l}`));
@@ -42,6 +51,7 @@ function formatHistory(history: StepRecord[]): string {
       return bits.join('\n');
     })
     .join('\n');
+  return overflow > 0 ? `...and ${overflow} earlier step${overflow === 1 ? '' : 's'} omitted\n${lines}` : lines;
 }
 
 /** Mark the current goal with → and number the rest. */

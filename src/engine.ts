@@ -127,7 +127,7 @@ export interface BrowserSession {
  */
 export async function openBrowserSession(
   config: Partial<QaConfig> = {},
-  deps: { bridge?: BridgeServer; tabId?: number; clientId?: number } = {},
+  deps: { bridge?: BridgeServer; tabId?: number; clientId?: number; allowedHosts?: string[] } = {},
 ): Promise<BrowserSession> {
   const cfg = loadConfig(config);
 
@@ -135,7 +135,7 @@ export async function openBrowserSession(
     // Injected bridge (vibe daemon): the caller owns it — never close it here and
     // never spawn Chrome (the user's own Chrome is already attached via the panel).
     const injected = deps.bridge;
-    const bridge = injected ?? new BridgeServer(cfg.bridgePort);
+    const bridge = injected ?? new BridgeServer(cfg.bridgePort, cfg.bridgeHost);
     let chromeProcess: ChildProcess | undefined;
     try {
       if (injected) {
@@ -154,7 +154,7 @@ export async function openBrowserSession(
         chromeProcess = chrome;
       }
 
-      const browser = new ExtensionBrowser({ bridge, attachTabId: deps.tabId, clientId: deps.clientId, connectTimeoutMs: 20_000 });
+      const browser = new ExtensionBrowser({ bridge, attachTabId: deps.tabId, clientId: deps.clientId, connectTimeoutMs: 20_000, allowedHosts: deps.allowedHosts });
       try {
         await browser.launch(); // waits for the bridge connection, then creates the tab
       } catch (e) {
@@ -189,6 +189,7 @@ export async function openBrowserSession(
     port: cfg.cdpPort,
     profileDir: cfg.chromeProfile,
     headless: false, // headed: Nano lives here, and this window is the future "watch the robot" show
+    allowedHosts: deps.allowedHosts,
   });
   await browser.launch();
   return {
@@ -207,7 +208,7 @@ interface Session {
   close(): Promise<void>;
 }
 
-async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer; tabId?: number; clientId?: number } = {}): Promise<Session> {
+async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer; tabId?: number; clientId?: number; allowedHosts?: string[] } = {}): Promise<Session> {
   const browserSession = await openBrowserSession(config, deps);
   const { cfg } = browserSession;
   // Nano access depends on HOW Chrome got here:
@@ -413,7 +414,15 @@ async function runFreshAiPass(
   progress: (line: string) => void,
   runSpan: ActiveSpan,
 ): Promise<QaRunResult> {
-  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId });
+  // Computed before the session opens so CdpBrowser/ExtensionBrowser get the
+  // Tier-4 allowedHosts guard (A4, P0) at construction time, not just inside
+  // the driver loop — closes the "raw cdp passthrough bypasses the guard" gap.
+  const preCfg = loadConfig(opts.config ?? {});
+  const allowedHosts = (opts.trustTargetHost ?? true)
+    ? [...preCfg.allowedHosts, ...targetHostCandidates(url)]
+    : preCfg.allowedHosts;
+
+  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId, allowedHosts });
   const { cfg, browser, nano } = session;
 
   const vault = new Vault();
@@ -465,10 +474,6 @@ async function runFreshAiPass(
         progress('clip recorder unavailable on this transport — continuing without');
       }
     }
-
-    const allowedHosts = (opts.trustTargetHost ?? true)
-      ? [...cfg.allowedHosts, ...targetHostCandidates(url)]
-      : cfg.allowedHosts;
 
     const driverTracer = getDefaultTracer();
     const report: QaRunResult = await driverTracer.trace('qa.run.driver_loop', { runId: artifacts.runId, task, url }, () =>
@@ -530,7 +535,11 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   const tracer = getDefaultTracer();
   const replaySpan = tracer.startSpan('qa.replay', { scriptName: script.name, task: script.task, url: script.url });
 
-  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge });
+  // Same A4 (P0) defense-in-depth wiring as qaRun: give the port the recorded
+  // script's own host up front, so the guard is live even during replay.
+  const preCfg = loadConfig(opts.config ?? {});
+  const allowedHosts = [...preCfg.allowedHosts, ...targetHostCandidates(script.url)];
+  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, allowedHosts });
   const artifacts = new ArtifactStore(session.cfg.artifactsDir);
 
   let report: QaReplayResult;

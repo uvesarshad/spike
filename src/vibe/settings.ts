@@ -39,6 +39,13 @@ const DAEMON_PLANNER_MIGRATION: PlannerSelection = { provider: 'claude', mode: '
 
 export class SettingsStore {
   private readonly file: string;
+  /** Last-read raw value + the file's mtime at that read, so an unchanged file
+   * (the common case — settings aren't polled today, but future callers might)
+   * skips the sync readFileSync+JSON.parse (and the migration check) entirely.
+   * Invalidated the instant the on-disk mtime moves — including the migration
+   * rewrite in readRaw() and any write() below, both of which re-stat the file
+   * after writing and refresh this cache with the new mtime. */
+  private cache?: { mtimeMs: number; value: Partial<QaSettings> };
 
   constructor(file?: string) {
     this.file = file ?? defaultSettingsPath();
@@ -58,6 +65,14 @@ export class SettingsStore {
    * reader (this file, `qa config` CLI, the panel) sees the fixed values
    * without re-deriving the migration themselves. */
   readRaw(): Partial<QaSettings> {
+    let stat: fs.Stats | undefined;
+    try {
+      stat = fs.statSync(this.file);
+    } catch {
+      /* file doesn't exist (or is otherwise unstattable) — nothing cached to reuse */
+    }
+    if (stat && this.cache && this.cache.mtimeMs === stat.mtimeMs) return this.cache.value;
+
     let parsed: Partial<QaSettings> = {};
     let fileExisted = false;
     try {
@@ -73,7 +88,10 @@ export class SettingsStore {
 
     const deadPlanner = Boolean(parsed.planner && isDeadPlannerSelection(parsed.planner));
     const missingNavigator = !parsed.navigator;
-    if (!deadPlanner && !missingNavigator) return parsed;
+    if (!deadPlanner && !missingNavigator) {
+      if (stat) this.cache = { mtimeMs: stat.mtimeMs, value: parsed };
+      return parsed;
+    }
 
     const migrated: Partial<QaSettings> = {
       ...parsed,
@@ -83,8 +101,10 @@ export class SettingsStore {
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
       fs.writeFileSync(this.file, JSON.stringify(migrated, null, 2));
+      this.cache = { mtimeMs: fs.statSync(this.file).mtimeMs, value: migrated };
     } catch {
       /* best effort — caller still gets the migrated value in-memory; next read retries the write */
+      this.cache = undefined;
     }
     return migrated;
   }
@@ -117,6 +137,11 @@ export class SettingsStore {
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     fs.writeFileSync(this.file, JSON.stringify(next, null, 2));
+    try {
+      this.cache = { mtimeMs: fs.statSync(this.file).mtimeMs, value: next };
+    } catch {
+      this.cache = undefined;
+    }
     return next;
   }
 }

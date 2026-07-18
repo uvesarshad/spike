@@ -3,7 +3,30 @@ export const REDACTED = '[redacted]';
 const SECRET_PLACEHOLDER_RE = /\{\{secret:([A-Za-z0-9_-]+)\}\}/g;
 const BEARER_RE = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 const API_KEY_RE = /\b(?:sk-[A-Za-z0-9_-]{8,}|sk-ant-[A-Za-z0-9_-]{8,}|ghp_[A-Za-z0-9_]{8,})\b/g;
+const JWT_RE = /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b/g;
+// Catches secret-shaped substrings inside otherwise-unlabeled attributes (e.g. a
+// task/url string, not just a known header) — "token=...", "password: ..." — but
+// never inside a {{secret:NAME}} placeholder (handled separately below).
+const LABELED_SECRET_RE = /(?<!\{)\b(api[-_]?key|authorization|password|passwd|pwd|secret|token)(\s*[:=]\s*)(['"]?)([^\s'"&,;{}]+)/gi;
+const URL_WITH_SCHEME_RE = /\b[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s'"<>]+/g;
 const SENSITIVE_KEY_RE = /(^|[-_.])(api[-_]?key|authorization|cookie|password|secret|token|x-api-key)([-_.]|$)/i;
+
+/** Strip the query string, fragment, and userinfo (user:pass@) off a URL-shaped
+ * substring before it's attached anywhere — these are the parts of a URL most
+ * likely to carry a token, session id, or basic-auth credential. Leaves the
+ * scheme/host/path intact for readability. Non-URL input passes through. */
+function stripUrlSecrets(candidate: string): string {
+  try {
+    const u = new URL(candidate);
+    u.username = '';
+    u.password = '';
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return candidate;
+  }
+}
 
 export interface RedactionOptions {
   /** Exact secret values known to the caller. Empty strings are ignored. */
@@ -26,8 +49,14 @@ export function redactString(input: string, opts: RedactionOptions = {}): string
     if (!secret) continue;
     out = out.split(secret).join(REDACTED);
   }
+  out = out.replace(URL_WITH_SCHEME_RE, (m) => stripUrlSecrets(m));
   out = out.replace(BEARER_RE, (_m, scheme: string) => `${scheme} ${REDACTED}`);
   out = out.replace(API_KEY_RE, REDACTED);
+  out = out.replace(JWT_RE, REDACTED);
+  out = out.replace(
+    LABELED_SECRET_RE,
+    (_m, label: string, sep: string, quote: string) => `${label}${sep}${quote}${REDACTED}${quote}`,
+  );
   if (opts.redactSecretPlaceholders ?? true) {
     out = out.replace(SECRET_PLACEHOLDER_RE, `{{secret:${REDACTED}}}`);
   }

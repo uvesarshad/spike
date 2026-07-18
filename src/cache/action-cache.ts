@@ -350,7 +350,12 @@ export class FileActionCache {
   read(key: ActionCacheKey): ActionCacheRecord | null {
     const file = this.getPath(key);
     if (!fs.existsSync(file)) return null;
-    const record = JSON.parse(fs.readFileSync(file, 'utf8')) as ActionCacheRecord;
+    let record: ActionCacheRecord;
+    try {
+      record = JSON.parse(fs.readFileSync(file, 'utf8')) as ActionCacheRecord;
+    } catch {
+      return null; // corrupt cache entry — treat as a miss, same as findForContext()
+    }
     if (record.version !== ACTION_CACHE_VERSION || record.key.id !== key.id) return null;
     assertNoSecretsInCacheRecord(record);
     return record;

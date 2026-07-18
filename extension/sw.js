@@ -62,6 +62,33 @@ try {
     }
   });
 } catch { /* storage unavailable — defaults stand */ }
+
+// A2: pairing token — minted ONCE on first install and persisted in
+// chrome.storage.local, presented in every `hello` frame. The daemon's bridge
+// (src/bridge/bridge-server.ts) trusts the FIRST token it ever sees (persisted
+// in its own Vault) and rejects any later connection whose token doesn't
+// match — this is what actually closes "any local process can connect".
+let pairingToken = null;
+const pairingTokenReady = new Promise((resolve) => {
+  try {
+    chrome.storage.local.get('pairingToken', (v) => {
+      if (v && typeof v.pairingToken === 'string' && v.pairingToken) {
+        pairingToken = v.pairingToken;
+        resolve(pairingToken);
+        return;
+      }
+      const bytes = crypto.getRandomValues(new Uint8Array(24));
+      const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+      chrome.storage.local.set({ pairingToken: token }, () => {
+        pairingToken = token;
+        resolve(token);
+      });
+    });
+  } catch {
+    resolve(null); // storage unavailable — hello goes out without a token (daemon will reject it)
+  }
+});
+
 const DEBUGGER_VERSION = '1.3';
 const NAVIGATE_TIMEOUT_MS = 30_000;
 
@@ -602,8 +629,26 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // ---- method handlers -------------------------------------------------------
 
+// A7: schemes chrome.debugger CAN attach to but that we refuse anyway — other
+// extensions' pages (which may be password managers etc.), devtools itself,
+// and view-source. chrome.debugger already blocks chrome:// on its own, but
+// we log + gate explicitly rather than rely on that alone. 'about:blank' (the
+// tab ext.createTab makes for a fresh test tab) is allowed — only OTHER
+// about: pages are refused.
+const SENSITIVE_SCHEMES = ['chrome:', 'chrome-extension:', 'devtools:', 'edge:', 'view-source:', 'about:'];
+
 async function attachDebugger(tabId) {
   if (attached.has(tabId)) return;
+  let url = '';
+  try {
+    url = (await getTab(tabId)).url || '';
+  } catch { /* tab lookup failed — attach() below will fail with its own error */ }
+  let scheme = '';
+  try { scheme = new URL(url).protocol; } catch { /* opaque/new-tab urls */ }
+  log('attaching debugger to tab', tabId, url || '(unknown url)');
+  if (url !== 'about:blank' && SENSITIVE_SCHEMES.includes(scheme)) {
+    throw new Error(`attachDebugger: refusing to attach to a ${scheme} page (tab ${tabId})`);
+  }
   await new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, DEBUGGER_VERSION, () => {
       if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
@@ -1105,7 +1150,7 @@ function connect() {
   }
   ws = socket;
 
-  socket.addEventListener('open', () => {
+  socket.addEventListener('open', async () => {
     connecting = false;
     reconnectDelay = 500;
     log('connected to bridge', socket.url);
@@ -1126,7 +1171,9 @@ function connect() {
     // `caps` advertises this SW's supported methods so a bridge can disambiguate
     // when more than one SW (e.g. a stale install in another Chrome) dials in.
     // `protocolVersion` is this build's wire-protocol version (A4 handshake).
-    emit('hello', { extension: chrome.runtime.id, caps: ['ext.attachTab', 'keepTab'], protocolVersion: PROTOCOL_VERSION });
+    // `token` is the A2 pairing token — the bridge closes the socket without it.
+    const token = pairingToken ?? (await pairingTokenReady);
+    emit('hello', { extension: chrome.runtime.id, caps: ['ext.attachTab', 'keepTab'], protocolVersion: PROTOCOL_VERSION, token });
   });
 
   socket.addEventListener('message', (ev) => {

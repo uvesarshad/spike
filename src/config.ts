@@ -29,6 +29,10 @@ export interface QaConfig {
   via: 'cdp' | 'extension';
   /** WebSocket port the daemon↔extension bridge listens on (extension mode). */
   bridgePort: number;
+  /** Interface the bridge WebSocket server binds to. Defaults to loopback-only
+   * (A1 hardening) — the server used to omit `host` entirely, which made `ws`
+   * default to binding ALL interfaces (0.0.0.0/::), reachable from the LAN. */
+  bridgeHost: string;
   /** Unpacked extension dir dev-loaded in extension mode. */
   extensionDir: string;
   /** CDP port for the daemon's Chrome. */
@@ -105,6 +109,7 @@ export interface QaConfig {
 const DEFAULTS: QaConfig = {
   via: 'cdp',
   bridgePort: 9410,
+  bridgeHost: '127.0.0.1',
   extensionDir: DEFAULT_EXTENSION_DIR,
   cdpPort: 9322,
   runnerPort: 9400,
@@ -155,6 +160,7 @@ function fromEnv(): Partial<QaConfig> {
   const out: Partial<QaConfig> = {};
   if (e.QA_VIA === 'cdp' || e.QA_VIA === 'extension') out.via = e.QA_VIA;
   if (e.QA_BRIDGE_PORT) out.bridgePort = Number(e.QA_BRIDGE_PORT);
+  if (e.QA_BRIDGE_HOST) out.bridgeHost = e.QA_BRIDGE_HOST;
   if (e.QA_EXTENSION_DIR) out.extensionDir = e.QA_EXTENSION_DIR;
   if (e.QA_CDP_PORT) out.cdpPort = Number(e.QA_CDP_PORT);
   if (e.QA_RUNNER_PORT) out.runnerPort = Number(e.QA_RUNNER_PORT);

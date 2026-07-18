@@ -244,12 +244,24 @@ export function saveScript(script: QaScript, root = process.cwd()): { jsonPath: 
   return { jsonPath, specPath };
 }
 
+// Phase-14+ callers (matchReplayScript in particular) call loadScript() once
+// per recorded script on EVERY invocation — cache the parsed result per
+// resolved path, keyed by mtime, so an unchanged script isn't re-read/re-parsed
+// off disk on every call within the same process. Invalidated automatically
+// the moment a script's mtime changes (re-record, self-heal re-emit, …).
+const scriptCache = new Map<string, { mtimeMs: number; script: QaScript }>();
+
 export function loadScript(nameOrPath: string, root = process.cwd()): QaScript {
   const p = nameOrPath.endsWith('.json')
     ? path.resolve(nameOrPath)
     : path.join(scriptsDir(root), `${taskSlug(nameOrPath)}.json`);
   if (!fs.existsSync(p)) throw new Error(`no recorded script at ${p} — record one with a passing \`qa run\``);
-  return JSON.parse(fs.readFileSync(p, 'utf8')) as QaScript;
+  const mtimeMs = fs.statSync(p).mtimeMs;
+  const cached = scriptCache.get(p);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.script;
+  const script = JSON.parse(fs.readFileSync(p, 'utf8')) as QaScript;
+  scriptCache.set(p, { mtimeMs, script });
+  return script;
 }
 
 export function listScripts(root = process.cwd()): string[] {

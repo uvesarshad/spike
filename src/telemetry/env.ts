@@ -57,8 +57,19 @@ function buildTracerFromEnv(): TelemetryTracer {
     headers,
     serviceName: process.env.QA_OTLP_SERVICE_NAME || 'browser-qa-subagent',
   });
+  // Known BYOK key env vars — scrubbed wherever they appear in span text (e.g. a
+  // key that leaked into an adapter error message or a query string), same as
+  // engine.ts's own precedence order for these vars.
+  const secretValues = [
+    process.env.GEMINI_API_KEY,
+    process.env.ANTHROPIC_API_KEY,
+    process.env.OPENAI_API_KEY,
+    process.env.OPENROUTER_API_KEY,
+    process.env.GLM_API_KEY,
+    process.env.ZAI_API_KEY,
+  ].filter((v): v is string => Boolean(v));
   // maxStringLength kept modest — traces are for debugging/latency/cost shape,
   // not for re-reading full prompts/responses; full detail still lives in
   // report.json (never exported here).
-  return createTelemetryTracer({ exporter, redaction: { maxStringLength: 2_000 } });
+  return createTelemetryTracer({ exporter, redaction: { maxStringLength: 2_000, secretValues } });
 }

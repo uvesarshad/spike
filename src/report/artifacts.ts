@@ -31,21 +31,21 @@ export class ArtifactStore {
     fs.mkdirSync(path.join(this.dir, 'screenshots'), { recursive: true });
   }
 
-  saveScreenshot(stepIndex: number, png: Buffer): string {
+  async saveScreenshot(stepIndex: number, png: Buffer): Promise<string> {
     const p = path.join(this.dir, 'screenshots', `step-${String(stepIndex).padStart(2, '0')}.png`);
-    fs.writeFileSync(p, png);
+    await fs.promises.writeFile(p, png);
     return p;
   }
 
-  saveReport(report: Report): string {
+  async saveReport(report: Report): Promise<string> {
     const p = path.join(this.dir, 'report.json');
-    fs.writeFileSync(p, JSON.stringify(report, null, 2));
+    await fs.promises.writeFile(p, JSON.stringify(report, null, 2));
     return p;
   }
 
   /** Append one JSON line per EXECUTED action. Caller must pass redacted values
    * (placeholders, never resolved secrets). */
-  appendAudit(entry: AuditEntry): void {
-    fs.appendFileSync(path.join(this.dir, 'audit.log'), JSON.stringify(entry) + '\n');
+  async appendAudit(entry: AuditEntry): Promise<void> {
+    await fs.promises.appendFile(path.join(this.dir, 'audit.log'), JSON.stringify(entry) + '\n');
   }
 }

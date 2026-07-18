@@ -53,6 +53,40 @@ import { startClipRecorder, type CdpClientLike } from '../clip/screencast.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** A12 (P1): race any CDP or model call against a hard deadline so a hung call
+ * (dropped debugger connection, stalled LLM HTTP/CLI call) surfaces as a
+ * rejected promise instead of blocking the run forever. Follows the same
+ * reject-with-timer-and-message shape as CliPlannerAdapter's own child-process
+ * timeout (src/router/adapters/cli-planner.ts) — the losing side is simply
+ * abandoned, not cancelled. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+/** CDP calls (axTree/screenshot) — a dropped debugger connection should surface
+ * quickly rather than hang the run. */
+const CDP_CALL_TIMEOUT_MS = 15_000;
+/** Navigator/brain calls — a stalled HTTP/CLI call should surface quickly rather
+ * than hang the run; this is a loop-level backstop on top of any per-adapter
+ * timeout (e.g. CliPlannerAdapter's own 120s child-process timeout, matched by
+ * every other adapter's default `timeoutMs` — google-cli, anthropic, byok-gemini,
+ * ollama, openai-compatible). Must stay ABOVE that 120s so it backstops a truly
+ * hung call instead of preempting a legitimately slow-but-working one — a lower
+ * value (previously 30s) fired before any adapter's own timeout ever could,
+ * turning normal CLI cold-spawn latency into spurious "timed out" failures. */
+const LLM_CALL_TIMEOUT_MS = 130_000;
+
 /** Default global step budget for an AI run. Raised from the old 12 because the
  * brain/navigator split makes per-step cost the CHEAP navigator, so runs can go
  * long. Caller-provided LoopOptions.maxSteps always wins; the budget stays the
@@ -411,7 +445,7 @@ export async function runDriverLoop(
       return 'end';
     }
     brainEscalations++;
-    const ax = await browser.axTree();
+    const ax = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
     lastSnapshotAx = ax;
     const nowUrl = await browser.url();
     onStep({ index: stepIndex, kind: 'plan', text: `Stuck — asking the planner: ${failure.slice(0, 80)}` });
@@ -475,8 +509,8 @@ export async function runDriverLoop(
     record: StepRecord,
     reasonText: string,
   ): Promise<'pass' | 'end' | 'continue'> => {
-    const png = await browser.screenshot();
-    record.screenshot = artifacts.saveScreenshot(i, png);
+    const png = await withTimeout(browser.screenshot(), CDP_CALL_TIMEOUT_MS, 'screenshot');
+    record.screenshot = await artifacts.saveScreenshot(i, png);
     const confirm = await runVisualAssertion(
       router,
       png,
@@ -537,7 +571,7 @@ export async function runDriverLoop(
     await sleep(150);
     record.console = browser.drainConsole();
     record.network = browser.drainNetwork();
-    artifacts.appendAudit({
+    await artifacts.appendAudit({
       ts: record.ts,
       runId: artifacts.runId,
       action: action.type,
@@ -558,7 +592,7 @@ export async function runDriverLoop(
     goals = [task];
     onStep({ index: stepIndex, kind: 'plan', text: 'No planner configured — navigating directly.' });
   } else {
-    const ax = await browser.axTree();
+    const ax = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
     lastSnapshotAx = ax;
     const planUrl = await browser.url();
     onStep({ index: stepIndex, kind: 'plan', text: 'Planning goals…' });
@@ -627,7 +661,7 @@ export async function runDriverLoop(
       break;
     }
 
-    const ax = await browser.axTree();
+    const ax = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
     lastSnapshotAx = ax;
     const batchUrl = await browser.url();
 
@@ -682,7 +716,7 @@ export async function runDriverLoop(
         }
         record.console = browser.drainConsole();
         record.network = browser.drainNetwork();
-        artifacts.appendAudit({
+        await artifacts.appendAudit({
           ts: record.ts,
           runId: artifacts.runId,
           action: cachedAction.type,
@@ -834,12 +868,15 @@ export async function runDriverLoop(
       // the typeof guard both narrows action.nodeId to `string` and correctly
       // skips a nodeId-less extract.
       if ('nodeId' in action && typeof action.nodeId === 'string') {
-        const t = findNode(ax.root, action.nodeId);
+        // A23: findNode + rankByRoleName combined into ONE tree walk (findNodeRanked)
+        // instead of two independent traversals of the same ax.root.
+        const found = findNodeRanked(ax.root, action.nodeId);
+        const t = found?.node;
         if (t) {
           record.target = { role: t.role, ...(t.name && { name: t.name }) };
           // #6: when the snapshot held >1 node sharing this role+name, record
           // which one (0-based, document order) so replay/codegen can disambiguate.
-          const { count, index } = rankByRoleName(ax.root, t.role, t.name, action.nodeId);
+          const { count, index } = found!;
           if (count > 1 && index >= 0) record.target.nth = index;
           // #9: a name-less interaction target has no resilient role+name locator
           // — stamp a data-qa-id as a fallback (best-effort; lost on reload).
@@ -859,23 +896,24 @@ export async function runDriverLoop(
         // sourceTarget/targetTarget on the action itself (never model-emitted —
         // see actions.ts) so the recorder can distill a full replay step
         // without needing a second target slot on StepRecord.
-        const src = findNode(ax.root, action.sourceId);
-        const dst = findNode(ax.root, action.targetId);
+        // A23: findNode + rankByRoleName combined into ONE tree walk per target.
+        const srcFound = findNodeRanked(ax.root, action.sourceId);
+        const dstFound = findNodeRanked(ax.root, action.targetId);
+        const src = srcFound?.node;
+        const dst = dstFound?.node;
         if (src) {
           record.target = { role: src.role, ...(src.name && { name: src.name }) };
-          const srcRank = rankByRoleName(ax.root, src.role, src.name, action.sourceId);
-          if (srcRank.count > 1 && srcRank.index >= 0) record.target.nth = srcRank.index;
+          if (srcFound!.count > 1 && srcFound!.index >= 0) record.target.nth = srcFound!.index;
         }
         const sourceTarget = src
           ? { role: src.role, ...(src.name && { name: src.name }), ...(record.target?.nth !== undefined && { nth: record.target.nth }) }
           : undefined;
         let targetTarget: { role: string; name?: string; nth?: number } | undefined;
         if (dst) {
-          const dstRank = rankByRoleName(ax.root, dst.role, dst.name, action.targetId);
           targetTarget = {
             role: dst.role,
             ...(dst.name && { name: dst.name }),
-            ...(dstRank.count > 1 && dstRank.index >= 0 && { nth: dstRank.index }),
+            ...(dstFound!.count > 1 && dstFound!.index >= 0 && { nth: dstFound!.index }),
           };
         }
         if (sourceTarget || targetTarget) {
@@ -926,8 +964,8 @@ export async function runDriverLoop(
               ? await startAssertionClip(browser.cdpClient(), artifacts)
               : null;
           if (videoRecorder) await sleep(500);
-          const png = await browser.screenshot();
-          record.screenshot = artifacts.saveScreenshot(i, png);
+          const png = await withTimeout(browser.screenshot(), CDP_CALL_TIMEOUT_MS, 'screenshot');
+          record.screenshot = await artifacts.saveScreenshot(i, png);
           const videoPath = videoRecorder ? await videoRecorder.stop().catch(() => null) : null;
           if (videoPath) record.video = videoPath;
 
@@ -1000,10 +1038,14 @@ export async function runDriverLoop(
             } else {
               const text = source ? subtreeText(source).trim() : ax.text;
               try {
-                const raw = await router.planJson(
-                  buildExtractPrompt({ prompt: action.prompt, key: action.key, text }),
-                  EXTRACT_JSON_SCHEMA,
-                  i,
+                const raw = await withTimeout(
+                  router.planJson(
+                    buildExtractPrompt({ prompt: action.prompt, key: action.key, text }),
+                    EXTRACT_JSON_SCHEMA,
+                    i,
+                  ),
+                  LLM_CALL_TIMEOUT_MS,
+                  'extract planJson',
                 );
                 const parsed = ExtractResultSchema.safeParse(raw);
                 const value = parsed.success ? parsed.data.value : null;
@@ -1084,6 +1126,11 @@ export async function runDriverLoop(
       if (record.ok === false) actionSpan.fail(record.error ?? 'action failed');
       else actionSpan.end();
 
+      // A13 (P1, best-effort — skipped): an event-driven "network idle" wait would
+      // replace this fixed sleep, but BrowserPort exposes no non-destructive way to
+      // check in-flight requests (drainConsole/drainNetwork consume the buffer this
+      // step's record still needs) — adding one means extending BrowserPort/CdpBrowser,
+      // out of scope here. Keeping the fixed wait until that primitive exists.
       await sleep(150); // let async fallout (fetches, navigations) land
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
@@ -1113,7 +1160,7 @@ export async function runDriverLoop(
 
       // ---- audit trail: one redacted JSON line per EXECUTED action. target is
       // role+name or url (placeholders, never resolved secrets). ----
-      artifacts.appendAudit({
+      await artifacts.appendAudit({
         ts: record.ts,
         runId: artifacts.runId,
         action: action.type,
@@ -1217,8 +1264,8 @@ export async function runDriverLoop(
   const lastStep = steps[steps.length - 1];
   if (lastStep && !lastStep.screenshot) {
     try {
-      const png = await browser.screenshot();
-      lastStep.screenshot = artifacts.saveScreenshot(lastStep.index, png);
+      const png = await withTimeout(browser.screenshot(), CDP_CALL_TIMEOUT_MS, 'screenshot');
+      lastStep.screenshot = await artifacts.saveScreenshot(lastStep.index, png);
     } catch {
       /* page may be gone */
     }
@@ -1272,7 +1319,7 @@ export async function runDriverLoop(
     ...steps.filter((s) => s.screenshot).map((s) => s.screenshot!),
     ...steps.filter((s) => s.video).map((s) => s.video!),
   ];
-  const reportPath = artifacts.saveReport(report);
+  const reportPath = await artifacts.saveReport(report);
   report.evidence_paths.unshift(reportPath);
   // A5a: attach the compact spend summary BEFORE counting tokens — it is part of
   // the slim payload the caller reads back, so verdictPayloadTokens must include
@@ -1282,7 +1329,7 @@ export async function runDriverLoop(
   report.tokens = tokens;
   // tokenEstimate keeps its product-doc meaning: what the calling agent pays.
   report.tokenEstimate = tokens.verdictPayloadTokens;
-  artifacts.saveReport(report); // rewrite with final paths + estimate
+  await artifacts.saveReport(report); // rewrite with final paths + estimate
   return report;
 }
 
@@ -1390,14 +1437,18 @@ async function navigateOnce(
   router: ModelRouter,
   { prompt, step }: { prompt: string; step: number },
 ): Promise<PlanResult> {
-  const raw = await router.planJson(prompt, PLAN_JSON_SCHEMA, step);
+  const raw = await withTimeout(router.planJson(prompt, PLAN_JSON_SCHEMA, step), LLM_CALL_TIMEOUT_MS, 'navigator planJson');
   const parsed = PlanResultSchema.safeParse(raw);
   if (parsed.success) return parsed.data;
   // one retry with the validation error attached
-  const retryRaw = await router.planJson(
-    `${prompt}\n\nYour previous response was invalid: ${parsed.error.message.slice(0, 300)}\nRespond again with ONLY valid JSON.`,
-    PLAN_JSON_SCHEMA,
-    step,
+  const retryRaw = await withTimeout(
+    router.planJson(
+      `${prompt}\n\nYour previous response was invalid: ${parsed.error.message.slice(0, 300)}\nRespond again with ONLY valid JSON.`,
+      PLAN_JSON_SCHEMA,
+      step,
+    ),
+    LLM_CALL_TIMEOUT_MS,
+    'navigator planJson',
   );
   const retry = PlanResultSchema.safeParse(retryRaw);
   if (retry.success) return retry.data;
@@ -1411,14 +1462,18 @@ async function planGoalsOnce(
   router: ModelRouter,
   { prompt, step }: { prompt: string; step: number },
 ): Promise<GoalPlan> {
-  const raw = await router.planGoals(prompt, GOAL_PLAN_JSON_SCHEMA, step);
+  const raw = await withTimeout(router.planGoals(prompt, GOAL_PLAN_JSON_SCHEMA, step), LLM_CALL_TIMEOUT_MS, 'brain planGoals');
   const parsed = GoalPlanSchema.safeParse(raw);
   if (parsed.success) return parsed.data;
   // one retry with the validation error attached
-  const retryRaw = await router.planGoals(
-    `${prompt}\n\nYour previous response was invalid: ${parsed.error.message.slice(0, 300)}\nRespond again with ONLY valid JSON.`,
-    GOAL_PLAN_JSON_SCHEMA,
-    step,
+  const retryRaw = await withTimeout(
+    router.planGoals(
+      `${prompt}\n\nYour previous response was invalid: ${parsed.error.message.slice(0, 300)}\nRespond again with ONLY valid JSON.`,
+      GOAL_PLAN_JSON_SCHEMA,
+      step,
+    ),
+    LLM_CALL_TIMEOUT_MS,
+    'brain planGoals',
   );
   const retry = GoalPlanSchema.safeParse(retryRaw);
   if (retry.success) return retry.data;
@@ -1445,7 +1500,7 @@ async function executeWithRetry(browser: BrowserPort, action: Action, planTree: 
     }
     const target = findNode(planTree, action.nodeId);
     if (!target) throw firstErr;
-    const fresh = await browser.axTree();
+    const fresh = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
     const match = findByRoleName(fresh.root, target.role, target.name);
     if (!match) throw firstErr;
     await executeOnce(browser, { ...action, nodeId: match.id });
@@ -1569,6 +1624,32 @@ export function rankByRoleName(
   };
   walk(root);
   return { count, index };
+}
+
+/** A23 (P2): find a node by id AND its same-role+name rank (see rankByRoleName)
+ * from ONE recursive descent of `root` (flattened once), instead of the two
+ * independent tree walks findNode + rankByRoleName would otherwise cost for
+ * the same action target. Same document-order counting semantics as
+ * rankByRoleName — no behavior change, just one walk instead of two. */
+function findNodeRanked(root: AxNode, id: string): { node: AxNode; count: number; index: number } | undefined {
+  const flat: AxNode[] = [];
+  let target: AxNode | undefined;
+  const walk = (n: AxNode): void => {
+    flat.push(n);
+    if (n.id === id) target = n;
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+  if (!target) return undefined;
+  let count = 0;
+  let index = -1;
+  for (const n of flat) {
+    if (n.role === target.role && n.name === target.name) {
+      if (n.id === id) index = count;
+      count++;
+    }
+  }
+  return { node: target, count, index };
 }
 
 function findByRoleName(root: AxNode, role: string, name?: string): AxNode | undefined {

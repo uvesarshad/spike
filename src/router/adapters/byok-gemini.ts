@@ -181,12 +181,13 @@ export class ByokGeminiAdapter implements ModelAdapter {
       Buffer.from(`\r\n--${boundary}--`),
     ]);
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${this.opts.apiKey}`,
+      `https://generativelanguage.googleapis.com/upload/v1beta/files`,
       {
         method: 'POST',
         headers: {
           'X-Goog-Upload-Protocol': 'multipart',
           'Content-Type': `multipart/related; boundary=${boundary}`,
+          'x-goog-api-key': this.opts.apiKey!,
         },
         body,
         signal: AbortSignal.timeout(this.opts.timeoutMs ?? 120_000),
@@ -212,8 +213,11 @@ export class ByokGeminiAdapter implements ModelAdapter {
     while (current.state === 'PROCESSING' && Date.now() < deadline) {
       await new Promise<void>((r) => setTimeout(r, 2_000));
       const res = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/${current.name}?key=${this.opts.apiKey}`,
-        { signal: AbortSignal.timeout(10_000) },
+        `https://generativelanguage.googleapis.com/v1beta/${current.name}`,
+        {
+          headers: { 'x-goog-api-key': this.opts.apiKey! },
+          signal: AbortSignal.timeout(10_000),
+        },
       );
       if (!res.ok) break; // best effort — fall through and let generateContent surface the real error
       current = (await res.json()) as GeminiFile;

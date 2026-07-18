@@ -11,6 +11,24 @@
 #
 # Re-running is safe (idempotent): it upgrades the package and re-registers the
 # task. Everything is per-user; no admin elevation required.
+#
+# Trust model (see docs/plan/26-07-14-audit-perf-security.md A18):
+#   This script is fetched over `irm ... | iex` straight from GitHub Raw's
+#   `main` branch (see INSTALL_BASE in the extension panel) — there is no
+#   pinned commit/tag and no signature/checksum check on the script content
+#   itself. A compromised push to `main` would run unverified on the next
+#   click of "Connect the desktop app." The blast radius is bounded, though:
+#   this script's only side effect beyond writing a scheduled task is
+#   `npm install -g browser-qa-subagent`, and npm registry integrity
+#   (package signing/checksums) already covers that actual payload — this
+#   script is just a thin, auditable bootstrapper around it. There is also a
+#   non-remote-script fallback (the panel's "without a remote script (npm)"
+#   toggle) that skips fetching this file entirely.
+#   package.json currently has a version field (0.1.0) but this repo has no
+#   git tags / GitHub Releases yet, so there is no tagged install script to
+#   pin to instead of `main` today. If tagged releases are introduced later,
+#   prefer fetching install.ps1 from that tag instead of `main` — until then,
+#   this is a documented tradeoff, not a silent gap.
 
 $ErrorActionPreference = 'Stop'
 $PkgName = 'browser-qa-subagent'

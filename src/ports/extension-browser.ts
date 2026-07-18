@@ -19,13 +19,15 @@ import { setLogpointByContent } from '../capture/logpoints.js';
 import { snapshotAxTree } from '../capture/axtree.js';
 import { BridgeServer, DEFAULT_BRIDGE_PORT } from '../bridge/bridge-server.js';
 import { createCdpShim, type CdpShim } from '../bridge/cdp-shim.js';
-import type {
-  AxNode,
-  AxSnapshot,
-  BrowserPort,
-  ConsoleEntry,
-  LogpointSpec,
-  NetworkEntry,
+import {
+  assertMutationHostAllowed,
+  hostOfUrl,
+  type AxNode,
+  type AxSnapshot,
+  type BrowserPort,
+  type ConsoleEntry,
+  type LogpointSpec,
+  type NetworkEntry,
 } from './browser-port.js';
 
 export interface ExtensionBrowserOptions {
@@ -45,6 +47,12 @@ export interface ExtensionBrowserOptions {
    * event subscription is filtered to it too. Absent → default-client behavior
    * (all current single-client tests unchanged). */
   clientId?: number;
+  /** A4 (P0) defense-in-depth: hosts the driver may click/type on — re-checked
+   * here independent of driver/loop.ts's own Tier-4 guard. Omitted → no
+   * additional port-level restriction (see browser-port.ts's
+   * DEFAULT_ALLOWED_HOSTS doc comment); pass the run's resolved allowedHosts
+   * to actually enforce it here. */
+  allowedHosts?: string[];
 }
 
 export class ExtensionBrowser implements BrowserPort {
@@ -84,6 +92,19 @@ export class ExtensionBrowser implements BrowserPort {
    * contract (clip recorder) — same surface as CdpBrowser.cdpClient(). */
   cdpClient() {
     return this.c;
+  }
+
+  /** A4 (P0) defense-in-depth: re-checks the Tier-4 allowedHosts guard at the
+   * port layer against the LIVE page host, independent of driver/loop.ts's own
+   * check — so a mutation reaching this port via the raw `cdp` bridge
+   * passthrough (extension/sw.js) can't bypass the guard either. Mirrors
+   * CdpBrowser.assertMutationAllowed. No-ops when the caller didn't pass
+   * allowedHosts (see browser-port.ts's DEFAULT_ALLOWED_HOSTS doc comment for
+   * why this isn't defaulted to localhost-only automatically). */
+  private async assertMutationAllowed(what: string): Promise<void> {
+    if (!this.opts.allowedHosts) return;
+    const host = hostOfUrl(await this.url());
+    assertMutationHostAllowed(host, this.opts.allowedHosts, what);
   }
 
   private get tab(): number {
@@ -199,6 +220,7 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async click(nodeId: string): Promise<void> {
+    await this.assertMutationAllowed('click');
     const backendNodeId = this.backendNodeId(nodeId);
     const { x, y } = await this.centerOf(backendNodeId);
     // Ghost cursor: glide to the target + caption BEFORE dispatching, so the
@@ -213,6 +235,7 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async type(nodeId: string, text: string): Promise<void> {
+    await this.assertMutationAllowed('type');
     const backendNodeId = this.backendNodeId(nodeId);
     await this.c.Page.bringToFront().catch(() => {}); // see click()
     await this.c.DOM.scrollIntoViewIfNeeded({ backendNodeId }).catch(() => {});
@@ -261,6 +284,7 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async pressKey(key: string): Promise<void> {
+    await this.assertMutationAllowed('pressKey');
     await this.c.Page.bringToFront().catch(() => {});
     this.emitCursor({ kind: 'caption', caption: `Pressing ${key}` });
     await this.c.Input.dispatchKeyEvent({ type: 'keyDown', key });
@@ -269,6 +293,7 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async selectOption(nodeId: string, value: string): Promise<void> {
+    await this.assertMutationAllowed('selectOption');
     const backendNodeId = this.backendNodeId(nodeId);
     this.emitCursor({ kind: 'caption', caption: 'Selecting ' + JSON.stringify(value) + ' in ' + this.nodeLabel(nodeId) });
     let objectId: string | undefined;
@@ -319,6 +344,7 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async uploadFile(nodeId: string, paths: string[]): Promise<void> {
+    await this.assertMutationAllowed('uploadFile');
     const backendNodeId = this.backendNodeId(nodeId);
     this.emitCursor({ kind: 'caption', caption: 'Uploading file(s) to ' + this.nodeLabel(nodeId) });
     await this.c.DOM.setFileInputFiles({ files: paths, backendNodeId });
@@ -326,6 +352,7 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async dragAndDrop(sourceId: string, targetId: string): Promise<void> {
+    await this.assertMutationAllowed('dragAndDrop');
     const src = await this.centerOf(this.backendNodeId(sourceId));
     const dst = await this.centerOf(this.backendNodeId(targetId));
     this.emitCursor({ kind: 'move', x: src.x, y: src.y, caption: 'Dragging ' + this.nodeLabel(sourceId) + ' to ' + this.nodeLabel(targetId) });
@@ -344,6 +371,7 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async blur(nodeId: string): Promise<void> {
+    await this.assertMutationAllowed('blur');
     const backendNodeId = this.backendNodeId(nodeId);
     let objectId: string | undefined;
     try {
@@ -362,6 +390,9 @@ export class ExtensionBrowser implements BrowserPort {
   }
 
   async mouse(kind: 'move' | 'down' | 'up', x: number, y: number): Promise<void> {
+    // loop.ts's MUTATING_ACTION_TYPES treats 'mouse' as one mutating action
+    // type regardless of kind (only hover() is the read-only primitive).
+    await this.assertMutationAllowed('mouse');
     await this.c.Page.bringToFront().catch(() => {});
     const type = kind === 'move' ? 'mouseMoved' : kind === 'down' ? 'mousePressed' : 'mouseReleased';
     await this.c.Input.dispatchMouseEvent({ type, x, y, button: 'left', clickCount: 1 });

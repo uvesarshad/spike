@@ -84,11 +84,31 @@ function serviceEnv(extra?: Record<string, string>): Record<string, string> {
 // Windows — Scheduled Task via schtasks
 // ---------------------------------------------------------------------------
 
+/** schtasks has no dedicated env-var flag, so the standard workaround is to
+ * chain `cmd /c set "K=V"&& ...` ahead of the real command — each entry sets
+ * one var in the same cmd.exe invocation that then execs node. Values are
+ * quoted; one containing `"` or a newline would break out of that quoting
+ * (and could inject extra commands), so such values are rejected outright
+ * rather than silently mis-escaped. */
+function cmdEnvPrefix(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([k, v]) => {
+      if (/["\r\n]/.test(k) || /["\r\n]/.test(v)) {
+        throw new Error(`serviceEnv value for "${k}" contains a quote or newline, unsafe to embed in a Scheduled Task command line`);
+      }
+      return `set "${k}=${v}"&&`;
+    })
+    .join(' ');
+}
+
 function installWindows(opts: InstallServiceOptions): ServiceResult {
   const { node, cli } = resolveSelf();
   // schtasks /TR must be a single string; quote the exe + args. The task runs
-  // `node cli.js daemon --bridge-port <n>` at logon of the current user.
-  const tr = `"${node}" "${cli}" daemon --bridge-port ${opts.bridgePort}`;
+  // `cmd /c set ...&& node cli.js daemon --bridge-port <n>` at logon of the
+  // current user, with the env prefix baking in serviceEnv() (NODE_OPTIONS=
+  // --use-system-ca) the same way installMac()/installLinux() already do.
+  const envPrefix = cmdEnvPrefix(serviceEnv(opts.env));
+  const tr = `cmd /c ${envPrefix} "${node}" "${cli}" daemon --bridge-port ${opts.bridgePort}`;
   // Scope the task to THIS user (/RU) so the ONLOGON trigger doesn't need the
   // machine-level "log on as batch/logon-trigger" right that a non-elevated
   // shell lacks — that's the "Access is denied" you get without /RU.
@@ -221,7 +241,7 @@ function installLinux(opts: InstallServiceOptions): ServiceResult {
   const { node, cli } = resolveSelf();
   const env = serviceEnv(opts.env);
   const envLines = Object.entries(env)
-    .map(([k, v]) => `Environment=${k}=${v}`)
+    .map(([k, v]) => `Environment=${systemdEscape(k)}=${systemdEscape(v)}`)
     .join('\n');
   const unit = `[Unit]
 Description=QA Subagent daemon (extension bridge)
@@ -314,4 +334,17 @@ function errMsg(e: unknown): string {
 
 function xmlEscape(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** Guard a key/value before it's interpolated into a systemd unit file line
+ * (`Environment=${k}=${v}`). A newline would start a new unit-file line —
+ * letting a value inject arbitrary directives (e.g. a second `ExecStart=`) —
+ * so reject rather than strip, the same "unsafe to embed, refuse" stance as
+ * cmdEnvPrefix() takes for the Windows side. Unreachable today (only a
+ * parseInt'd port flows through `env`), hardening for if that ever changes. */
+function systemdEscape(s: string): string {
+  if (/[\r\n]/.test(s)) {
+    throw new Error(`serviceEnv value "${s}" contains a newline, unsafe to embed in a systemd unit file`);
+  }
+  return s;
 }

@@ -11,6 +11,13 @@ import type { AxNode, AxSnapshot } from '../ports/browser-port.js';
 /** ~4 chars/token heuristic; guard at ~1.5K tokens. */
 const MAX_CHARS = 6000;
 
+/** Hard cap on recursion depth for both the raw-tree walk (`build`) and the
+ * serialized-tree walk (`serialize`'s `walk`) — a pathologically deep DOM
+ * (some SPA component trees nest hundreds of levels) should stop descending
+ * here rather than relying solely on the post-walk MAX_CHARS truncation.
+ * Generous enough that real pages never hit it. */
+const MAX_DEPTH = 200;
+
 const INTERACTIVE = new Set([
   'button', 'link', 'textbox', 'searchbox', 'checkbox', 'radio', 'combobox',
   'listbox', 'option', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
@@ -60,15 +67,18 @@ export async function snapshotAxTree(client: CDP.Client): Promise<AxTreeResult> 
     return name.length > 0 && name !== parentName;
   };
 
-  const build = (raw: RawAxNode | undefined, parentName: string): AxNode[] => {
+  const build = (raw: RawAxNode | undefined, parentName: string, depth = 0): AxNode[] => {
     if (!raw || raw.ignored) {
       // promote children of ignored nodes
-      return (raw?.childIds ?? []).flatMap((cid) => build(byId.get(cid), parentName));
+      if (depth >= MAX_DEPTH) return [];
+      return (raw?.childIds ?? []).flatMap((cid) => build(byId.get(cid), parentName, depth + 1));
     }
     const role = raw.role?.value ?? '';
     if (role === 'InlineTextBox' || role === 'LineBreak') return []; // layout artifacts of StaticText
     const name = (raw.name?.value ?? '').trim();
-    const children = (raw.childIds ?? []).flatMap((cid) => build(byId.get(cid), name || parentName));
+    const children = depth >= MAX_DEPTH
+      ? [] // pathologically deep DOM — stop descending, let MAX_CHARS truncation handle the rest
+      : (raw.childIds ?? []).flatMap((cid) => build(byId.get(cid), name || parentName, depth + 1));
 
     if (!keep(role, name, parentName)) return children; // collapse: promote children
 
@@ -97,6 +107,7 @@ function serialize(root: AxNode): { text: string; truncated: boolean } {
     if (n.value) parts.push(`value=${JSON.stringify(n.value)}`);
     if (n.states?.length) parts.push(`(${n.states.join(', ')})`);
     lines.push('  '.repeat(depth) + parts.join(' '));
+    if (depth >= MAX_DEPTH) return; // pathologically deep DOM — stop descending, let MAX_CHARS truncation handle the rest
     for (const c of n.children ?? []) walk(c, depth + 1);
   };
   walk(root, 0);

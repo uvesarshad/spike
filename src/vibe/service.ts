@@ -78,6 +78,14 @@ const PROVIDER_MODES: Record<ProviderId, string[]> = {
 /** The provider list the panel renders, in ladder order. */
 const PROVIDER_ORDER: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter', 'glm'];
 
+/** A3: validates vibe.run's allowHost — a bare hostname (optionally with a
+ * trailing :port), no scheme/path/credentials/whitespace. Keeps a malformed
+ * or injection-shaped string from being folded straight into allowedHosts. */
+const PLAIN_HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:\d{1,5})?$/;
+function isPlainHostname(host: string): boolean {
+  return PLAIN_HOSTNAME_RE.test(host);
+}
+
 /** Shape of the extension's rec.start / rec.stop bridge responses. */
 interface RecStartResult { ok: boolean; reason?: string; mime?: string }
 interface RecStopResult { ok: boolean; reason?: string; webmBase64?: string; bytes?: number; mime?: string }
@@ -106,6 +114,8 @@ export class VibeService {
   start(): void {
     this.bridge.onRequest('vibe.status', async () => ({ busy: this.busy }));
     this.bridge.onRequest('vibe.run', async (params, ctx) => {
+      // A3: only the paired bridge client (A2) may drive a run.
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.run: unauthenticated client');
       if (this.busy) throw new Error('a run is already in progress');
       const task = String((params as { task?: unknown }).task ?? '');
       const url = String((params as { url?: unknown }).url ?? '');
@@ -115,8 +125,15 @@ export class VibeService {
       // allowHost (the panel's consent toggle): when present, the user opted to
       // let the agent click/type on this host → add it to allowedHosts for this
       // run. Absent → the daemon's read-only guard applies on third-party hosts.
+      // A3: validated as a plain hostname (optionally with a port) — an
+      // authenticated caller is still not a reason to fold an arbitrary string
+      // straight into allowedHosts.
       const rawAllowHost = (params as { allowHost?: unknown }).allowHost;
-      const allowHost = typeof rawAllowHost === 'string' && rawAllowHost.trim() ? rawAllowHost.trim() : undefined;
+      const trimmedAllowHost = typeof rawAllowHost === 'string' ? rawAllowHost.trim() : '';
+      if (trimmedAllowHost && !isPlainHostname(trimmedAllowHost)) {
+        throw new Error('vibe.run: invalid allowHost');
+      }
+      const allowHost = trimmedAllowHost || undefined;
       if (!task || !url) throw new Error('vibe.run requires { task, url }');
       this.busy = true;
       // Fire-and-forget the actual run; the request returns immediately.
@@ -128,6 +145,8 @@ export class VibeService {
 
     // vibe.fix — hand the last failed run's fix prompt to a CLI coding agent.
     this.bridge.onRequest('vibe.fix', async (_params, ctx) => {
+      // A3: only the paired bridge client (A2) may dispatch an auto-fix.
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.fix: unauthenticated client');
       if (!this.lastFailedReport) throw new Error('vibe.fix: no failed run to fix yet');
       if (this.fixing) throw new Error('vibe.fix: a fix is already in progress');
       this.fixing = true;
@@ -206,7 +225,9 @@ export class VibeService {
     // vibe.config.set — persist the panel's picks. Loose validation: we forward
     // only the three known fields (unknown keys ignored) to SettingsStore.write,
     // which merges over the current settings and returns the full result.
-    this.bridge.onRequest('vibe.config.set', async (params) => {
+    this.bridge.onRequest('vibe.config.set', async (params, ctx) => {
+      // A3: only the paired bridge client (A2) may change settings.
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.config.set: unauthenticated client');
       const p = (params ?? {}) as Partial<QaSettings>;
       const patch: Partial<QaSettings> = {};
       if (p.planner !== undefined) {
@@ -246,7 +267,9 @@ export class VibeService {
     // vibe.key.set — store an API key in the encrypted Vault under the CONTRACT
     // name for that provider. Only key-bearing providers are allowed; nano and
     // ollama (and anything unknown) throw. The key is never echoed back.
-    this.bridge.onRequest('vibe.key.set', async (params) => {
+    this.bridge.onRequest('vibe.key.set', async (params, ctx) => {
+      // A3: only the paired bridge client (A2) may store an API key.
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.key.set: unauthenticated client');
       const p = (params ?? {}) as { provider?: unknown; key?: unknown };
       const provider = String(p.provider ?? '') as ProviderId;
       const vaultName = VAULT_KEY_FOR[provider];
@@ -259,7 +282,9 @@ export class VibeService {
 
     // vibe.key.clear — delete the stored key for a provider. Returns whether a
     // key was actually present (cleared:false means there was nothing to clear).
-    this.bridge.onRequest('vibe.key.clear', async (params) => {
+    this.bridge.onRequest('vibe.key.clear', async (params, ctx) => {
+      // A3: only the paired bridge client (A2) may clear a stored API key.
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.key.clear: unauthenticated client');
       const p = (params ?? {}) as { provider?: unknown };
       const provider = String(p.provider ?? '') as ProviderId;
       const vaultName = VAULT_KEY_FOR[provider];

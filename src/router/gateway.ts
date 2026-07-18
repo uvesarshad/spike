@@ -27,14 +27,31 @@ export function normalizeOpenAiBaseUrl(input: string): string {
     : trimmed;
 }
 
+/** Reject anything but https: before a Bearer key + prompt content ever gets
+ * sent to it — a stray http:// value or typo'd host would otherwise leak
+ * secrets over an unencrypted (or non-URL) transport with no guard rail. */
+function assertHttpsBaseUrl(url: string, envName: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`${envName}: invalid base URL "${url}" — must be an https: URL`);
+  }
+  if (parsed.protocol !== 'https:') {
+    throw new Error(`${envName}: base URL must use https:, got "${parsed.protocol}" ("${url}")`);
+  }
+}
+
 export function openAiGatewayOptions(
   input: OpenAiGatewayOptionsInput,
   env: NodeJS.ProcessEnv = process.env,
 ): OpenAiCompatibleOptions {
   const { defaultBaseUrl, baseUrlEnvVar, ...rest } = input;
   const envName = baseUrlEnvVar ?? gatewayBaseUrlEnv(input.label);
+  const baseUrl = normalizeOpenAiBaseUrl(env[envName] ?? defaultBaseUrl);
+  assertHttpsBaseUrl(baseUrl, envName);
   return {
     ...rest,
-    baseUrl: normalizeOpenAiBaseUrl(env[envName] ?? defaultBaseUrl),
+    baseUrl,
   };
 }
