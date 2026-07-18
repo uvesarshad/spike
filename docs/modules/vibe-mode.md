@@ -94,7 +94,7 @@ AGENT NOTE: --load-extension is dead in branded Chrome 137+. Dev-loading the ext
 
 The panel's Settings → Debugging section shows a "Connect the desktop app" block whenever the daemon dot is red (`!bridgeHealthy()` — no daemon connected, or connected but failing the protocol-version handshake; see browser-port.md's Bridge section). Its copy switches to "Update the desktop app" when the daemon IS connected but reports an incompatible `protocolVersion` (`CONNECT_APP_COPY.update` in panel.js) — "install" would be misleading in that state.
 
-The block hands the user a per-OS one-liner (`connectOs` — win/mac/linux) built from `extension/panel.js`'s `INSTALL_BASE = 'https://raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install'`:
+The block hands the user a per-OS one-liner (`connectOs` — win/mac/linux) built from `extension/panel.js`'s `INSTALL_BASE = 'https://raw.githubusercontent.com/uvesarshad/spike/main/install'`:
 
 - Default (remote-script) form: `irm <INSTALL_BASE>/install.ps1 | iex` (Windows) or `curl -fsSL <INSTALL_BASE>/install.sh | sh` (macOS/Linux) — served straight from GitHub Raw, `$0`, static, no backend.
 - A "without a remote script (npm)" toggle (`connectNpmToggle`) swaps to the pure npm form: `npm i -g browser-qa-subagent && qa daemon --install-service` (`; ` separator on Windows), for users who'd rather not pipe a remote script.

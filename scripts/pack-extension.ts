@@ -1,22 +1,21 @@
 /* pack-extension.ts — produce dist/extension.zip from extension/* for the
  * Chrome Web Store, and print a submission checklist.
  *
- * No zip library is in deps, so we shell out to PowerShell's Compress-Archive
- * (fine on Windows / this project's target machine).
- *
- * CROSS-PLATFORM TODO: Compress-Archive is Windows-only. For macOS/Linux CI,
- * either add a tiny zip dep (e.g. archiver / adm-zip) or detect platform and
- * fall back to the `zip -r` CLI. Kept Windows-only deliberately for now to
- * avoid adding a runtime dependency.
+ * Cross-platform with NO runtime zip dependency: on Windows we shell out to
+ * PowerShell's Compress-Archive; on macOS/Linux we use the stock `zip`/`unzip`
+ * CLIs (present by default on both). Either way the archive has the extension's
+ * files at the ROOT (manifest.json at top level), which is what the Web Store
+ * requires — never the parent folder.
  *
  *   npx tsx scripts/pack-extension.ts   (or: npm run pack:extension)
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+
+const IS_WINDOWS = process.platform === 'win32';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..');
@@ -33,35 +32,49 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
 
-function compressWithPowerShell(): void {
-  // Build the file list so we zip extension/* contents (not the parent folder),
-  // which is what the Web Store expects (manifest.json at the zip root).
-  const ps = [
-    `$ErrorActionPreference = 'Stop'`,
-    `if (Test-Path -LiteralPath '${ZIP_PATH}') { Remove-Item -LiteralPath '${ZIP_PATH}' -Force }`,
-    `Compress-Archive -Path '${path.join(EXT_DIR, '*')}' -DestinationPath '${ZIP_PATH}' -CompressionLevel Optimal -Force`,
-  ].join('; ');
-
-  const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
-    encoding: 'utf8',
-  });
+/** Zip extension/* CONTENTS (manifest.json at the archive root). Dispatches to
+ * the platform's stock tooling — no runtime dependency. */
+function compress(): void {
+  if (fs.existsSync(ZIP_PATH)) fs.rmSync(ZIP_PATH);
+  if (IS_WINDOWS) {
+    // Compress-Archive with `extension/*` puts the contents (not the folder) at root.
+    const ps = [
+      `$ErrorActionPreference = 'Stop'`,
+      `Compress-Archive -Path '${path.join(EXT_DIR, '*')}' -DestinationPath '${ZIP_PATH}' -CompressionLevel Optimal -Force`,
+    ].join('; ');
+    const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8' });
+    if (res.status !== 0) {
+      throw new Error(`Compress-Archive failed (exit ${res.status}):\n${res.stderr || res.stdout}`);
+    }
+    return;
+  }
+  // macOS/Linux: run `zip` with cwd = EXT_DIR so stored paths are relative to it
+  // (root-level manifest.json). -r recurse, -X drop extra OS attrs, -q quiet.
+  const res = spawnSync('zip', ['-r', '-X', '-q', ZIP_PATH, '.'], { cwd: EXT_DIR, encoding: 'utf8' });
+  if (res.error && (res.error as NodeJS.ErrnoException).code === 'ENOENT') {
+    throw new Error("`zip` CLI not found. Install it (macOS ships it; Linux: apt/dnf install zip) or run this on Windows.");
+  }
   if (res.status !== 0) {
-    throw new Error(`Compress-Archive failed (exit ${res.status}):\n${res.stderr || res.stdout}`);
+    throw new Error(`zip failed (exit ${res.status}):\n${res.stderr || res.stdout}`);
   }
 }
 
-/** List zip entries via .NET ZipFile so we can show what shipped. */
+/** List archive entries to show what shipped — stock tooling per platform. */
 function listZipEntries(): string[] {
-  const ps = [
-    `$ErrorActionPreference = 'Stop'`,
-    `Add-Type -AssemblyName System.IO.Compression.FileSystem`,
-    `$z = [System.IO.Compression.ZipFile]::OpenRead('${ZIP_PATH}')`,
-    `$z.Entries | ForEach-Object { $_.FullName }`,
-    `$z.Dispose()`,
-  ].join('; ');
-  const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], {
-    encoding: 'utf8',
-  });
+  if (IS_WINDOWS) {
+    const ps = [
+      `$ErrorActionPreference = 'Stop'`,
+      `Add-Type -AssemblyName System.IO.Compression.FileSystem`,
+      `$z = [System.IO.Compression.ZipFile]::OpenRead('${ZIP_PATH}')`,
+      `$z.Entries | ForEach-Object { $_.FullName }`,
+      `$z.Dispose()`,
+    ].join('; ');
+    const res = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps], { encoding: 'utf8' });
+    if (res.status !== 0) return [];
+    return res.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  }
+  // unzip -Z1 = one bare entry name per line.
+  const res = spawnSync('unzip', ['-Z1', ZIP_PATH], { encoding: 'utf8' });
   if (res.status !== 0) return [];
   return res.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 }
@@ -79,7 +92,7 @@ function main(): void {
   };
 
   console.log(`[pack] zipping ${path.relative(REPO, EXT_DIR)}/* → ${path.relative(REPO, ZIP_PATH)} …`);
-  compressWithPowerShell();
+  compress();
 
   const size = fs.statSync(ZIP_PATH).size;
   const entries = listZipEntries();

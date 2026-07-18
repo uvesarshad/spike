@@ -11,6 +11,7 @@
  * Chrome it spawns. */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchChromeWithExtension } from '../src/chrome/extensions.js';
@@ -19,7 +20,9 @@ import { ExtensionNano } from '../src/ports/extension-nano.js';
 
 const CDP_PORT = 9327; // throwaway, owned by launchChromeWithExtension
 const BRIDGE_PORT = 9411; // distinct from the daemon default (9410) and other agents
-const PROFILE = 'C:\\Users\\uvesk\\AppData\\Local\\qa-spike-chrome-profile';
+// Windows Nano spike profile (holds the ~2GB model); derive from the current
+// user's home so it isn't tied to one developer's username.
+const PROFILE = path.join(os.homedir(), 'AppData', 'Local', 'qa-spike-chrome-profile');
 const EXT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'extension');
 
 const here = path.dirname(fileURLToPath(import.meta.url));

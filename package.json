@@ -20,11 +20,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/uvesarshad/browser-qa-subagent.git"
+    "url": "git+https://github.com/uvesarshad/spike.git"
   },
-  "homepage": "https://github.com/uvesarshad/browser-qa-subagent#readme",
+  "homepage": "https://github.com/uvesarshad/spike#readme",
   "bugs": {
-    "url": "https://github.com/uvesarshad/browser-qa-subagent/issues"
+    "url": "https://github.com/uvesarshad/spike/issues"
   },
   "engines": {
     "node": ">=20"

@@ -53,7 +53,7 @@ REQUIREMENTS
 Open source, Apache-2.0.
 ```
 
-**Support / homepage URL:** `https://github.com/uvesarshad/browser-qa-subagent`
+**Support / homepage URL:** `https://github.com/uvesarshad/spike`
 **Support email:** `[SUPPORT EMAIL]`
 
 ---

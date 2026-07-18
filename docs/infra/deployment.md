@@ -91,10 +91,10 @@ All external command spawns (`schtasks`, `launchctl`, `systemctl`) route through
 
 Two scripts give a non-technical user a single copy-pasted command that ends with the daemon auto-starting — surfaced in the extension side panel's "Connect the desktop app" card (shown while the daemon dot is red), per-OS, from `extension/panel.js`'s `INSTALL_CMDS`:
 
-- Windows: `irm https://raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install/install.ps1 | iex`
-- macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install/install.sh | sh`
+- Windows: `irm https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.ps1 | iex`
+- macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.sh | sh`
 
-`INSTALL_BASE` (`extension/panel.js`) is `https://raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install` — **nothing is hosted server-side**: GitHub Raw serves the two static install scripts off the `main` branch ($0, no backend), npm hosts the `browser-qa-subagent` package itself, and the daemon that ends up running is on the user's own machine (`localhost:9410`). The panel also offers a "without a remote script (npm)" toggle (`INSTALL_CMDS_NPM`) that skips fetching install.ps1/install.sh entirely and runs the equivalent two commands directly: `npm i -g browser-qa-subagent` then `qa daemon --install-service`.
+`INSTALL_BASE` (`extension/panel.js`) is `https://raw.githubusercontent.com/uvesarshad/spike/main/install` — **nothing is hosted server-side**: GitHub Raw serves the two static install scripts off the `main` branch ($0, no backend), npm hosts the `browser-qa-subagent` package itself, and the daemon that ends up running is on the user's own machine (`localhost:9410`). The panel also offers a "without a remote script (npm)" toggle (`INSTALL_CMDS_NPM`) that skips fetching install.ps1/install.sh entirely and runs the equivalent two commands directly: `npm i -g browser-qa-subagent` then `qa daemon --install-service`.
 
 Both scripts do the same three things, in order, and are safe to re-run (idempotent — upgrades the package, re-registers the service):
 

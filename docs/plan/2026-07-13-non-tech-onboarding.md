@@ -47,7 +47,7 @@ on disk), and replay clips — and reaching it costs exactly one terminal paste,
   free-space + ~2GB download gate). This is the zero-terminal core; it already works.
 - **One-liner daemon installer** — `install/install.ps1` / `install/install.sh`: node-check → `npm i -g browser-qa-subagent` → `qa daemon --install-service` → green dot. Idempotent, per-user, no admin.
 - **Auto-start service** — `src/service/install-service.ts` registers a Windows Scheduled Task (`ONLOGON /RU <user>`), a macOS LaunchAgent (`RunAtLoad`), or a Linux `systemd --user` unit, so the daemon survives reboots with no terminal.
-- **Panel "Connect the desktop app" block** — `extension/panel.js` already holds the REAL `INSTALL_BASE` (`raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install`) and renders the per-OS one-liner; `extension/panel.html:196` has the block; `extension/panel.css:937` styles it.
+- **Panel "Connect the desktop app" block** — `extension/panel.js` already holds the REAL `INSTALL_BASE` (`raw.githubusercontent.com/uvesarshad/spike/main/install`) and renders the per-OS one-liner; `extension/panel.html:196` has the block; `extension/panel.css:937` styles it.
 - **Extension icons** — `extension/manifest.json` already references 16/32/48/128 PNGs (a Store prerequisite, already met).
 
 ## Gaps to close
@@ -68,7 +68,7 @@ on disk), and replay clips — and reaching it costs exactly one terminal paste,
 
 1. **Fix the placeholder host in the script headers.** `install/install.ps1:4` and
    `install/install.sh:5` still show `https://<your-host>/…` in their usage comments. The
-   panel already emits the correct `raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install`
+   panel already emits the correct `raw.githubusercontent.com/uvesarshad/spike/main/install`
    URL — just align the two script comments so a user reading the script sees the real URL.
 2. **Make BYOK the panel's first-run default.** First run should invite "paste a Gemini or
    Anthropic key," NOT assume a daemon or CLI. The daemon ("Connect the desktop app") must
@@ -111,9 +111,9 @@ on disk), and replay clips — and reaching it costs exactly one terminal paste,
   Both `install/install.ps1` / `install/install.sh` and the extension service worker run
   `npm i -g browser-qa-subagent` — if the package isn't live on npm under this name, the
   entire daemon path (Click 2) fails at the last step for every user.
-- **The GitHub repo `github.com/uvesarshad/browser-qa-subagent` is public and serves
+- **The GitHub repo `github.com/uvesarshad/spike` is public and serves
   `install/install.ps1` + `install/install.sh` at `main`.** The panel's `INSTALL_BASE`
-  (`raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install`) points there;
+  (`raw.githubusercontent.com/uvesarshad/spike/main/install`) points there;
   if the repo is private, renamed, or the scripts aren't on `main`, the one-liner 404s
   silently and the user has no error to act on.
 - A non-technical user can: click "Add to Chrome" → paste an API key → run a QA task and get

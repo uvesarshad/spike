@@ -13,7 +13,7 @@ Evidence was checked against the code, not just re-read from the plan. Findings 
 ### A1 (P0) — The daemon one-liner's distribution preconditions are unverified and silently assumed
 The whole "Click 2" path depends on two things being live that the plan never confirms:
 - **npm package `browser-qa-subagent` is published** — `install.ps1:42` / `install.sh:43` run `npm i -g browser-qa-subagent`, and `sw.js:398` / lite copy reference it. If it isn't published (or is private), every daemon install 404s at npm.
-- **`github.com/uvesarshad/browser-qa-subagent` is public with `install/` on `main`** — the panel's `INSTALL_BASE` (`panel.js:140`) points at `raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install`. If that repo is private/renamed/empty, `irm … | iex` fetches a 404 and the copy-paste silently fails for the user.
+- **`github.com/uvesarshad/spike` is public with `install/` on `main`** — the panel's `INSTALL_BASE` (`panel.js:140`) points at `raw.githubusercontent.com/uvesarshad/spike/main/install`. If that repo is private/renamed/empty, `irm … | iex` fetches a 404 and the copy-paste silently fails for the user.
 
 **Action:** Before shipping any onboarding, verify (a) the npm package is published under that exact name, and (b) the GitHub repo is public and serves `install/install.ps1` + `install.sh` at `main`. Add both as explicit preconditions in the plan's "Definition of done."
 
