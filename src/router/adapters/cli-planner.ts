@@ -1,11 +1,23 @@
 /* Generic CLI-planner adapter (rung 1) — drives a local coding-agent CLI
- * (claude, codex; gemini has its own richer adapter) as a cheap/free PLANNER.
+ * (claude, codex; gemini has its own richer adapter) as a cheap/free
+ * PLANNER + VISUAL judge.
  *
- * PLANNER ONLY (plan-step + plan-goals). Visual verdicts need an image, and
- * headless image attach is not reliable across these CLIs, so supports() rejects
- * 'visual-verdict' — those keep flowing to Nano / API / Ollama. Both planner
- * roles are pure text (the a11y tree / a compact digest), which is exactly what
- * these CLIs do well at their cheap tiers (claude haiku, gpt mini).
+ * Serves plan-step + plan-goals (pure text — the a11y tree / a compact digest,
+ * which these CLIs do well at their cheap tiers) AND visual-verdict: modern
+ * claude/codex CLIs accept image attachments, so a screenshot request is wired
+ * through the same spawn. When the CLI is unavailable the router still falls
+ * back to Nano / API for vision, so this only ADDS a rung.
+ *
+ * Image attach mirrors google-cli.ts: the screenshot is written into a private
+ * per-adapter work dir and referenced by BASENAME with the child's cwd set
+ * there — this dodges argv-with-spaces (temp paths under a spacey Windows
+ * profile) and each CLI's "won't read files outside the workspace" guard.
+ * Per-bin mechanism:
+ *   - claude: an `@<file>` mention in the prompt (Claude Code reads @-path
+ *     images); cwd = work dir so the bare basename resolves.
+ *   - codex:  `codex exec --image <file>`; cwd = work dir, prompt still on stdin.
+ * (If your installed CLI names these differently, the two spots below —
+ * imageArgs() and the claude prompt prefix — are the only things to change.)
  *
  * Spawn recipe mirrors google-cli.ts + auto-fix.ts: the bulky multi-line prompt
  * goes on STDIN (Windows argv can't carry newlines), the binary runs via a shell
@@ -13,6 +25,9 @@
  * availability, and the JSON is parsed leniently (claude --output-format json
  * wraps the answer in an envelope; codex prints it plain). */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 import type { Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson, withSchemaInstruction } from '../adapter.js';
@@ -41,9 +56,23 @@ export class CliPlannerAdapter implements ModelAdapter {
   readonly rung = 1 as const;
   private availableCache: { value: boolean; at: number } | null = null;
   private static readonly AVAIL_TTL_MS = 30_000;
+  private workDirCache: string | null = null;
+  private callSeq = 0;
 
   constructor(private readonly opts: CliPlannerOptions) {
     this.name = `cli(${opts.bin}${opts.model ? `:${opts.model}` : ''})`;
+  }
+
+  /** One persistent work dir per adapter (created lazily on the first image
+   * call). Same rationale as google-cli.ts: the CLI runs with cwd here so a
+   * bare `@shot.png` / `--image shot.png` resolves, and a per-call temp dir
+   * would be un-removable on Windows while it's a child's cwd. Text-only calls
+   * never touch it. */
+  private workDir(): string {
+    if (!this.workDirCache) {
+      this.workDirCache = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-cliplan-'));
+    }
+    return this.workDirCache;
   }
 
   /** Short-TTL cached probe — same rationale/window as google-cli.ts and
@@ -63,15 +92,35 @@ export class CliPlannerAdapter implements ModelAdapter {
   }
 
   supports(cap: Capability): boolean {
-    return cap === 'plan-step' || cap === 'plan-goals';
+    // Now includes visual-verdict: claude/codex accept image attachments (see
+    // the file header). Router still leads visual with Nano/API — this is a rung.
+    return cap === 'plan-step' || cap === 'plan-goals' || cap === 'visual-verdict';
   }
 
   async generateJson(req: JsonRequest): Promise<unknown> {
-    if (req.imagePng) throw new Error(`${this.name}: CLI planner does not do visual verdicts`);
     const recipe = RECIPES[this.opts.bin];
     if (!recipe) throw new Error(`${this.name}: no recipe for bin "${this.opts.bin}"`);
     const args = recipe(this.opts.model);
-    const stdout = await this.run(args, withSchemaInstruction(req.prompt, req.schema));
+    let prompt = withSchemaInstruction(req.prompt, req.schema);
+    let cwd: string | undefined;
+
+    // Attach a screenshot when the request carries one (visual-verdict / visual
+    // confirm). Written by basename into the work dir; cwd points there.
+    if (req.imagePng) {
+      const dir = this.workDir();
+      const shot = `shot-${this.callSeq++}.png`;
+      fs.writeFileSync(path.join(dir, shot), req.imagePng);
+      cwd = dir;
+      if (this.opts.bin === 'codex') {
+        // codex exec attaches images by flag; prompt stays on stdin.
+        args.push('--image', shot);
+      } else {
+        // claude reads @-mentioned image files; prepend the mention to the prompt.
+        prompt = `@${shot}\n\n${prompt}`;
+      }
+    }
+
+    const stdout = await this.run(args, prompt, cwd);
     // claude --output-format json → { ..., result: "<assistant text>" }; unwrap it.
     try {
       const env = JSON.parse(stdout.trim()) as { result?: unknown };
@@ -82,7 +131,7 @@ export class CliPlannerAdapter implements ModelAdapter {
     return extractJson(stdout);
   }
 
-  private run(args: string[], stdinText: string): Promise<string> {
+  private run(args: string[], stdinText: string, cwd?: string): Promise<string> {
     // SECURITY: the model id is the only non-constant token that lands in this
     // shell command, and it can originate from the bridge (vibe.config.set). It is
     // validated where it's set (settings/service), but re-check at the sink —
@@ -92,11 +141,12 @@ export class CliPlannerAdapter implements ModelAdapter {
       throw new Error(`cli-planner: refusing to run with unsafe model id ${JSON.stringify(this.opts.model)}`);
     }
     // shell:true: the named CLIs are .cmd shims on Windows. Our argv is flags +
-    // a (validated) model id, so joining into one command string is safe.
+    // a (validated) model id + a constant screenshot basename, so joining into
+    // one command string is safe.
     const command = `${this.opts.bin} ${args.join(' ')}`;
     const timeoutMs = this.opts.timeoutMs ?? 120_000;
     return new Promise((resolve, reject) => {
-      const child = spawn(command, { shell: true });
+      const child = spawn(command, { shell: true, cwd });
       let stdout = '';
       let stderr = '';
       child.stdout.on('data', (d) => (stdout += d));

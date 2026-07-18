@@ -1,13 +1,13 @@
 # Module: Recorder
 
-> Scope: QaScript recording (src/recorder/script.ts) and $0 deterministic replay (src/recorder/replay.ts).
+> Scope: QaScript recording (src/recorder/script.ts), $0 deterministic replay (src/recorder/replay.ts), and the pre-run replay matcher (src/recorder/matcher.ts).
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-07-09
+> Last updated: 2026-07-18
 
 ## Overview
 
-After every passing qaRun, the recorder serializes the run into a QaScript: a JSON file keyed by accessibility role+name locators. The same script can be replayed at $0 (Nano-only visuals, zero planner calls) for regression checks. A Playwright .spec.ts twin is emitted alongside for CI integration. Failed replays can optionally self-heal by re-engaging the driver.
+After every passing qaRun, the recorder serializes the run into a QaScript: a JSON file keyed by accessibility role+name locators. The same script can be replayed at $0 (Nano-only visuals, zero planner calls) for regression checks. A Playwright .spec.ts twin is emitted alongside for CI integration. Failed replays can optionally self-heal by re-engaging the driver. Before a fresh AI run even starts, `matchReplayScript()` checks whether an existing recorded script already covers the same task+url closely enough to replay instead — see "Pre-run Replay Matcher" below.
 
 AGENT OWNER: src/recorder/
 
@@ -36,6 +36,8 @@ saveScript(script) - writes generated-tests/<slug>.json and generates the Playwr
 
 loadScript(nameOrPath) - resolves a script by name (generated-tests/<name>.json) or by absolute/relative path.
 
+AGENT NOTE (2026-07-18 perf fix): loadScript() caches its parsed result per resolved path, keyed by the file's mtime (`scriptCache` in script.ts). Added because matchReplayScript (see below) calls loadScript() once per recorded script on EVERY qaRun invocation — an uncached synchronous `readFileSync` + `JSON.parse` scan over generated-tests/ that grows with the number of scripts ever recorded (flagged in docs/plan/26-07-14-audit-perf-security.md). The cache invalidates automatically the moment a script's mtime changes (re-record, self-heal re-emit, manual edit) — never returns stale content.
+
 diffScripts(oldScript, newScript) - returns a human-readable summary of what changed between two versions of the same script (used by the self-heal progress line).
 
 AGENT NOTE: Runtime data placeholders are replay-aware. Replay preserves `{{run.*}}` expressions in ScriptStep.text, creates a fresh RunDataState at replay start, resolves placeholders immediately before browser.type(), and keeps the JSON script unchanged. Extract steps call recordExtraction() so later replay steps can use values like `{{run.orderId}}`.
@@ -52,6 +54,20 @@ No model calls are made for planning - only Nano for assert_visual steps. This m
 
 Returns a Report with verdict, steps, and evidence_paths. If replay fails and heal=true was passed to qaReplay (in engine.ts), the engine re-engages the full driver loop on the original task.
 
+AGENT NOTE (2026-07-18 correctness fix): `ArtifactStore.saveScreenshot`/`saveReport`/`appendAudit` (src/report/artifacts.ts) switched from sync `fs.writeFileSync`/`appendFileSync` to async `fs.promises` writes (needed so a slower artifact backend — e.g. the chrome.debugger/extension transport's own artifact path — never blocks the event loop). replay.ts's calls were updated to `await` them; a missed `await` here would previously have let `replayScript()` return before the report/screenshot was actually flushed to disk. No change to replay's step semantics or the recorded action vocabulary.
+
+## Pre-run Replay Matcher (src/recorder/matcher.ts)
+
+`matchReplayScript(task, url, opts?)` — called from `qaRun()` (src/engine.ts, guarded by `opts.replay ?? true`) BEFORE a fresh AI run starts. Scores every script in `generated-tests/` against the incoming (task, url) and, on a confident match, replays it deterministically at $0 instead of spending navigator/brain tokens.
+
+Scoring (READ-ONLY over the recorder's JSON shape — matcher.ts never imports from or mutates script.ts/replay.ts internals, only their exported `listScripts`/`loadScript` helpers):
+
+- Host is a hard gate: a script recorded against a different host is never a candidate, apex/www-tolerant (`bareHost()` strips a leading `www.`) but PORT-sensitive — this codebase's dev workflow runs many different local apps all on `localhost` at different ports (fixture 9401, some other app on 3000, …), so dropping the port would let scripts cross-match unrelated apps.
+- Within same-host candidates, score = `0.7 × taskSimilarity + 0.3 × pathSimilarity`. Task similarity is Jaccard over a stopword-filtered, `{{...}}`-placeholder-stripped bag of words (secrets/run-data never affect matching). Path similarity is 1 for an exact pathname match, 0.5 for a shared first path segment, else 0.
+- Default threshold 0.62 (`DEFAULT_THRESHOLD`); the highest-scoring script at or above it wins. No script over threshold → `null`, and `qaRun` falls through to a fresh AI pass.
+
+On a match, `qaRun` calls `qaReplay(match.name, ...)`; a non-`fail` verdict returns immediately with `replayMatch: { name, score }` attached to the result (surfaced in `qa dashboard` as a "$0 replay" pill). A `fail` verdict or a thrown error falls back to a fresh AI run. Opt out entirely with `qa run "<task>" --url <url> --no-replay`.
+
 ## Playwright Twin
 
 buildPlaywrightSpec() emits a .spec.ts file co-located with the JSON script. Each ScriptStep becomes a Playwright call where possible: page.goto(url), page.getByRole(role, { name }).click(), .hover(), .fill(text), .selectOption(value), page.keyboard.press(key), page.reload(), page.goBack(), .setInputFiles(paths) for upload_file, .dragTo(target) for drag_and_drop (a comment when no drop target was resolved), .blur(), page.mouse.move/down/up for mouse, or expect(...).toBeVisible() for assert_dom. Extract, visual/video assertions, open_tab/switch_tab/close_tab, and script steps are emitted as comments because the QA subagent owns those semantics during `qa replay` (tab/script Playwright equivalents are noted in the comment: context.newPage(), tracked pages[], page.close()).
@@ -65,10 +81,12 @@ AGENT NOTE: The .spec.ts twin is a best-effort translation. It is not kept in sy
 - When the Playwright spec generation rules change.
 - When runtime placeholder or extract replay semantics change.
 - When the generated-tests/ directory path changes (loadScript would need updating).
+- When matchReplayScript's scoring weights, threshold, or host-gate logic change.
+- When ArtifactStore's write API (saveScreenshot/saveReport/appendAudit) changes shape (sync vs async).
 
 ## Related Docs
 
 - docs/architecture/data-flow.md - recording is triggered at the end of the qaRun flow
-- docs/modules/engine.md - qaReplay and self-heal logic
+- docs/modules/engine.md - qaRun's pre-run matcher call, qaReplay, and self-heal logic
 - docs/modules/browser-port.md - BrowserPort.stampQaId, axTree, and the new Phase 9 action methods
 - docs/modules/script-runner.md - the `script` action's validator/executor a recorded `script` ScriptStep re-validates and re-runs

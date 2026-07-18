@@ -3,7 +3,7 @@
 > Scope: ModelRouter, ModelAdapter interface, and all rung adapters in src/router/.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-07-07
+> Last updated: 2026-07-18
 
 ## Overview
 
@@ -74,7 +74,9 @@ AGENT NOTE: Exit code 41 from the Google CLI child process means OAuth/TLS failu
 
 ## Rung 1 - CliPlannerAdapter (src/router/adapters/cli-planner.ts)
 
-Generic CLI planner adapter for claude CLI and codex CLI. Rung 1. Supports plan-step and plan-goals. Spawns the binary, passes the prompt through stdin or a prompt flag, and parses JSON output.
+Generic CLI planner adapter for claude CLI and codex CLI. Rung 1. Supports plan-step, plan-goals AND visual-verdict. Spawns the binary, passes the prompt through stdin or a prompt flag, and parses JSON output.
+
+Visual verdicts (Phase: 2026-07-18): a `req.imagePng` screenshot is written by basename into a lazily-created per-adapter work dir and the child runs with `cwd` there — claude gets an `@shot.png` mention prepended to the prompt (Claude Code reads @-path images), codex gets `codex exec --image shot.png`. cwd+basename dodges argv-with-spaces and each CLI's workspace-file guard (mirrors GoogleCliAdapter). The router still leads the visual-verdict ladder with Nano/API, so this only ADDS a fallback rung; it does not displace Nano. If an installed CLI names the image mechanism differently, the two spots to change are the header-documented imageArgs (codex) and the claude prompt-prefix in generateJson().
 
 AGENT AVOID: Never pass user-supplied model IDs to CLI adapters without the isSafeModelId() check from src/vibe/settings.ts. The model flag is passed in a shell-spawned child; an unsanitized model string is a command-injection sink.
 
@@ -122,9 +124,47 @@ For visual-verdict: rung 0 Nano -> pinnedAdapter if live and not Nano -> remaini
 
 The user's BRAIN choice is stored in cfg.planner and pins plannerAdapter for plan-goals. The user's NAVIGATOR choice is stored in cfg.navigator and pins navigatorAdapter for plan-step. loadConfig() merges defaults, qa.config.json, SettingsStore, env, and explicit overrides; QA_PLANNER_* controls the BRAIN and QA_NAVIGATOR_* controls the NAVIGATOR.
 
-buildLadder() resolves each role selection to an adapter name, constructs each provider:mode slot once, and passes navigatorAdapter/plannerAdapter into ModelRouter. Role-specific model IDs are applied to the pinned slot; unpinned fallback slots use cheap navigator-tier defaults. Nano resolves to the adapter name "nano"; it can serve plan-step if available but is intentionally absent from plan-goals.
+buildLadder() resolves each role selection to an adapter name, constructs each provider:mode slot once (by default), and passes navigatorAdapter/plannerAdapter into ModelRouter. Role-specific model IDs are applied to the pinned slot; unpinned fallback slots use cheap navigator-tier defaults. Nano resolves to the adapter name "nano"; it can serve plan-step if available but is intentionally absent from plan-goals.
 
 AGENT SEE: docs/state/server-state.md - SettingsStore persistence path
+
+## buildLadder() construction: makeAdapter() + SLOTS (2026-07-18)
+
+buildLadder() (src/engine.ts) builds the fallback ladder through two pieces instead of one-off `byKey.set(...)` calls per provider:
+
+- `makeAdapter(provider, mode, model)` — a `switch` on `${provider}:${mode}` that constructs exactly one adapter instance (GoogleCliAdapter, ByokGeminiAdapter, AnthropicAdapter, CliPlannerAdapter for both `claude:cli` and `gpt:cli`, OpenAiCompatibleAdapter for `gpt:api`/`openrouter:api`/`glm:api`, OllamaAdapter) for an explicit model string, or `undefined` for an unrecognized slot.
+- `SLOTS` — a `[provider, mode, base]` array (gemini:cli, gemini:api, claude:api, claude:cli, gpt:api, gpt:cli, openrouter:api, glm:api, ollama:api) that buildLadder() iterates once, calling `modelFor(provider, mode, base)` to resolve the model for that slot, then `makeAdapter(...)` to build it, then `byKey.set(`${provider}:${mode}`, adapter)`. `modelFor()` is unchanged: a role that pins the slot supplies its own model (or the role-appropriate `defaultModelFor()` default); an unpinned slot takes the cheap navigator-tier default.
+
+This refactor is mechanical (same slots, same models, same resulting ladder) EXCEPT for one behavioral change, described next.
+
+### Distinct brain instance when navigator and brain share a slot with different models
+
+Before this change, if the navigator and brain pins resolved to the same `provider:mode` slot (e.g. both `claude:cli`), `byKey` held only ONE adapter for that slot — built with whichever role's model `modelFor()` picked first (the navigator, since it is checked before the brain). The brain's own configured model was silently discarded and the brain ran on the navigator's model without any error or log line.
+
+buildLadder() now detects this case explicitly, after computing `navigatorName`/`plannerName`:
+
+```
+const navSlot = `${nav.provider}:${nav.mode}`;
+const brainSlot = `${brain.provider}:${brain.mode}`;
+...
+if (brain.provider !== 'nano' && navSlot === brainSlot) {
+  const navModel = nav.model || defaultModelFor(nav.provider, nav.mode, 'navigator');
+  const brainModel = brain.model || defaultModelFor(brain.provider, brain.mode, 'brain');
+  if (brainModel !== navModel) {
+    const brainAdapter = makeAdapter(brain.provider, brain.mode, brainModel);
+    if (brainAdapter) {
+      byKey.set(`${brainSlot}:brain`, brainAdapter);
+      plannerName = brainAdapter.name;
+    }
+  }
+}
+```
+
+When the shared slot's resolved navigator model and brain model differ, buildLadder() calls `makeAdapter()` a second time with the brain's model and stores it under a distinct key, `${brainSlot}:brain` (e.g. `claude:cli:brain`), so it does not collide with the navigator's `claude:cli` entry in `byKey`. `plannerName` is reassigned to the new adapter's own `name` so ModelRouter's `plannerAdapter` pin resolves to the brain-specific instance, not the shared one. If the two roles resolve to the SAME model on a shared slot (common case: navigator and brain both left at provider defaults), a single shared instance is still used — the extra instance is only created when the models actually diverge, keeping the common case unchanged and the ladder from growing extra unused adapters.
+
+Why this matters: without it, a user (or SettingsStore migration) who pins the navigator to `claude:cli` with a cheap/fast model and the brain to `claude:cli` with a stronger model for planning would get the brain silently downgraded to the navigator's model — no error, no trace note, just a weaker brain than configured. The fix makes each role's model pin authoritative regardless of whether the two roles happen to share a CLI/API slot.
+
+`nano` is exempt from this logic (`brain.provider !== 'nano'` guard) — a brain pinned to `nano` never reaches this branch because `plan-goals` never resolves to Nano in the first place (see "Nano never supports plan-goals" above).
 
 ## Config Drift Migration (Phase 13)
 
@@ -165,6 +205,7 @@ Adapters that receive provider usage metadata set lastUsage after generateJson()
 - When supportsVideo/videoVerdict is added to a new adapter.
 - When the config-drift migration's dead-provider detection or migration target changes.
 - When the availability-probe TTL window changes for any adapter.
+- When buildLadder()'s SLOTS table, makeAdapter() switch, or the shared-slot distinct-brain-instance logic changes.
 
 ## Related Docs
 

@@ -3,7 +3,7 @@
 > Scope: Every environment variable and qa.config.json key; purpose, default, and which module consumes each.
 > Rendering context: Server-side (Node.js daemon / CLI)
 > Project tier: 3
-> Last updated: 2026-07-07
+> Last updated: 2026-07-18
 
 ## Overview
 
@@ -15,7 +15,7 @@ AGENT OWNER: src/config.ts
 
 qa.config.json keys mirror QaConfig camelCase fields:
 
-via, bridgePort, extensionDir, cdpPort, runnerPort, fixturePort, chromeProfile, googleCliBin, googleCliModel, geminiApiKey, googleCliEnv, artifactsDir, actionCache, actionCacheDir, maxSteps, fixAgentBin, fixAgentArgs, fixAgentCwd, allowedHosts, recordClip, assertionPolicy, preferFreePlanner, planner, navigator, debugMode, debugAgent.
+via, bridgePort, bridgeHost, extensionDir, cdpPort, runnerPort, fixturePort, chromeProfile, googleCliBin, googleCliModel, geminiApiKey, googleCliEnv, artifactsDir, actionCache, actionCacheDir, maxSteps, fixAgentBin, fixAgentArgs, fixAgentCwd, allowedHosts, recordClip, assertionPolicy, videoAssertions, readOnly, spendCapUsd, preferFreePlanner, planner, navigator, debugMode, debugAgent.
 
 planner is the Brain selection: `{ "provider": "...", "mode": "...", "model": "..." }`. It leads the `plan-goals` ladder for initial planning and re-plans. navigator is the Navigator selection with the same shape. It leads the `plan-step` ladder for per-step actions.
 
@@ -30,6 +30,10 @@ AGENT NOTE: Must differ from spike Chrome ports (9223, 9224) to prevent collisio
 
 QA_BRIDGE_PORT - Integer. WebSocket port for the daemon-to-extension bridge. Default: 9410.
 Consumed by: src/bridge/bridge-server.ts.
+
+QA_BRIDGE_HOST - String (interface address). Interface the bridge WebSocket server binds to. Default: '127.0.0.1' (loopback-only). Added as A1 hardening — the server used to omit `host` entirely, which made `ws` default to binding ALL interfaces (0.0.0.0/::), reachable from the LAN.
+Consumed by: src/bridge/bridge-server.ts (BridgeServer constructor's `host` param, `DEFAULT_BRIDGE_HOST` export), src/config.ts (fromEnv).
+AGENT NOTE: The bridge also requires a pairing token as of 2026-07-18 (trust-on-first-use, persisted in the Vault under `bridge-pairing-token` — not env-configurable). See docs/state/server-state.md's Vault section.
 
 QA_RUNNER_PORT - Integer. Local HTTP port for the Gemini Nano runner page. Default: 9400.
 Consumed by: src/ports/nano-runner-page.ts.
@@ -126,6 +130,12 @@ Consumed by: src/config.ts, src/assertions/, src/driver/loop.ts.
 
 QA_VIDEO_ASSERTIONS - Boolean ('0'/'false' → off, any other value present → on). Default: false. When on, an `assert_visual { mode: 'video' }` step routes the recorded clip to a video-capable visual adapter (Gemini Files API) instead of judging the screenshot. Costly + slower — opt-in. With it off, video-mode asserts fall back to the screenshot verdict and note it. Also exposed as a panel toggle (non-secret, persisted in SettingsStore).
 Consumed by: src/config.ts, src/driver/loop.ts, src/router/model-router.ts.
+
+QA_READ_ONLY - Boolean ('0'/'false' → off, any other value present → on). Default: true. A5b (P1) safety: dry-run/read-only default enforced at the driver's single mutation-guard site (`isMutatingAction` in src/driver/loop.ts) — while true, click/type/upload_file/drag_and_drop/blur/mouse/open_tab/switch_tab/close_tab/script are skipped (recorded as a labeled skipped step) even on an allowed host. A safety layer on top of, not a replacement for, the Tier-4 allowedHosts guard. Also exposed as a panel toggle (non-secret, persisted in SettingsStore as `readOnly`; the user opts OUT to let the agent click/type).
+Consumed by: src/config.ts, src/driver/loop.ts.
+
+QA_SPEND_CAP_USD - Number (positive USD figure). Optional per-run spend cap. Default: unset (no cap). 0 or a non-finite value is ignored (leaves the cap unset). When set, the driver aborts the run once its best-available spend proxy (paid model-call token total, priced via SPEND_PROXY_USD_PER_MILLION_TOKENS — precise USD isn't derivable without a per-adapter pricing table) reaches this figure, ending with verdict 'uncertain'. Also exposed as a panel setting (non-secret, persisted in SettingsStore as `spendCapUsd`).
+Consumed by: src/config.ts, src/driver/loop.ts.
 
 ## Artifact Output
 

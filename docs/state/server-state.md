@@ -3,7 +3,7 @@
 > Scope: All persistent state — SettingsStore, Vault (API keys), ArtifactStore (run output).
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-07-07
+> Last updated: 2026-07-18
 
 ## Overview
 
@@ -13,7 +13,9 @@ AGENT OWNER: src/vibe/settings.ts, src/vault/vault.ts, src/report/artifacts.ts
 
 ## SettingsStore (src/vibe/settings.ts)
 
-Stores: QaSettings — planner (Brain PlannerSelection: provider, mode, model), navigator (Navigator PlannerSelection: provider, mode, model), debugMode ('prompt' | 'auto'), debugAgent ('auto' | 'claude' | 'codex' | 'gemini').
+Stores: QaSettings — planner (Brain PlannerSelection: provider, mode, model), navigator (Navigator PlannerSelection: provider, mode, model), debugMode ('prompt' | 'auto'), debugAgent ('auto' | 'claude' | 'codex' | 'gemini'), videoAssertions (boolean, opt-in `assert_visual { mode: 'video' }` routing; default false), readOnly (boolean, A5b P1 safety dry-run default; default true), spendCapUsd (number, A5a P1 safety optional per-run USD cap; default unset/no cap).
+
+readOnly and spendCapUsd (src/vibe/settings-data.ts) were added 2026-07-14 as part of the non-technical-onboarding safety work: readOnly gates every mutating action (click/type/upload_file/drag_and_drop/blur/mouse/open_tab/switch_tab/close_tab/script) behind an explicit opt-out in src/driver/loop.ts's `isMutatingAction` guard — layered on top of, not replacing, the Tier-4 allowedHosts guard; spendCapUsd aborts a run once the driver's best-effort paid-token spend proxy reaches the cap. Both mirror a same-named QaConfig field and QA_READ_ONLY / QA_SPEND_CAP_USD env var (env still wins) — see docs/infra/environment.md.
 
 File location: %LOCALAPPDATA%\qa-subagent\settings.json (Windows) or $HOME/qa-subagent/settings.json (other platforms).
 
@@ -21,24 +23,30 @@ Read by: loadConfig() (src/config.ts) folds it in below env vars. The SettingsSt
 
 Written by: `qa config set` CLI command and the vibe.config.set bridge message from the extension side panel. write() merges a partial patch (planner and navigator are merged as nested objects, not replaced wholesale).
 
+AGENT NOTE: `readRaw()` (the un-defaulted read config.ts's fromSettings() relies on) also runs a one-time config-drift migration: a persisted `planner` pinned to the dead Gemini CLI free tier (`gemini:cli`) is rewritten to `{ provider: 'claude', mode: 'cli' }`, and a persisted settings.json with no `navigator` key at all (pre planner/navigator split) is rewritten to `DEFAULT_SETTINGS.navigator` (`nano`/`ondevice`). The migrated value is written back to disk once (best-effort — a write failure still returns the migrated value in memory). See `isDeadPlannerSelection()` in src/vibe/settings-data.ts and the "Navigator/brain pins" gotcha in CLAUDE.md.
+
+AGENT NOTE (2026-07-18): `SettingsStore.readRaw()` now caches the last-read value keyed by the file's mtime, so an unchanged settings.json (the common case) skips the sync readFileSync/JSON.parse and the migration check entirely. The cache is invalidated the instant the on-disk mtime moves, including from the migration rewrite above and from `write()` — both re-stat the file and refresh the cache with the new mtime. Purely a perf detail; it does not change what callers observe.
+
 AGENT NOTE: API keys are never stored in SettingsStore. A user who accidentally puts a key in SettingsStore will have it readable as plain JSON. Keys belong in the Vault only.
 
 AGENT NOTE: Runtime-generated data is never stored in SettingsStore. Reports, screenshots, audit logs, and replay clips belong in ArtifactStore; generated replay scripts belong in generated-tests/; fix prompts are derived from Reports and may exist only in daemon memory or CLI output.
 
 ## Vault (src/vault/vault.ts)
 
-Stores: API keys for external model services (keys: 'gemini', 'anthropic', 'openai', 'openrouter', 'glm', plus arbitrary named secrets like {{secret:MY_PASSWORD}}).
+Stores: API keys for external model services (keys: 'gemini', 'anthropic', 'openai', 'openrouter', 'glm', plus arbitrary named secrets like {{secret:MY_PASSWORD}}), plus one non-model secret: `bridge-pairing-token` (src/bridge/bridge-server.ts's `PAIRING_TOKEN_VAULT_KEY`) — the daemon↔extension WebSocket bridge's pairing token (A2 hardening, added 2026-07-18). Trust-on-first-use: the first token any client presents in its `hello` frame is adopted as THE pairing token and persisted here via `Vault.set()`; every later connection must present a matching token or the socket is closed (code 1008) before adoption. Read via plain `Vault.get()`/`Vault.set()` — same encrypted store as API keys, not a separate mechanism.
 
 File location: %LOCALAPPDATA%\qa-subagent\vault.bin (Windows DPAPI encrypted) or a plaintext fallback on non-Windows platforms (noted in the file header).
 
 Provider: src/vault/dpapi-key-provider.ts uses Windows DPAPI (CryptProtectData / CryptUnprotectData) to encrypt at rest, bound to the current Windows user account.
 
-Written by: `qa secret set <name> <value>` CLI command.
-Read by: engine.ts (buildLadder reads keys for each adapter) and the driver loop (resolveSecrets reads named secrets for {{secret:NAME}} substitution in type actions).
+Written by: `qa secret set <name> <value>` CLI command; also written internally by BridgeServer on first pairing (see above).
+Read by: engine.ts (buildLadder reads keys for each adapter), the driver loop (resolveSecrets reads named secrets for {{secret:NAME}} substitution in type actions), and BridgeServer (reads/writes the pairing token on construction/first-connect).
 
 AGENT NOTE: Vault reads happen at every qaRun() call, not just at daemon startup. This means a key added via `qa secret set` is available immediately to the next run without restarting the daemon.
 
 AGENT NOTE: On non-Windows platforms, DPAPI is unavailable. The Vault falls back to a plaintext file. Do not store sensitive production credentials without understanding this limitation.
+
+AGENT NOTE (2026-07-18): On Windows, both `key.bin`/`key.dpapi` and `secrets.enc` now also get an explicit ACL lockdown after write (`lockdownWindowsAcl()` in vault.ts, via `icacls <path> /inheritance:r /grant:r <user>:F`) — `{ mode: 0o600 }` has no effect on Windows (NTFS ignores POSIX mode bits; protection there previously came only from inherited folder ACLs). This is best-effort defense-in-depth on top of DPAPI/inherited ACLs, not a change to the encryption path; a failure to run `icacls` is swallowed silently and does not affect the vault's actual security guarantee. No-op on POSIX (the `0o600` mode bits already do the job there).
 
 ## ArtifactStore (src/report/artifacts.ts)
 

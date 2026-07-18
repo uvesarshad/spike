@@ -308,28 +308,70 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; n
   const glmKey = vault.get('glm') ?? process.env.GLM_API_KEY ?? process.env.ZAI_API_KEY;
   const glmThinking = process.env.GLM_THINKING === 'enabled' ? 'enabled' : 'disabled';
 
+  // Builds the adapter for a given provider:mode slot with an explicit model.
+  // Pulled out so a slot pinned by BOTH roles (e.g. navigator=claude:cli:sonnet,
+  // brain=claude:cli:opus) can get a second, distinct instance below instead of
+  // silently sharing one (which would make the brain run on the navigator's model).
+  const makeAdapter = (provider: ProviderId, mode: PlannerMode, model: string): ModelAdapter | undefined => {
+    switch (`${provider}:${mode}`) {
+      case 'gemini:cli': return new GoogleCliAdapter({ bin: cfg.googleCliBin, model, env: cfg.googleCliEnv });
+      case 'gemini:api': return new ByokGeminiAdapter({ apiKey: geminiKey, model });
+      case 'claude:api': return new AnthropicAdapter({ apiKey: anthropicKey, model });
+      case 'claude:cli': return new CliPlannerAdapter({ bin: 'claude', model });
+      case 'gpt:api': return new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: openaiKey, defaultBaseUrl: 'https://api.openai.com/v1', label: 'gpt', model }));
+      // codex uses its own configured model when none is given (default is blank)
+      case 'gpt:cli': return new CliPlannerAdapter({ bin: 'codex', model: model || undefined });
+      case 'openrouter:api': return new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: openrouterKey, defaultBaseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model }));
+      // GLM-5.2 is a text-only reasoning model: supportsVision:false → it joins the
+      // plan-step ladder only (Nano/Gemini still own visual verdicts).
+      case 'glm:api': return new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: glmKey, defaultBaseUrl: 'https://api.z.ai/api/paas/v4', label: 'glm', model, supportsVision: false, extraBody: { thinking: { type: glmThinking } } }));
+      case 'ollama:api': return new OllamaAdapter({ model });
+      default: return undefined;
+    }
+  };
+
   const byKey = new Map<string, ModelAdapter>();
   // gemini keeps cfg.googleCliModel as its explicit base fallback (QA_GOOGLE_CLI_MODEL override).
-  byKey.set('gemini:cli', new GoogleCliAdapter({ bin: cfg.googleCliBin, model: modelFor('gemini', 'cli', cfg.googleCliModel), env: cfg.googleCliEnv }));
-  byKey.set('gemini:api', new ByokGeminiAdapter({ apiKey: geminiKey, model: modelFor('gemini', 'api', cfg.googleCliModel) }));
-  byKey.set('claude:api', new AnthropicAdapter({ apiKey: anthropicKey, model: modelFor('claude', 'api') }));
-  byKey.set('claude:cli', new CliPlannerAdapter({ bin: 'claude', model: modelFor('claude', 'cli') }));
-  byKey.set('gpt:api', new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: openaiKey, defaultBaseUrl: 'https://api.openai.com/v1', label: 'gpt', model: modelFor('gpt', 'api') })));
-  // codex uses its own configured model when none is given (default is blank)
-  const codexModel = modelFor('gpt', 'cli');
-  byKey.set('gpt:cli', new CliPlannerAdapter({ bin: 'codex', model: codexModel || undefined }));
-  byKey.set('openrouter:api', new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: openrouterKey, defaultBaseUrl: 'https://openrouter.ai/api/v1', label: 'openrouter', model: modelFor('openrouter', 'api') })));
-  // GLM-5.2 is a text-only reasoning model: supportsVision:false → it joins the
-  // plan-step ladder only (Nano/Gemini still own visual verdicts). thinking is
-  // disabled by default (GLM_THINKING=enabled to flip) so the planner stays fast.
-  byKey.set('glm:api', new OpenAiCompatibleAdapter(openAiGatewayOptions({ apiKey: glmKey, defaultBaseUrl: 'https://api.z.ai/api/paas/v4', label: 'glm', model: modelFor('glm', 'api'), supportsVision: false, extraBody: { thinking: { type: glmThinking } } })));
-  byKey.set('ollama:api', new OllamaAdapter({ model: modelFor('ollama', 'api') }));
+  const SLOTS: Array<[ProviderId, PlannerMode, string | undefined]> = [
+    ['gemini', 'cli', cfg.googleCliModel],
+    ['gemini', 'api', cfg.googleCliModel],
+    ['claude', 'api', undefined],
+    ['claude', 'cli', undefined],
+    ['gpt', 'api', undefined],
+    ['gpt', 'cli', undefined],
+    ['openrouter', 'api', undefined],
+    ['glm', 'api', undefined],
+    ['ollama', 'api', undefined],
+  ];
+  for (const [provider, mode, base] of SLOTS) {
+    const adapter = makeAdapter(provider, mode, modelFor(provider, mode, base));
+    if (adapter) byKey.set(`${provider}:${mode}`, adapter);
+  }
 
   // Two pins, same lookup for each: nano resolves to name 'nano' (the router won't
   // find it among plan-step/plan-goals candidates → falls through), otherwise the
   // chosen provider:mode adapter's name. navigator → plan-step, brain → plan-goals.
-  const navigatorName = nav.provider === 'nano' ? 'nano' : byKey.get(`${nav.provider}:${nav.mode}`)?.name;
-  const plannerName = brain.provider === 'nano' ? 'nano' : byKey.get(`${brain.provider}:${brain.mode}`)?.name;
+  const navSlot = `${nav.provider}:${nav.mode}`;
+  const brainSlot = `${brain.provider}:${brain.mode}`;
+  const navigatorName = nav.provider === 'nano' ? 'nano' : byKey.get(navSlot)?.name;
+  let plannerName = brain.provider === 'nano' ? 'nano' : byKey.get(brainSlot)?.name;
+
+  // Same provider:mode slot pinned by both roles: modelFor() above resolved the
+  // shared instance to the navigator's model (it's checked first), so the brain
+  // would silently run on it too. When the two roles actually want different
+  // models, give the brain its own second instance instead.
+  if (brain.provider !== 'nano' && navSlot === brainSlot) {
+    const navModel = nav.model || defaultModelFor(nav.provider, nav.mode, 'navigator');
+    const brainModel = brain.model || defaultModelFor(brain.provider, brain.mode, 'brain');
+    if (brainModel !== navModel) {
+      const brainAdapter = makeAdapter(brain.provider, brain.mode, brainModel);
+      if (brainAdapter) {
+        byKey.set(`${brainSlot}:brain`, brainAdapter);
+        plannerName = brainAdapter.name;
+      }
+    }
+  }
+
   return { adapters: [...byKey.values()], navigatorName, plannerName };
 }
 

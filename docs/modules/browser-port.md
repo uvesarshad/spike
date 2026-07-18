@@ -3,7 +3,7 @@
 > Scope: BrowserPort interface and all implementations — CdpBrowser, ExtensionBrowser, bridge, and Nano ports.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-07-09
+> Last updated: 2026-07-18
 
 ## Overview
 
@@ -42,9 +42,21 @@ Key methods on BrowserPort:
 
 AGENT NOTE: Node IDs (nodeId strings like n7) are per-snapshot stable but meaningless across runs. The recorder stores role+name instead, not nodeId. The driver loop uses nodeId for execution within a single snapshot; the recorder reads StepRecord.target for persistence.
 
+## Port-Layer Host Guard (src/ports/browser-port.ts)
+
+A4 (P0) defense-in-depth: `driver/loop.ts` already re-checks `browser.url()` against the run's `allowedHosts` before every mutating action, but that check lives ONLY in the loop — a caller driving a `BrowserPort` directly, or a raw `cdp` passthrough on the extension side (`extension/sw.js`), bypasses it entirely. `browser-port.ts` exports the same check as free functions so both port implementations can re-run it themselves:
+
+- `DEFAULT_ALLOWED_HOSTS` — `['localhost', '127.0.0.1']`, mirroring `driver/loop.ts`'s own default. NOT applied automatically when a port's `allowedHosts` option is omitted — `engine.ts` constructs `CdpBrowser`/`ExtensionBrowser` before it resolves the run's actual `allowedHosts` (loop.ts's Tier-4 default/`trustTargetHost` widening — see `engine.ts`'s `targetHostCandidates`), so defaulting the port to localhost-only here would silently break every non-localhost QA run.
+- `hostOfUrl(url)` / `isHostAllowed(host, allowedHosts)` — pure helpers mirroring `driver/loop.ts`'s own `hostOf()`/`hostAllowed()` so both layers of the guard agree on what "allowed" means (exact match or subdomain of an allowed host).
+- `assertMutationHostAllowed(host, allowedHosts, what)` — throws when `allowedHosts` is defined and `host` isn't in it; no-ops when `allowedHosts` is `undefined` (the caller didn't opt in to port-level enforcement — unchanged prior behavior).
+
+`engine.ts` threads the run's resolved `allowedHosts` into both `CdpBrowser`'s and `ExtensionBrowser`'s constructor options; each port has a private `assertMutationAllowed(what)` that calls `assertMutationHostAllowed` against the LIVE page host (via `url()`) before every mutating primitive — `click`, `type`, `pressKey`, `selectOption`, `uploadFile`, `dragAndDrop`, `blur`, `mouse`. Read-only primitives (`navigate`, `reload`, `goBack`, `hover`, `screenshot`, `axTree`) stay unrestricted, mirroring `loop.ts`'s `MUTATING_ACTION_TYPES` semantics exactly. A blocked mutation throws (never silently no-ops), surfacing as a clear step failure.
+
+AGENT AVOID: Do not add a new mutating BrowserPort method without also calling `assertMutationAllowed()` at its top in BOTH CdpBrowser and ExtensionBrowser — skipping it reopens the bypass this guard exists to close.
+
 ## CdpBrowser (src/ports/cdp-browser.ts)
 
-The real browser implementation. Uses chrome-remote-interface to connect to Chrome on cfg.cdpPort. Spawns Chrome (with the profile dir) if nothing is listening on that port. Navigation, click, hover, keypress, select, reload, back, and screenshot are direct CDP domain calls. The accessibility tree is obtained via Accessibility.getFullAXTree and pruned by src/capture/axtree.ts. Console and network events are buffered by src/capture/console-network.ts listeners registered at launch.
+The real browser implementation. Uses chrome-remote-interface to connect to Chrome on cfg.cdpPort. Spawns Chrome (with the profile dir) if nothing is listening on that port. Navigation, click, hover, keypress, select, reload, back, and screenshot are direct CDP domain calls. The accessibility tree is obtained via Accessibility.getFullAXTree and pruned by src/capture/axtree.ts. Console and network events are buffered by src/capture/console-network.ts listeners registered at launch. The constructor takes an optional `allowedHosts` alongside `LaunchOptions` — see "Port-Layer Host Guard" above.
 
 AGENT NOTE: CdpBrowser runs a HEADED Chrome (headless: false). This is required for Gemini Nano: the Prompt API refuses to load in headless mode. Never change this to headless without verifying Nano still works.
 
@@ -52,7 +64,7 @@ AGENT NOTE (tabs): CdpBrowser tracks tabs it did not start with in `otherTabs` (
 
 ## ExtensionBrowser (src/ports/extension-browser.ts)
 
-The vibe-mode browser implementation. Delegates each BrowserPort method to the extension's service worker (sw.js) via JSON-RPC messages over the BridgeServer WebSocket. The CDP operations are proxied by sw.js through chrome.debugger. Driver-required actions stay in parity with CdpBrowser: navigate, click, hover, type, keypress, select, reload, goBack, upload/drag/blur/mouse, screenshots, a11y snapshots, console, and network capture. Some CDP domains that CdpBrowser uses directly (e.g., Page.startScreencast) are not exposed through chrome.debugger — these are the known extension-mode limitations documented in TODO.md.
+The vibe-mode browser implementation. Delegates each BrowserPort method to the extension's service worker (sw.js) via JSON-RPC messages over the BridgeServer WebSocket. The CDP operations are proxied by sw.js through chrome.debugger. Driver-required actions stay in parity with CdpBrowser: navigate, click, hover, type, keypress, select, reload, goBack, upload/drag/blur/mouse, screenshots, a11y snapshots, console, and network capture. Some CDP domains that CdpBrowser uses directly (e.g., Page.startScreencast) are not exposed through chrome.debugger — these are the known extension-mode limitations documented in TODO.md. `ExtensionBrowserOptions` takes an optional `allowedHosts` — same "Port-Layer Host Guard" enforcement as CdpBrowser, re-checked against the live page host so a mutation reaching this port via the raw `cdp` bridge passthrough (extension/sw.js) can't bypass it either.
 
 AGENT NOTE (tabs, extension transports): `openTab`/`switchTab`/`closeTab` are the ONE deliberate gap in ExtensionBrowser/LiteExtensionBrowser parity — both throw a clear "not supported in extension transport" error instead of a silent no-op. `chrome.tabs.create`/`update`/`remove` need a dedicated bridge RPC (`ext.openTab` etc.) the service worker does not expose yet; `chrome.debugger` has no tab-lifecycle surface to proxy. `uploadFile`/`dragAndDrop`/`blur`/`mouse` ARE fully implemented for both (same `DOM.setFileInputFiles`/`Input.dispatchMouseEvent` CDP calls proxied through the shim) — only the three tab primitives are transport-limited.
 
@@ -69,6 +81,12 @@ BridgeServer is a WebSocket server that relays JSON-RPC messages between the dae
 cdp-shim.ts in the extension service worker (sw.js imports it) translates the bridge messages to chrome.debugger.sendCommand calls and forwards the responses back over the WebSocket.
 
 The daemon allocates each connected Chrome a unique clientId. In multi-Chrome scenarios, a run binds to the specific clientId that issued the vibe.run request (opts.clientId), so a second connected Chrome cannot have its tabs driven by this run.
+
+Connection hardening (added since the initial bridge): the WS server binds loopback-only (`DEFAULT_BRIDGE_HOST = '127.0.0.1'`, not all interfaces) and rejects any handshake whose `Origin` header is an http(s) page — the extension's service worker/offscreen document connects with no Origin header or `chrome-extension://<id>`, both of which pass through unchanged, as do `ws`-based test/CLI clients.
+
+Pairing token (A2/A6): every client's first frame must present a `token` in its `hello.params`, matched against a pairing token persisted in the Vault (`src/vault/vault.ts`, `PAIRING_TOKEN_VAULT_KEY = 'bridge-pairing-token'`). Trust-on-first-use: the first token ANY client ever presents is adopted as THE pairing token (the extension mints one on first install and persists it in chrome.storage.local so reconnects keep presenting it); a later connection presenting no token, or the wrong one, is closed (code 1008) before adoption. `BridgeServer.isAuthenticated(clientId)` returns whether a clientId is currently connected (every adopted client already passed the pairing gate, so this doubles as "authenticated") — `VibeService`'s reverse-RPC handlers (`vibe.run`, `vibe.fix`, `vibe.config.set`, `vibe.key.set`, `vibe.key.clear`) call it explicitly rather than assuming any `onRequest` call is inherently safe.
+
+Protocol-version handshake: a real extension hello (`{event:'hello', params:{caps:[...], token, protocolVersion?}}`) gets an immediate `{event:'bridge.hello', params:{protocolVersion:PROTOCOL_VERSION}}` back. The extension (sw.js's `MIN_DAEMON_PROTOCOL_VERSION`) compares this against the minimum it requires and, if the daemon is too old (or never acks), tells the panel to show "update the desktop app" instead of a plain green "connected" dot — see vibe-mode.md's "Connect the Desktop App" section. Bump `PROTOCOL_VERSION` (currently 1) whenever the wire protocol changes in a way both sides must agree on to work correctly.
 
 ## Lite Extension Browser
 
@@ -93,6 +111,8 @@ AGENT NOTE: During Nano model download, do NOT navigate the runner tab. Navigati
 - When the bridge JSON-RPC protocol changes (message shapes, new event types).
 - When the runner page HTML/JS changes (runner-assets.ts).
 - When NanoPort gains a new lifecycle method.
+- When a new mutating BrowserPort method is added (must call assertMutationAllowed() in both CdpBrowser and ExtensionBrowser — see "Port-Layer Host Guard").
+- When the bridge's pairing/auth model changes (PAIRING_TOKEN_VAULT_KEY, isAuthenticated(), PROTOCOL_VERSION).
 
 ## Related Docs
 

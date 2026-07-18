@@ -184,6 +184,15 @@ async function withMockFetch(body: unknown, fn: () => Promise<void>): Promise<Fe
 }
 
 {
+  // CLI planners now also serve visual verdicts (claude @-image / codex --image).
+  const claudeCli = new CliPlannerAdapter({ bin: 'claude', model: 'claude-haiku-4-5' });
+  check(
+    'cli-planner supports plan-step, plan-goals AND visual-verdict',
+    claudeCli.supports('plan-step') && claudeCli.supports('plan-goals') && claudeCli.supports('visual-verdict'),
+  );
+}
+
+{
   // a tainted model must NOT reach the shell — generateJson throws before spawn
   const adapter = new CliPlannerAdapter({ bin: 'claude', model: 'haiku & calc.exe' });
   let threw = false;

@@ -3,7 +3,7 @@
 > Scope: End-to-end lifecycle of a QA run from caller to verdict; all data boundaries and serialization points.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-07-07
+> Last updated: 2026-07-18
 
 ## Overview
 
@@ -17,9 +17,22 @@ MCP path: src/mcp-server.ts receives a qa_run tool call over stdio, extracts tas
 
 AGENT SEE: docs/api/route-handlers.md - full CLI and MCP contracts
 
+## Pre-Run Replay Match (Phase 14)
+
+Before qaRun() opens a browser session or builds the model ladder, it checks for a $0 shortcut:
+
+1. Unless opts.replay is false (CLI `--no-replay`), matchReplayScript() (src/recorder/matcher.ts) scores every generated-tests/*.json script's task+url against the new request.
+2. A score at or above the confidence threshold triggers qaReplay() on that script instead of a fresh AI pass - deterministic, Nano-only visuals, no Navigator/Brain tokens spent.
+3. If the replay comes back 'fail', or replay itself throws, the run falls back to a fresh AI pass (runFreshAiPass()) with a progress line explaining why.
+4. A successful non-fail replay returns immediately as a QaRunResult with `replayMatch: { name, score }` attached; the report is persisted and the run never reaches Session Setup below.
+
+AGENT NOTE: qaReplay() invoked from a fresh AI pass's own re-run path (`qa fix` follow-ups, etc.) passes `replay: false` so the matcher never re-matches the script that just failed against itself.
+
+AGENT SEE: docs/modules/recorder.md - matcher scoring detail
+
 ## Session Setup
 
-qaRun() calls openSession(), which calls openBrowserSession() plus Nano initialization:
+When no replay match short-circuits the run, qaRun() calls runFreshAiPass(), which calls openSession() (in turn openBrowserSession() plus Nano initialization):
 
 1. openBrowserSession() selects the transport (cfg.via: 'cdp' or 'extension') and returns a BrowserSession with a live BrowserPort.
 2. For CDP mode: CdpBrowser attaches to a headed Chrome on cfg.cdpPort. Chrome is reused if already running.
@@ -45,7 +58,8 @@ Each Navigator step follows this sequence:
 4. router.planJson() sends the prompt to the `plan-step` ladder led by the configured Navigator. The response validates as PlanResult: actions, goalComplete, or blocked. Invalid JSON is retried once with the validation error.
 5. goalComplete advances to the next goal. blocked escalates to the Brain if one is available, or ends honestly in navigator-only mode.
 6. Action batches contain 1-3 actions. finish, assert_visual, and assert_dom run alone even if the model bundled more actions.
-7. Each action executes through BrowserPort (navigate, click, hover, type, press_key, select_option, wait, reload, go_back) or inline handling (assert_visual, assert_dom, extract, finish). Type actions resolve {{run.*}} first, then {{secret:NAME}} at execute time only.
+7. Each action executes through BrowserPort (navigate, click, hover, type, press_key, select_option, wait, reload, go_back, blur, upload_file, drag_and_drop, mouse move/down/up, open_tab, switch_tab, close_tab) or inline handling (assert_visual, assert_dom, extract, finish). Type actions resolve {{run.*}} first, then {{secret:NAME}} at execute time only.
+7a. A `script` action takes a separate path: validateScriptSteps() (src/driver/script-runner/validator.ts) structurally validates the allowlisted step list against BrowserPort verbs before anything executes - a rejected script never runs a single step and surfaces as a normal failed StepRecord. A validated script runs via runScriptSteps() (src/driver/script-runner/executor.ts), which resolves {{run.*}}/{{secret:NAME}} at execute time exactly like the main `type` action and never returns resolved values to the caller. Script failures feed the same stuck machinery (repeated action, blocked, per-goal overflow) as any other failed step.
 8. browser.drainConsole() / browser.drainNetwork() pull buffered console errors and network failures into the StepRecord after each action, not just after the batch.
 9. Successful final actions in a batch can be written back to the action cache after effect verification; raw resolved secrets are never cached.
 10. artifacts.appendAudit() writes one redacted JSON line per executed action (never includes resolved secret values).
@@ -61,7 +75,7 @@ AGENT NOTE: Action-cache writes must receive the original redacted Action, never
 
 ## Runtime Data Hook Points
 
-src/run-data/ owns non-secret same-run values and placeholder resolution for `{{run.email}}`, `{{run.shortid}}`, `{{run.name}}`, `{{run.phone}}`, and extracted keys such as `{{run.orderId}}`. runDriverLoop creates RunDataState at run start, resolves `{{run.*}}` immediately before type actions, and keeps the original placeholder-bearing action in StepRecord, reports, and scripts. `extract` reads visible node text, optionally applies a regex capture, and stores the value for later same-run placeholders. src/email/ owns the EmailProvider interface plus FakeLocalEmailProvider for local OTP-style tests; real email providers are intentionally deferred.
+src/run-data/ owns non-secret same-run values and placeholder resolution for `{{run.email}}`, `{{run.shortid}}`, `{{run.name}}`, `{{run.phone}}`, and extracted keys such as `{{run.orderId}}`. runDriverLoop creates RunDataState at run start, resolves `{{run.*}}` immediately before type actions, and keeps the original placeholder-bearing action in StepRecord, reports, and scripts. `extract` reads visible node (or, with `nodeId` omitted, whole-page) text, then either applies a regex `pattern` ($0 DOM-text path) or, when `prompt` is given, sends the page/subtree text to a cheap text model for a model-assisted pull (Phase 15) - either way the resolved value is stored for later same-run placeholders. src/email/ owns the EmailProvider interface plus FakeLocalEmailProvider for local OTP-style tests; real email providers are intentionally deferred.
 
 ## Visual Assessment Path
 
@@ -92,7 +106,7 @@ artifacts.saveReport() writes report.json to artifacts/<runId>/. If a GIF clip w
 
 ## Recording Path (Pass Only)
 
-When verdict is 'pass' and recording is enabled, scriptFromReport() extracts role+name locators from StepRecord.target fields and persists the executable action payloads, including click, hover, type, press_key, select_option, reload, go_back, navigation, and assertions. It writes two files:
+When verdict is 'pass' and recording is enabled, scriptFromReport() extracts role+name locators from StepRecord.target fields and persists the executable action payloads, including click, hover, type, press_key, select_option, reload, go_back, navigation, assertions, extract, upload_file, drag_and_drop, blur, mouse, and tab management (open_tab/switch_tab/close_tab, keyed by creation-order tabIndex rather than a raw runtime tab id). `script` actions are recorded as-is (the validated step list replays verbatim). It writes two files:
 
 - generated-tests/<slug>.json - the QaScript (task, URL, steps with role+name+nth+qaId locators, lineage).
 - generated-tests/<slug>.spec.ts - a Playwright .spec.ts twin for CI integration.
@@ -123,11 +137,14 @@ qaRun() returns a QaRunResult (extends Report, adds recordedScript path when app
 - When the Report contract (slim fields or full fields) changes.
 - When the recording path emits new artifacts.
 - When error propagation rules change.
+- When the pre-run replay matcher's scoring or fallback behavior changes.
+- When the script-runner's allowlisted verb set or validation rules change.
 
 ## Related Docs
 
 - docs/modules/engine.md - session lifecycle and qaRun/qaReplay detail
 - docs/modules/model-ladder.md - ModelRouter and adapter rung ordering
 - docs/modules/browser-port.md - BrowserPort methods
-- docs/modules/recorder.md - QaScript serialization
+- docs/modules/recorder.md - QaScript serialization and the pre-run replay matcher
+- docs/modules/script-runner.md - allowlisted/AST-validated secure custom-step runner
 - docs/api/route-handlers.md - CLI and MCP contracts
