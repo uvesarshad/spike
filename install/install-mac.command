@@ -1,5 +1,5 @@
 #!/bin/sh
-# QA Subagent — downloadable macOS installer.
+# Spike installer — macOS.
 #
 # HOW TO USE: double-click this file in Finder. It opens Terminal and runs the
 # steps below. (If macOS blocks it with "unidentified developer", right-click →
@@ -71,7 +71,7 @@ if ! qa daemon --install-service; then
 fi
 
 echo ''
-ok 'Done. The QA Subagent desktop app is running and will start on every login.'
+ok 'Done. Spike is running and will start on every login.'
 echo '  Go back to the browser extension — the connection dot should turn green shortly.'
 echo '  To remove it later:  qa daemon --uninstall-service'
 pause_and_exit 0

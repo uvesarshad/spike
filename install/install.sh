@@ -1,5 +1,5 @@
 #!/bin/sh
-# QA Subagent — one-line desktop-app installer (macOS / Linux)
+# Spike installer — one-line (macOS / Linux)
 #
 # Usage (from the extension's "Connect desktop app" button, or by hand):
 #     curl -fsSL https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.sh | sh
@@ -74,6 +74,6 @@ if ! qa daemon --install-service; then
 fi
 
 echo ''
-ok 'Done. The QA Subagent desktop app is running and will start on every login.'
+ok 'Done. Spike is running and will start on every login.'
 echo '  Go back to the browser extension — the connection dot should turn green shortly.'
 echo '  To remove it later:  qa daemon --uninstall-service'

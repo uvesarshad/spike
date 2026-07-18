@@ -89,7 +89,7 @@ Paste each into the matching box in the dashboard's "Permission justification" s
 
 ## 4. Privacy practices (Data usage tab)
 
-**Privacy policy URL:** `[HOSTED PRIVACY POLICY URL]`  ← required (the `debugger` + `<all_urls>` permissions are "powerful"; Chrome will not approve without a privacy policy).
+**Privacy policy URL:** `https://github.com/uvesarshad/spike/blob/main/PRIVACY.md`  ← required (the `debugger` + `<all_urls>` permissions are "powerful"; Chrome will not approve without a privacy policy). Hosted on GitHub for now; swap for a website URL later if desired.
 
 Declare the following in the "What user data do you collect?" checklist — answer honestly per your final build:
 

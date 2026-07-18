@@ -1,5 +1,5 @@
 #!/bin/sh
-# QA Subagent — downloadable Linux installer.
+# Spike installer — Linux.
 #
 # HOW TO USE: from a terminal in the download folder:
 #     chmod +x install-linux.sh && ./install-linux.sh
@@ -55,7 +55,7 @@ if ! qa daemon --install-service; then
 fi
 
 echo ''
-ok 'Done. The QA Subagent desktop app is running and will start on every login.'
+ok 'Done. Spike is running and will start on every login.'
 echo '  Go back to the browser extension — the connection dot should turn green shortly.'
 echo '  (On some distros you may need once:  loginctl enable-linger "$USER")'
 echo '  To remove it later:  qa daemon --uninstall-service'

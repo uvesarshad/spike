@@ -1,4 +1,4 @@
-# QA Subagent — one-line desktop-app installer (Windows / PowerShell)
+# Spike installer — one-line (Windows / PowerShell)
 #
 # Usage (from the extension's "Connect desktop app" button, or by hand):
 #     irm https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.ps1 | iex
@@ -74,6 +74,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Ok "Done. The QA Subagent desktop app is running and will start on every login."
+Write-Ok "Done. Spike is running and will start on every login."
 Write-Host "  Go back to the browser extension — the connection dot should turn green shortly."
 Write-Host "  To remove it later:  qa daemon --uninstall-service"

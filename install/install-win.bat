@@ -1,6 +1,6 @@
 @echo off
 setlocal
-REM QA Subagent - downloadable Windows installer.
+REM Spike installer - Windows.
 REM
 REM HOW TO USE: double-click this file. (SmartScreen may warn on an unsigned
 REM script the first time: "More info" > "Run anyway".) It:
@@ -12,7 +12,7 @@ REM
 REM Re-running is safe (idempotent). Everything is per-user; no admin required.
 REM npm and qa are .cmd shims, so each is invoked with CALL to return control here.
 
-title QA Subagent installer
+title Spike installer
 
 echo ==^> Checking Node.js...
 where node >nul 2>nul
@@ -52,7 +52,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo [OK] Done. The QA Subagent desktop app is running and will start on every login.
+echo [OK] Done. Spike is running and will start on every login.
 echo     Go back to the browser extension - the connection dot should turn green shortly.
 echo     To remove it later:  qa daemon --uninstall-service
 echo.
