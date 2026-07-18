@@ -2,7 +2,7 @@
 # QA Subagent — one-line desktop-app installer (macOS / Linux)
 #
 # Usage (from the extension's "Connect desktop app" button, or by hand):
-#     curl -fsSL https://raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install/install.sh | sh
+#     curl -fsSL https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.sh | sh
 #
 # What it does, in order:
 #   1. Verifies Node.js >= 20 is present (the daemon is a Node process).

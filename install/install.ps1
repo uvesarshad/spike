@@ -1,7 +1,7 @@
 # QA Subagent — one-line desktop-app installer (Windows / PowerShell)
 #
 # Usage (from the extension's "Connect desktop app" button, or by hand):
-#     irm https://raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install/install.ps1 | iex
+#     irm https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.ps1 | iex
 #
 # What it does, in order:
 #   1. Verifies Node.js >= 20 is present (the daemon is a Node process).

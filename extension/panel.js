@@ -145,7 +145,7 @@ const themeBtn = $('themeBtn');
 // on the user's OWN machine (localhost:9410); nothing is hosted server-side.
 // Swap INSTALL_BASE for a custom domain (Cloudflare/GitHub Pages) later if you
 // want a prettier URL; the raw form works the moment the repo is pushed.
-const INSTALL_BASE = 'https://raw.githubusercontent.com/uvesarshad/browser-qa-subagent/main/install';
+const INSTALL_BASE = 'https://raw.githubusercontent.com/uvesarshad/spike/main/install';
 const INSTALL_CMDS = {
   win: `irm ${INSTALL_BASE}/install.ps1 | iex`,
   mac: `curl -fsSL ${INSTALL_BASE}/install.sh | sh`,
