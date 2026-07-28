@@ -1,7 +1,7 @@
 # Project TODO / Tracking
 
 > Status legend: `[x]` done · `[ ]` not started · `[~]` partial/in progress
-> Source of truth for scope: [`browser-qa-subagent-product-doc.md`](browser-qa-subagent-product-doc.md) §6.
+> Source of truth for scope: [`spike-agent-product-doc.md`](spike-agent-product-doc.md) §6.
 > Last updated: 2026-06-07 (MVP + Recorder shipped).
 
 ---
@@ -43,7 +43,7 @@
 
 ### Transports
 - [x] MCP stdio server with the single `qa_run` tool (`src/mcp-server.ts`)
-- [x] CLI: `qa run | mcp | nano --check/--download | fixture --bug on/off | config`
+- [x] CLI: `spike run | mcp | nano --check/--download | fixture --bug on/off | config`
 
 ### Verification (all green 2026-06-07)
 - [x] `test/m1.browser-port.ts` — 7/7 (port surface incl. logpoint w/ live values via real clicks)
@@ -74,9 +74,9 @@
 
 - [x] Recording: passed runs distilled to `generated-tests/<task-slug>.json` with resilient role+name locators (driver records `target` per interaction; nodeIds never persisted) — `src/recorder/script.ts`
 - [x] Playwright codegen twin: `.spec.ts` emitted alongside (getByRole locators) as a PORTABLE artifact for the user's CI — we replay the JSON ourselves, no Playwright dependency
-- [x] `qa replay <name>` — deterministic re-run over CDP: zero planner calls, Nano-only visuals (skipped w/ warning if unavailable — replays never spend paid tokens), strict on runtime errors/5xx, same report.json shape — `src/recorder/replay.ts`
+- [x] `spike replay <name>` — deterministic re-run over CDP: zero planner calls, Nano-only visuals (skipped w/ warning if unavailable — replays never spend paid tokens), strict on runtime errors/5xx, same report.json shape — `src/recorder/replay.ts`
 - [x] Self-heal (`--heal`): failed replay re-engages the full driver on the original task, re-emits the script with `healedFrom` lineage (full re-run, not mid-flow resume — deviation from original sketch, simpler and proven)
-- [x] Suite mode: `qa replay --all` — worst verdict drives the exit code
+- [x] Suite mode: `spike replay --all` — worst verdict drives the exit code
 - [x] Fixture `v2` variant (renamed checkout button) to simulate UI drift
 - [x] e2e 12/12 (`test/e2e.recorder.ts`): record → $0 replay passes in ~9s (vs ~3min AI run) → bug-on replay fails w/ evidence → v2 drift fails → heal re-emits → healed script replays at $0
 
@@ -96,15 +96,15 @@
 - [x] Dev-loading post-Chrome-137 solved (`src/chrome/extensions.ts`): `Extensions.loadUnpacked` is **pipe-only** — launch with `--remote-debugging-pipe` (NUL-framed JSON-RPC on fd 3/4) + `--enable-unsafe-extension-debugging`, port stays live for the daemon; Web Store for users
 - [x] Port-contract suite (`test/port-contract.ts`): the m1 checks generalized over any BrowserPort — **CdpBrowser 7/7 AND ExtensionBrowser 7/7** (`test/v3.extension-port.ts`), logpoints with live values working through chrome.debugger
 - [x] Nano via the extension's own Prompt API (`src/ports/extension-nano.ts` + sw.js `nano.*` bridge methods; SW-first with automatic chrome.offscreen fallback) — v6: good→pass 5.1s / bad→fail 3.0s, $0, schema-enforced (`test/v6.extension-nano.ts`)
-- [x] Engine wiring: `qa run|replay --via extension` (config: via/bridgePort/extensionDir + QA_VIA env; engine `openBrowserSession` picks the transport, reuse-if-alive on the CDP port; SW scans bridge ports 9410-9413) — v5 4/4 no-AI + full AI capstone run
+- [x] Engine wiring: `spike run|replay --via extension` (config: via/bridgePort/extensionDir + QA_VIA env; engine `openBrowserSession` picks the transport, reuse-if-alive on the CDP port; SW scans bridge ports 9410-9413) — v5 4/4 no-AI + full AI capstone run
 - [x] Engine: ExtensionNano in vibe mode (injected bridge → no pointless runner-Chrome spawn); NanoRunnerPage stays for engine-launched Chrome
 - [ ] Investigate: chrome.offscreen.createDocument stalls in headless Chrome (observed via nano.avail hang in v9) — SW now guards every nano.* bridge call with a timeout (avail→'unavailable' after 10s) so runs degrade to rung 1 instead of dying; find the real cause for headed-vibe Nano
 - [ ] Fresh-Chrome Nano availability: component re-validates (~60s 'downloading') after every Chrome start — engine should poll briefly instead of falling to rung 1 (v6 polls; engine doesn't yet)
 
 ### Vibe UX — core ✅ (2026-06-07)
-- [x] Side-panel chat (`extension/panel.{html,js,css}`): URL + plain-English task in, live progress feed, verdict card, copy-able fix prompt; SW relays panel⇄daemon over the bridge (reverse RPC `{rid,...}` frames); `qa daemon` hosts the service
+- [x] Side-panel chat (`extension/panel.{html,js,css}`): URL + plain-English task in, live progress feed, verdict card, copy-able fix prompt; SW relays panel⇄daemon over the bridge (reverse RPC `{rid,...}` frames); `spike daemon` hosts the service
 - [x] **Ghost cursor overlay** (`extension/overlay.js` + emits in ExtensionBrowser): indigo cursor glides to each click (450ms ease), click ripples, bottom caption pill narrating steps ("Clicking the "Sign in" button"), ✓/✗ ticks — driven by `vibe.cursor` events, pointer-events:none, zero page interference
-- [x] **Fix-prompt synthesis** (`src/vibe/fix-prompt.ts`): deterministic Report → paste-ready prompt (repro steps humanized via step targets, console_error verbatim, failed requests w/ status, evidence timestamps, heuristic root cause, "do not change unrelated files" guard); also `qa fix <runId>` for dev mode + `renderPlainReport` for the panel
+- [x] **Fix-prompt synthesis** (`src/vibe/fix-prompt.ts`): deterministic Report → paste-ready prompt (repro steps humanized via step targets, console_error verbatim, failed requests w/ status, evidence timestamps, heuristic root cause, "do not change unrelated files" guard); also `spike fix <runId>` for dev mode + `renderPlainReport` for the panel
 - [x] Onboarding-lite: panel shows bridge status dot + Nano availability line ("testing still works via cloud free tier")
 - [~] **Replay clip export (GIF)**: `src/clip/screencast.ts` works over raw CDP (v14: 27KB gif) and is wired into the engine, but **OPT-IN (`QA_RECORD_CLIP=1`) and cdp-transport only** for now: (a) chrome.debugger does NOT expose Page.startScreencast → extension/vibe mode needs a `chrome.tabCapture`-based recorder (the real product target); (b) one cdp run on the warm daemon Chrome had post-nav clicks no-op with screencast active, unreproducible on fresh profiles (`test/v16.clip-input-interaction.ts` all clean). Engine guards clip start with a 5s timeout. MP4/watermark also open.
 - [x] Onboarding full flow: panel "Download on-device AI (~2 GB)" button w/ progress bar (SW + offscreen paths), 22GB-gate explanation on 'unavailable'
@@ -124,7 +124,7 @@
 > GUI vibe-coders paste the fix prompt; CLI users get the loop closed automatically: test → fail → prompt handed to claude/codex/gemini headlessly → re-test.
 
 - [x] `src/vibe/auto-fix.ts`: agent auto-detect (claude→codex→gemini on PATH), stdin/file prompt delivery (Windows .cmd argv quoting solved), 15-min timeout, streamed output
-- [x] `qa run --fix [--max-fix-attempts N]` (runWithAutoFix loop) + `qa fix <runId> --apply`
+- [x] `spike run --fix [--max-fix-attempts N]` (runWithAutoFix loop) + `spike fix <runId> --apply`
 - [x] Panel: "🤖 Auto-fix with my coding agent" button on FAIL (vibe.fix → fix-progress/fix-done events)
 - [x] e2e with a REAL coding agent: `test/e2e.autofix-real.ts` (gated on QA_REAL_AGENT_E2E=1 — spends real tokens) + on-disk `test/fixtures/buggy-shop/`. PROVEN: red → real `claude -p` edits checkout.js (adds the missing `total`) → green, ~5.7min wall. Gotchas solved: serve the agent's temp copy, cache-bust scripts, deterministic sync throw
 
@@ -142,7 +142,7 @@
 
 ## Phase 4 — Later (tracked, not scoped)
 
-- [x] Tier-4 guardrail core (2026-06-07): AES-256-GCM vault (`qa secret`, `{{secret:NAME}}` resolved at execute-time only — placeholders everywhere else: prompts/reports/scripts/audit), read-only-by-default outside allowedHosts, per-action audit.log. Still open: confirm-on-mutation UX, OS-keychain key backend, secret redaction in screenshots/clips
+- [x] Tier-4 guardrail core (2026-06-07): AES-256-GCM vault (`spike secret`, `{{secret:NAME}}` resolved at execute-time only — placeholders everywhere else: prompts/reports/scripts/audit), read-only-by-default outside allowedHosts, per-action audit.log. Still open: confirm-on-mutation UX, OS-keychain key backend, secret redaction in screenshots/clips
 - [x] Ollama adapter (rung 3) implemented — untested against a live Ollama (none on this machine)
 - [ ] "Throw anything at it" goal mode (WordPress/Stripe/DNS troubleshooting)
 - [ ] Launch: OSS polish, token-cost benchmark table (vs Playwright MCP / Claude in Chrome), Show HN + split-screen Lovable demo video

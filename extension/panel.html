@@ -173,7 +173,7 @@
             <label class="settings-toggle-row" for="setAutoFix">
               <span class="settings-toggle-copy">
                 <span class="settings-toggle-label">Auto-fix with my coding agent</span>
-                <span class="settings-toggle-sub">Off: show me a prompt to paste. On: hand the fix to a coding agent (needs the desktop app).</span>
+                <span class="settings-toggle-sub">Off: show me a prompt to paste. On: hand the fix to a coding agent (needs Spike Core).</span>
               </span>
               <span class="switch">
                 <input id="setAutoFix" class="switch-input" type="checkbox" />
@@ -182,7 +182,7 @@
             </label>
             <div id="setAutoFixNote" class="settings-note settings-note-warn" hidden>
               <span class="ico" data-icon="info"></span>
-              <span id="setAutoFixNoteText">Auto-fix needs the desktop app (daemon) running. Install it, then turn this on.</span>
+              <span id="setAutoFixNoteText">Auto-fix needs Spike Core running. Install it, then turn this on.</span>
             </div>
 
             <label class="settings-toggle-row" for="setVideoAssert">
@@ -216,7 +216,7 @@
             </label>
 
             <div id="connectApp" class="connect-app" hidden>
-              <div id="connectAppTitle" class="connect-app-title">Connect the desktop app</div>
+              <div id="connectAppTitle" class="connect-app-title">Connect Spike Core</div>
               <div id="connectAppSub" class="connect-app-sub">Run this once in a terminal — the daemon then auto-starts on every login and this panel connects on its own.</div>
               <div class="connect-app-os">
                 <button class="connect-os-btn is-active" type="button" data-os="win">Windows</button>

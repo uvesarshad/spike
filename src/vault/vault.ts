@@ -99,7 +99,7 @@ function defaultKeyProvider(dir: string): KeyProvider {
 }
 
 /** File-based AES-256-GCM secrets store. Sync fs throughout — the secret set is
- * tiny and access is rare (interactive `qa secret …` + per-step resolution). */
+ * tiny and access is rare (interactive `spike secret …` + per-step resolution). */
 export class Vault {
   private readonly dir: string;
   private readonly secretsPath: string;

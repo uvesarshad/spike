@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Spike",
+  "name": "Spike — QA testing agent",
   "version": "0.0.1",
   "description": "Spike — autonomous browser QA: a cheap-model ladder tests your app in your real Chrome and reports back.",
   "background": { "service_worker": "sw.js", "type": "module" },

@@ -6,11 +6,11 @@
 
 ## Executive Summary
 
-Passmark and browser-qa-subagent solve adjacent but different jobs.
+Passmark and spike-agent solve adjacent but different jobs.
 
 Passmark is a Playwright library for teams already writing Playwright tests. It embeds AI inside `@playwright/test` via `runSteps()`, `runUserFlow()`, and `assert()`, then optimizes repeated test runs with Redis step caching, auto-healing, multi-model assertion consensus, dynamic data, extraction, video assertions, gateway support, and telemetry.
 
-browser-qa-subagent is an out-of-process QA daemon for coding agents and vibe-mode users. It owns Chrome through CDP or an MV3 extension, uses a cost-ordered model ladder with Gemini Nano first, returns a slim evidence-backed verdict over CLI/MCP, records passing runs into deterministic replay scripts, and can generate or apply fix prompts.
+spike-agent is an out-of-process QA daemon for coding agents and vibe-mode users. It owns Chrome through CDP or an MV3 extension, uses a cost-ordered model ladder with Gemini Nano first, returns a slim evidence-backed verdict over CLI/MCP, records passing runs into deterministic replay scripts, and can generate or apply fix prompts.
 
 The local project has a stronger agent-integration story and a more opinionated low-cost architecture. Passmark has a stronger test-authoring library surface and a broader action/data/assertion feature set. The biggest local gaps are not basic browser control; they are productized test-suite ergonomics: reusable flow API, assertion consensus policy, step/action caching, data extraction/placeholders, richer Playwright parity, provider/gateway observability, and docs that reflect the already-shipped planner/navigator split.
 
@@ -35,7 +35,7 @@ Observed from the public repo:
 Observed from local docs and code:
 
 - Package form: CLI/MCP daemon plus Chrome MV3 extension, not a Playwright library.
-- Primary API: `qa run`, `qa replay`, `qa daemon`, MCP `qa_run`, extension side panel, and auto-fix commands.
+- Primary API: `spike run`, `spike replay`, `spike daemon`, MCP `qa_run`, extension side panel, and auto-fix commands.
 - Browser abstraction: `BrowserPort` with CDP and extension implementations; both use a real headed Chrome.
 - Model architecture: `ModelRouter` supports `visual-verdict`, `plan-step` navigator, and `plan-goals` brain roles. Nano is rung 0 and now supports visual verdicts plus navigator steps; cloud/CLI/BYOK/Ollama adapters provide fallbacks.
 - Driver loop: accessibility-tree-first, 1-3 action batches, per-step console/network evidence, host mutation guard, secret redaction, retry by role/name, pass confirmation by visual verdict, brain re-plan on stuck states.
@@ -46,7 +46,7 @@ Observed from local docs and code:
 
 ## Side-by-Side Comparison
 
-| Area | Passmark | browser-qa-subagent | Audit take |
+| Area | Passmark | spike-agent | Audit take |
 |---|---|---|---|
 | Integration shape | Playwright library in test files | CLI/MCP daemon and extension | Local is better for coding-agent delegation; Passmark is better for normal test suites. |
 | Browser runtime | Playwright-managed page | Headed Chrome via CDP or extension bridge | Local gains real-user-session/vibe control; Passmark gains mature Playwright primitives. |

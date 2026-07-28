@@ -1,4 +1,4 @@
-# Overview — browser-qa-subagent
+# Overview — spike-agent
 
 > Scope: Master index and mental model for all AI agents and human contributors.
 > Rendering context: N/A
@@ -7,7 +7,7 @@
 
 ## Overview
 
-browser-qa-subagent is a local Node.js daemon and Chrome extension that delegates browser QA runs to cheap models (Gemini Nano, Google CLI free quota, BYOK, Ollama), returning a ~2K-token verdict to the expensive coding agent that called it. The daemon drives a real headed Chrome via Chrome DevTools Protocol (CDP); the MV3 extension provides an alternative transport for "vibe mode" — testing the user's own browser session without a separate Chrome profile. Two de-risking spikes are frozen under spikes/ and prove the two hardest primitives: on-device Nano visual verdicts and CDP logpoint injection.
+spike-agent is a local Node.js daemon and Chrome extension that delegates browser QA runs to cheap models (Gemini Nano, Google CLI free quota, BYOK, Ollama), returning a ~2K-token verdict to the expensive coding agent that called it. The daemon drives a real headed Chrome via Chrome DevTools Protocol (CDP); the MV3 extension provides an alternative transport for "vibe mode" — testing the user's own browser session without a separate Chrome profile. Two de-risking spikes are frozen under spikes/ and prove the two hardest primitives: on-device Nano visual verdicts and CDP logpoint injection.
 
 ## Tech Stack
 
@@ -33,7 +33,7 @@ Tier 3: a server-side daemon with an engine that calls multiple external model A
 - docs/modules/browser-port.md — BrowserPort interface, CdpBrowser, ExtensionBrowser, bridge
 - docs/modules/action-cache.md — file-backed verified step action cache helpers
 - docs/modules/script-runner.md — allowlisted/AST-validated secure custom-step runner
-- docs/modules/telemetry.md — always-on redacted spans, OTLP export, and `qa dashboard`
+- docs/modules/telemetry.md — always-on redacted spans, OTLP export, and `spike dashboard`
 - docs/modules/recorder.md — QaScript record/replay, pre-run replay matcher, and the Playwright spec twin
 - docs/modules/vibe-mode.md — VibeService daemon, side panel, auto-fix loop
 - docs/api/route-handlers.md — CLI commands and MCP tool contract
@@ -44,7 +44,7 @@ Tier 3: a server-side daemon with an engine that calls multiple external model A
 - docs/infra/testing.md — test suites, frameworks, how to run
 
 Product documentation (human-authored, not generated):
-- docs/browser-qa-subagent-product-doc.md — full product vision, §6.5 records spike results
+- docs/spike-agent-product-doc.md — full product vision, §6.5 records spike results
 - docs/architecture-explainer.md — non-expert walkthrough of the system
 - docs/grok-findings-about-auto-testing-tool.md — demand-validation research
 - docs/TODO.md — roadmap and planned work
@@ -109,7 +109,7 @@ Navigator and brain never silently share a mispinned model: `buildLadder()` (src
 - [2026-07-07] Added the file-backed action-cache module and v28 unit coverage.
 - [2026-07-07] Added runtime data and fake email provider modules for Phase 4.
 - [2026-07-07] Added Passmark gap implementation task list under docs/plan.
-- [2026-07-10] Round 2 (Phases 8-15): opt-in video assertions, action parity (upload/drag/blur/mouse/tabs), secure script runner, first-class telemetry + `qa dashboard`, more provider SDKs, config-drift migration, pre-run replay matcher, and model-assisted extraction. Added docs/modules/script-runner.md and docs/modules/telemetry.md.
+- [2026-07-10] Round 2 (Phases 8-15): opt-in video assertions, action parity (upload/drag/blur/mouse/tabs), secure script runner, first-class telemetry + `spike dashboard`, more provider SDKs, config-drift migration, pre-run replay matcher, and model-assisted extraction. Added docs/modules/script-runner.md and docs/modules/telemetry.md.
 - [2026-07-07] Added Passmark comparison audit under docs/plan and indexed planning docs.
 - [2026-06-11] Initial documentation generated from codebase; all docs/ subdirectories created.
 

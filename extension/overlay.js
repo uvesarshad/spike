@@ -237,7 +237,7 @@
       watermarkEl.id = WATERMARK_ID;
       watermarkEl.innerHTML =
         '<span style="width:9px;height:9px;border-radius:3px;background:' + ACCENT + ';flex:0 0 auto"></span>' +
-        '<span>QA Subagent</span>';
+        '<span>Spike</span>';
       Object.assign(watermarkEl.style, {
         position: 'fixed',
         bottom: '10px',

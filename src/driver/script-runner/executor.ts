@@ -20,7 +20,7 @@ function resolveSecrets(text: string, vault: Vault | undefined): string {
   return text.replace(SECRET_RE, (_m, name: string) => {
     const value = vault?.get(name);
     if (value === undefined) {
-      throw new Error(`secret "${name}" not found — add it with: qa secret set ${name}`);
+      throw new Error(`secret "${name}" not found — add it with: spike secret set ${name}`);
     }
     return value;
   });

@@ -117,7 +117,7 @@ function resolveSecrets(text: string, vault: Vault | undefined): string {
     const value = vault?.get(name);
     if (value === undefined) {
       throw new SecretNotFoundError(
-        `secret "${name}" not found — add it with: qa secret set ${name}`,
+        `secret "${name}" not found — add it with: spike secret set ${name}`,
       );
     }
     return value;

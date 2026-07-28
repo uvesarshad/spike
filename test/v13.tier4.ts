@@ -235,7 +235,7 @@ console.log('\n--- missing-secret path ---');
   check('missing secret → type step failed', typeStep !== undefined && typeStep.ok === false);
   check(
     'missing secret error names the secret + the qa cli hint',
-    typeStep?.error?.includes('DOES_NOT_EXIST') === true && typeStep?.error?.includes('qa secret set') === true,
+    typeStep?.error?.includes('DOES_NOT_EXIST') === true && typeStep?.error?.includes('spike secret set') === true,
   );
   check('missing secret → browser.type never called', browser.typed.length === 0);
 }

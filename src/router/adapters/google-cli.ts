@@ -203,7 +203,7 @@ export class GoogleCliAdapter implements ModelAdapter {
           return reject(
             new Error(
               `${this.opts.bin}: the Gemini CLI free tier (Gemini Code Assist for individuals) has ended — this client is no longer supported. ` +
-                `Switch the planner to a BYOK key (e.g. \`qa config set --provider glm\` then \`qa secret set glm <key>\`; gemini/claude/openai also work), ` +
+                `Switch the planner to a BYOK key (e.g. \`spike config set --provider glm\` then \`spike secret set glm <key>\`; gemini/claude/openai also work), ` +
                 `use the \`claude\` or \`codex\` CLI, or point googleCliBin at the Antigravity CLI once installed.`,
             ),
           );

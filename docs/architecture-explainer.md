@@ -1,4 +1,4 @@
-# How the Browser QA Subagent Works — A Plain-English Tour
+# How Spike Works — A Plain-English Tour
 
 *Audience: anyone — including builders who have never opened a terminal. No prior knowledge assumed.*
 

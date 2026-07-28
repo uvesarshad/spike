@@ -36,7 +36,7 @@
  * event back — `{event:'bridge.hello', params:{protocolVersion:PROTOCOL_VERSION}}`
  * — addressed to that client. The extension compares this against the minimum
  * it requires and, if the daemon is too old (or never acks), tells the panel
- * to show "update the desktop app" instead of a plain green "connected" dot.
+ * to show "update Spike Core" instead of a plain green "connected" dot.
  * Bump PROTOCOL_VERSION whenever the wire protocol changes in a way both
  * sides must agree on to work correctly.
  *

@@ -55,7 +55,7 @@ function buildTracerFromEnv(): TelemetryTracer {
   const exporter = new OtlpHttpExporter({
     endpoint,
     headers,
-    serviceName: process.env.QA_OTLP_SERVICE_NAME || 'browser-qa-subagent',
+    serviceName: process.env.QA_OTLP_SERVICE_NAME || 'spike-agent',
   });
   // Known BYOK key env vars — scrubbed wherever they appear in span text (e.g. a
   // key that leaked into an adapter error message or a query string), same as

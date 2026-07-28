@@ -1,6 +1,6 @@
 /* Recorder e2e (R4) — the "AI once → deterministic forever" loop:
  *  1. AI run on the healthy fixture → pass → script recorded (json + spec.ts)
- *  2. qa replay → pass with ZERO planner calls (model_trace empty), seconds not minutes
+ *  2. spike replay → pass with ZERO planner calls (model_trace empty), seconds not minutes
  *  3. replay against the bug-on fixture → fail with runtime-error evidence
  *  4. replay against drifted UI (v2: renamed button) → fail → --heal re-runs
  *     the AI, re-emits the script → replaying the healed script on v2 passes at $0

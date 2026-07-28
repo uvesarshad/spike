@@ -152,7 +152,7 @@ const REQUEST_TIMEOUT_MS = 120_000;
 function sendRequest(method, params) {
   return new Promise((resolve, reject) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
-      reject(new Error('daemon not running — start it with: qa daemon'));
+      reject(new Error('daemon not running — start it with: spike daemon'));
       return;
     }
     const rid = ++ridCounter;
@@ -497,7 +497,7 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         case 'fix': {
           if (!daemonConnected()) {
-            port.postMessage({ kind: 'fix-done', ok: false, message: 'auto-fix needs the desktop app — copy the fix prompt and paste it into your coding agent.' });
+            port.postMessage({ kind: 'fix-done', ok: false, message: 'auto-fix needs Spike Core — copy the fix prompt and paste it into your coding agent.' });
             break;
           }
           try {
@@ -513,7 +513,7 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         case 'clip': {
           if (!daemonConnected()) {
-            port.postMessage({ kind: 'clip-error', message: 'replay clips need the desktop app (lite mode is test-only).' });
+            port.postMessage({ kind: 'clip-error', message: 'replay clips need Spike Core (lite mode is test-only).' });
             break;
           }
           try {

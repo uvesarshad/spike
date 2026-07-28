@@ -21,7 +21,7 @@ File location: %LOCALAPPDATA%\qa-subagent\settings.json (Windows) or $HOME/qa-su
 
 Read by: loadConfig() (src/config.ts) folds it in below env vars. The SettingsStore layer sits between qa.config.json and env vars in the precedence chain (low to high: defaults < qa.config.json < SettingsStore < env < explicit overrides).
 
-Written by: `qa config set` CLI command and the vibe.config.set bridge message from the extension side panel. write() merges a partial patch (planner and navigator are merged as nested objects, not replaced wholesale).
+Written by: `spike config set` CLI command and the vibe.config.set bridge message from the extension side panel. write() merges a partial patch (planner and navigator are merged as nested objects, not replaced wholesale).
 
 AGENT NOTE: `readRaw()` (the un-defaulted read config.ts's fromSettings() relies on) also runs a one-time config-drift migration: a persisted `planner` pinned to the dead Gemini CLI free tier (`gemini:cli`) is rewritten to `{ provider: 'claude', mode: 'cli' }`, and a persisted settings.json with no `navigator` key at all (pre planner/navigator split) is rewritten to `DEFAULT_SETTINGS.navigator` (`nano`/`ondevice`). The migrated value is written back to disk once (best-effort — a write failure still returns the migrated value in memory). See `isDeadPlannerSelection()` in src/vibe/settings-data.ts and the "Navigator/brain pins" gotcha in CLAUDE.md.
 
@@ -39,10 +39,10 @@ File location: %LOCALAPPDATA%\qa-subagent\vault.bin (Windows DPAPI encrypted) or
 
 Provider: src/vault/dpapi-key-provider.ts uses Windows DPAPI (CryptProtectData / CryptUnprotectData) to encrypt at rest, bound to the current Windows user account.
 
-Written by: `qa secret set <name> <value>` CLI command; also written internally by BridgeServer on first pairing (see above).
+Written by: `spike secret set <name> <value>` CLI command; also written internally by BridgeServer on first pairing (see above).
 Read by: engine.ts (buildLadder reads keys for each adapter), the driver loop (resolveSecrets reads named secrets for {{secret:NAME}} substitution in type actions), and BridgeServer (reads/writes the pairing token on construction/first-connect).
 
-AGENT NOTE: Vault reads happen at every qaRun() call, not just at daemon startup. This means a key added via `qa secret set` is available immediately to the next run without restarting the daemon.
+AGENT NOTE: Vault reads happen at every qaRun() call, not just at daemon startup. This means a key added via `spike secret set` is available immediately to the next run without restarting the daemon.
 
 AGENT NOTE: On non-Windows platforms, DPAPI is unavailable. The Vault falls back to a plaintext file. Do not store sensitive production credentials without understanding this limitation.
 
@@ -70,7 +70,7 @@ AGENT NOTE: artifacts/ and generated-tests/ are both git-ignored. Do not rely on
 
 ## Action Cache (src/cache/action-cache.ts)
 
-Stores: optional verified single-action records under cfg.actionCacheDir, laid out as `v1/<hash-prefix>/<hash>.json`. It is enabled only when cfg.actionCache is true, QA_ACTION_CACHE is set, or `qa run --action-cache` is passed.
+Stores: optional verified single-action records under cfg.actionCacheDir, laid out as `v1/<hash-prefix>/<hash>.json`. It is enabled only when cfg.actionCache is true, QA_ACTION_CACHE is set, or `spike run --action-cache` is passed.
 
 Each record contains a normalized URL/goal/action/page-signature key and a redacted action value. Targeted values store role/name/nth/qaId locators, never snapshot nodeIds. Screenshots and reports are not stored in this cache.
 
@@ -80,7 +80,7 @@ AGENT NOTE: The action cache may store `{{secret:NAME}}` placeholders but must n
 
 Location: generated-tests/<slug>.json and generated-tests/<slug>.spec.ts.
 
-These are recorded QaScripts emitted after a passing run. They are runtime/generated data, not SettingsStore state. They are also git-ignored by default. In a CI environment, the directory should be committed or restored from a cache so `qa replay --all` has scripts to run.
+These are recorded QaScripts emitted after a passing run. They are runtime/generated data, not SettingsStore state. They are also git-ignored by default. In a CI environment, the directory should be committed or restored from a cache so `spike replay --all` has scripts to run.
 
 ## Extension Panel UI State
 

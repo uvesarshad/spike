@@ -11,7 +11,7 @@ A QA run begins when a caller (CLI or MCP) supplies a task string and a URL. The
 
 ## Ingress - Two Entry Points
 
-CLI path: src/cli.ts parses the `qa run` command, converts flags to QaRunOptions, and calls qaRun(task, url, opts). Progress lines go to stdout.
+CLI path: src/cli.ts parses the `spike run` command, converts flags to QaRunOptions, and calls qaRun(task, url, opts). Progress lines go to stdout.
 
 MCP path: src/mcp-server.ts receives a qa_run tool call over stdio, extracts task and url from the tool input, and calls qaRun(). Progress is suppressed (onProgress is a no-op in MCP mode).
 
@@ -26,7 +26,7 @@ Before qaRun() opens a browser session or builds the model ladder, it checks for
 3. If the replay comes back 'fail', or replay itself throws, the run falls back to a fresh AI pass (runFreshAiPass()) with a progress line explaining why.
 4. A successful non-fail replay returns immediately as a QaRunResult with `replayMatch: { name, score }` attached; the report is persisted and the run never reaches Session Setup below.
 
-AGENT NOTE: qaReplay() invoked from a fresh AI pass's own re-run path (`qa fix` follow-ups, etc.) passes `replay: false` so the matcher never re-matches the script that just failed against itself.
+AGENT NOTE: qaReplay() invoked from a fresh AI pass's own re-run path (`spike fix` follow-ups, etc.) passes `replay: false` so the matcher never re-matches the script that just failed against itself.
 
 AGENT SEE: docs/modules/recorder.md - matcher scoring detail
 

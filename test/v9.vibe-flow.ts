@@ -1,7 +1,7 @@
 /* V9 — the vibe-mode quality gate, headless. Exercises the REAL loop the side
  * panel sits on top of:
  *
- *   BridgeServer + VibeService (what `qa daemon` runs)
+ *   BridgeServer + VibeService (what `spike daemon` runs)
  *     ⇅ ws://localhost:9410
  *   real MV3 extension SW (dev-loaded, simulating the user's Chrome)
  *     → vibe.run triggered from inside the SW exactly like the panel does

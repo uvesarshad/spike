@@ -218,8 +218,8 @@ before committing to the one-liner as the permanent answer (not the fallback):
   squirrel/NSIS target (heavier, but well-trodden), or a lighter NSIS/Inno Setup script
   around a bundled Node runtime (e.g. via `node-sea` / `pkg`-style single-executable Node,
   or just vendoring a portable Node zip alongside the installed CLI).
-- Installer steps: extract bundled Node + the `browser-qa-subagent` CLI to
-  `%LOCALAPPDATA%\browser-qa-subagent\`, then shell out to the existing
+- Installer steps: extract bundled Node + the `spike-agent` CLI to
+  `%LOCALAPPDATA%\spike-agent\`, then shell out to the existing
   `src/service/install-service.ts` logic (Scheduled Task `ONLOGON /RU <user>`) to register
   autostart — reuses code that already exists and is tested via `__setRunner`.
   wanted: no admin elevation, matching the current one-liner's per-user, no-admin design.
@@ -229,7 +229,7 @@ before committing to the one-liner as the permanent answer (not the fallback):
 
 **macOS (`.dmg` / `.pkg`):**
 - `.pkg` installer (via `pkgbuild`/`productbuild`) that installs a bundled Node + the CLI
-  into `/usr/local/browser-qa-subagent` or similar, then registers the existing
+  into `/usr/local/spike-agent` or similar, then registers the existing
   `~/Library/LaunchAgents` plist (`RunAtLoad`) from `install-service.ts`.
 - Needs an Apple Developer ID cert ($99/yr) for code-signing + notarization, or Gatekeeper
   blocks the unsigned installer outright — this is a harder requirement than Windows

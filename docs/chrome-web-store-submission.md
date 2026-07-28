@@ -11,7 +11,7 @@
 
 **Item name**
 ```
-Browser QA Subagent
+Spike — QA testing agent
 ```
 
 **Summary / short description** (≤132 chars — matches `manifest.json`)
@@ -24,7 +24,7 @@ Autonomous browser QA: a cheap-model ladder tests your app in your real Chrome a
 
 **Detailed description** (store listing body):
 ```
-Browser QA Subagent turns the browser you already have into an automated QA engineer for the apps you're building.
+Spike turns the browser you already have into an automated QA engineer for the apps you're building.
 
 Give it a URL and a plain-English task — "log in and complete checkout", "verify the homepage renders and the nav works" — and it drives YOUR real Chrome, watches what actually happens (console errors, failed network requests, broken rendering), and reports back a clear verdict with evidence: the failing step, the exact error with file:line, the failed request, and a screenshot.
 
@@ -44,11 +44,11 @@ WHAT YOU GET
 • Re-runnable recorded tests so a passing flow can be checked again at $0.
 
 PRIVACY-FIRST
-The extension talks only to a local companion app on your own machine and to the AI provider YOU choose. There is no account and no first-party analytics. On-device (Nano) and local (Ollama) options keep everything on your machine. Your API keys are stored encrypted on your device and are never sent to us. See our privacy policy for the full data-flow breakdown.
+The extension talks only to Spike Core on your own machine and to the AI provider YOU choose. There is no account and no first-party analytics. On-device (Nano) and local (Ollama) options keep everything on your machine. Your API keys are stored encrypted on your device and are never sent to us. See our privacy policy for the full data-flow breakdown.
 
 REQUIREMENTS
 • Desktop Chrome (latest). Multimodal on-device AI needs a recent Chrome with Gemini Nano support.
-• The local companion app (the "qa" daemon) running on your machine — install instructions on our site/repo.
+• Spike Core running on your machine — install instructions on our site/repo.
 
 Open source, Apache-2.0.
 ```
@@ -78,7 +78,7 @@ Paste each into the matching box in the dashboard's "Permission justification" s
 | `debugger` | Core function. The extension drives the page under test over the Chrome DevTools Protocol — navigate, click, type, capture screenshots, read the accessibility tree, and collect console messages and network activity caused by each test step. This is how it observes whether the app actually works. Chrome shows the standard "is being debugged" banner while a test runs. |
 | `tabs` | To identify the user's active tab (the app they want tested) and attach the test session to it, and to open a fresh tab for the "test a URL" flow. Used only to target the correct tab; page contents are read via the debugger session above, not the tabs API. |
 | `storage` | Local-only. Stores the user's settings (which AI provider drives testing, debugging preferences) and a short local run history (last ~10 runs) via `chrome.storage.local`. No data is synced or sent off-device by this permission. |
-| `alarms` | Keeps the MV3 service worker alive and reconnected to the local companion app. The worker maintains a WebSocket to a localhost daemon; a periodic alarm reconnects it after the worker is suspended, so a queued test can run reliably. |
+| `alarms` | Keeps the MV3 service worker alive and reconnected to Spike Core. The worker maintains a WebSocket to a localhost daemon; a periodic alarm reconnects it after the worker is suspended, so a queued test can run reliably. |
 | `offscreen` | Hosts an offscreen document for two on-device tasks that require a DOM/secure context: (1) running Chrome's built-in Gemini Nano Prompt API for $0 on-device visual checks, and (2) the `MediaRecorder` that produces the optional replay clip. |
 | `sidePanel` | The product UI is a side panel: the user types the test task there and watches a live progress feed and verdict card. |
 | `tabCapture` | Optional, user-visible feature: records a short replay clip (video) of the test run so the user can review or share what the agent did. Only active during a run the user initiated. |
@@ -94,7 +94,7 @@ Paste each into the matching box in the dashboard's "Permission justification" s
 Declare the following in the "What user data do you collect?" checklist — answer honestly per your final build:
 
 - ☑ **Website content** — the page under test (accessibility tree, and screenshots for visual checks) is processed to run the test. Sent to the AI provider the user configures, or processed on-device (Nano/Ollama). Not sent to us.
-- ☑ **Authentication information** — only if the user stores an AI‑provider API key via the panel; it is passed to the user's local companion app and stored **encrypted on the user's device**. Not transmitted to us. (Test credentials the user supplies are likewise resolved locally and never sent to the AI model.)
+- ☑ **Authentication information** — only if the user stores an AI‑provider API key via the panel; it is passed to Spike Core and stored **encrypted on the user's device**. Not transmitted to us. (Test credentials the user supplies are likewise resolved locally and never sent to the AI model.)
 - ☐ Location, health, financial, personal communications, web‑browsing history — **not** collected.
 
 **Required certifications** (all true for this extension):
@@ -132,17 +132,17 @@ Store icon (128px) is already in the package (`extension/icons/icon128.png`).
 ## 6. Pre-upload checklist
 
 - [ ] `npm run pack:extension` → `dist/extension.zip` (manifest at zip root).
-- [ ] Manifest `version` is correct (currently `0.1.0`).
+- [ ] Manifest `version` is correct (currently `0.0.1`).
 - [ ] No `key` field or dev-only entries in `manifest.json` (verified: none).
 - [ ] Privacy policy hosted; URL pasted in §4.
 - [ ] Screenshots (§5) uploaded.
 - [ ] Permission justifications (§3) pasted.
 - [ ] Single-purpose statement (§2) pasted.
 - [ ] Support email + homepage set.
-- [ ] Heads-up for review: the extension needs a **local companion app** running to
+- [ ] Heads-up for review: the extension needs **Spike Core** running to
       function; reviewers without it will see the panel + a "daemon not connected"
       state. Mention this in the reviewer notes so it isn't flagged as broken.
 
 > Known limitation worth a reviewer note: the side panel shows a "connect the local
-> app" state until the `qa` daemon is running on the user's machine. This is by
+> app" state until the `spike` daemon is running on the user's machine. This is by
 > design (the heavy lifting is local, not in the extension).

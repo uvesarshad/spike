@@ -1,4 +1,4 @@
-# Agent Instructions — browser-qa-subagent
+# Agent Instructions — spike-agent
 
 ## Start here
 Read docs/overview.md before doing anything else.

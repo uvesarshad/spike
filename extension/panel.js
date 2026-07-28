@@ -153,9 +153,9 @@ const INSTALL_CMDS = {
 };
 // Fallback shown if you'd rather not pipe a remote script — pure npm, no host.
 const INSTALL_CMDS_NPM = {
-  win: 'npm i -g browser-qa-subagent; qa daemon --install-service',
-  mac: 'npm i -g browser-qa-subagent && qa daemon --install-service',
-  linux: 'npm i -g browser-qa-subagent && qa daemon --install-service',
+  win: 'npm i -g spike-agent; spike daemon --install-service',
+  mac: 'npm i -g spike-agent && spike daemon --install-service',
+  linux: 'npm i -g spike-agent && spike daemon --install-service',
 };
 let connectOs = 'win';
 // which command set the card is showing: the Raw-script one-liner or the npm form
@@ -166,12 +166,12 @@ let connectUseNpm = false;
 // says it's too old — "install" copy would be misleading in that state).
 const CONNECT_APP_COPY = {
   install: {
-    title: 'Connect the desktop app',
+    title: 'Connect Spike Core',
     sub: 'Run this once in a terminal — the daemon then auto-starts on every login and this panel connects on its own.',
   },
   update: {
-    title: 'Update the desktop app',
-    sub: "Your desktop app is out of date and can't run tests reliably with this version of the extension. Re-run the installer below to update it.",
+    title: 'Update Spike Core',
+    sub: "Spike Core is out of date and can't run tests reliably with this version of the extension. Re-run the installer below to update it.",
   },
 };
 function connectCmds() { return connectUseNpm ? INSTALL_CMDS_NPM : INSTALL_CMDS; }
@@ -232,7 +232,7 @@ if (themeBtn) {
 let busy = false;
 let fixing = false;
 let fetchingClip = false;
-// whether the desktop app (daemon) is currently connected at the socket level.
+// whether Spike Core is currently connected at the socket level.
 let bridgeConnected = false;
 // A4 protocol handshake result: true | false | null (null = not yet resolved).
 // false means the socket is up but the daemon is too old to speak our
@@ -790,7 +790,7 @@ function renderResult(params) {
   plainReport.textContent = reportText;
 
   // a saved replay clip (clipPath in the done payload) → offer a download, but
-  // ONLY while the desktop app is connected (clips are a daemon-only feature).
+  // ONLY while Spike Core is connected (clips are a daemon-only feature).
   lastClipPath = params.clipPath || null;
   refreshClipVisibility();
 
@@ -870,7 +870,7 @@ copyBtn.addEventListener('click', async () => {
 
 // ---- download clip ---------------------------------------------------------
 // The clip button only appears when BOTH a clip exists for the last run AND the
-// desktop app is connected (the SW fetches the clip over the daemon bridge).
+// Spike Core is connected (the SW fetches the clip over the daemon bridge).
 function refreshClipVisibility() {
   const show = !!lastClipPath && bridgeHealthy() && !fetchingClip;
   clipBtn.hidden = !show;
@@ -943,8 +943,8 @@ autoFixBtn.addEventListener('click', () => {
   if (fixing) return;
   if (!bridgeHealthy()) {
     showError(bridgeConnected && bridgeCompatible === false
-      ? "Your desktop app is outdated and can't run auto-fix reliably. Update it (Settings → re-run the installer), then try again."
-      : 'Auto-fix needs the desktop app (daemon) running. Start it, then try again — or use the fix prompt below.');
+      ? "Spike Core is outdated and can't run auto-fix reliably. Update it (Settings → re-run the installer), then try again."
+      : 'Auto-fix needs Spike Core running. Start it, then try again — or use the fix prompt below.');
     return;
   }
   fixing = true;
@@ -1131,7 +1131,7 @@ function refreshSettingsVisibility() {
   refreshAccordionSummaries();
 }
 
-/** Auto-fix needs a healthy desktop app (daemon connected AND protocol-
+/** Auto-fix needs a healthy Spike Core (daemon connected AND protocol-
  * compatible — see bridgeHealthy()). When it isn't, force the toggle off,
  * show a note explaining why, and reveal the one-liner connect block — its
  * copy switches between "connect" (no daemon) and "update" (daemon present
@@ -1147,8 +1147,8 @@ function refreshAutoFixGate() {
     setAutoFix.checked = false;
     setAutoFixNote.hidden = false;
     setAutoFixNoteText.textContent = outdated
-      ? 'Auto-fix needs an up-to-date desktop app — yours is outdated. Update it below, then turn this on.'
-      : 'Auto-fix needs the desktop app (daemon) running — it hands the fix to your coding agent. Set it up below, then turn this on.';
+      ? 'Auto-fix needs an up-to-date Spike Core — yours is outdated. Update it below, then turn this on.'
+      : 'Auto-fix needs Spike Core running — it hands the fix to your coding agent. Set it up below, then turn this on.';
     setDebugAgentRow.hidden = true;
   } else {
     setAutoFixNote.hidden = !(wantAuto && !healthy);
@@ -1305,7 +1305,7 @@ function closeSettings() {
 
 settingsBtn.addEventListener('click', openSettings);
 // header outdated-daemon banner (A4): tap it straight into Settings, where
-// the "Update the desktop app" one-liner lives (see refreshAutoFixGate).
+// the "Update Spike Core" one-liner lives (see refreshAutoFixGate).
 if (bridgeUpdateNote) {
   bridgeUpdateNote.addEventListener('click', openSettings);
   bridgeUpdateNote.addEventListener('keydown', (ev) => {
@@ -1344,7 +1344,7 @@ setAutoFix.addEventListener('change', refreshSettingsVisibility);
 setModel.addEventListener('input', refreshAccordionSummaries);
 setSameAsNav.addEventListener('change', refreshSettingsVisibility);
 
-// connect-desktop-app block: OS switcher + copy the one-liner
+// connect-spike-core block: OS switcher + copy the one-liner
 if (connectApp) {
   connectApp.querySelectorAll('.connect-os-btn').forEach((b) => {
     b.addEventListener('click', () => {

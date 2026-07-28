@@ -39,7 +39,7 @@ QA_RUNNER_PORT - Integer. Local HTTP port for the Gemini Nano runner page. Defau
 Consumed by: src/ports/nano-runner-page.ts.
 
 QA_FIXTURE_PORT - Integer. Local HTTP port for the dogfood fixture app. Default: 9401.
-Consumed by: fixture/server.ts (not in the daemon; only relevant when running `qa fixture`).
+Consumed by: fixture/server.ts (not in the daemon; only relevant when running `spike fixture`).
 
 QA_EXTENSION_DIR - String (directory path). Path to the unpacked extension directory. Default: <repo-root>/extension.
 Consumed by: src/chrome/extensions.ts.
@@ -159,10 +159,10 @@ Consumed by: src/telemetry/otlp-exporter.ts.
 QA_OTLP_HEADERS - String (JSON object). Extra POST headers for the OTLP exporter (auth token, dataset name). Optional.
 Consumed by: src/telemetry/otlp-exporter.ts.
 
-QA_OTLP_SERVICE_NAME - String. resource `service.name` on exported spans. Default: browser-qa-subagent.
+QA_OTLP_SERVICE_NAME - String. resource `service.name` on exported spans. Default: spike-agent.
 Consumed by: src/telemetry/otlp-exporter.ts.
 
-QA_DASHBOARD_PORT - Integer. Port for the read-only `qa dashboard` local viewer of artifacts/<runId> reports. Default: 9420.
+QA_DASHBOARD_PORT - Integer. Port for the read-only `spike dashboard` local viewer of artifacts/<runId> reports. Default: 9420.
 Consumed by: src/cli.ts (dashboard command).
 
 ## Auto-Fix

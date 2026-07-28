@@ -12,7 +12,7 @@ The existing tester guide (git clone → npm build → env vars → "Load unpack
 **developer** onboarding path. A non-technical user who vibe-codes their app bounces off
 every step. This doc scopes the flow that gets *that* user from nothing to a working QA
 run in **two clicks + one paste**. To be precise about the terminal promise: **Lite mode
-is zero terminal, ever; the optional desktop app is one terminal paste, once.**
+is zero terminal, ever; the optional Spike Core is one terminal paste, once.**
 
 The critical reframe: **the `claude` CLI is NOT on the non-technical path.** It requires
 installing another CLI and doing an OAuth login in a terminal — strictly harder than
@@ -29,7 +29,7 @@ existing login). The vibe-coder's model is a **pasted BYOK key**.
 
 1. **Click 1 — "Add to Chrome"** on the Web Store listing → extension installs, auto-updates, side panel appears.
 2. **Paste an API key** (Gemini or Anthropic) into the side panel → **Lite mode** tests immediately: no daemon, no terminal, no CLI. This step is genuinely zero terminal, ever.
-3. **Optional, one terminal paste, once (only for auto-fix + saved replay clips)** — the panel's "Connect the desktop app" block hands them an `irm|iex` one-liner to paste into PowerShell (or `curl|sh` into a shell) → daemon installs + auto-starts on login → connection dot goes green. This step *is* a terminal, by definition — it is not part of the zero-terminal promise, which applies to Lite mode only.
+3. **Optional, one terminal paste, once (only for auto-fix + saved replay clips)** — the panel's "Connect Spike Core" block hands them an `irm|iex` one-liner to paste into PowerShell (or `curl|sh` into a shell) → daemon installs + auto-starts on login → connection dot goes green. This step *is* a terminal, by definition — it is not part of the zero-terminal promise, which applies to Lite mode only.
 
 Lite mode — BYOK, with Nano opportunistically accelerating visual checks when available
 and the cloud key handling them too when it isn't — is the whole product for someone who
@@ -45,9 +45,9 @@ on disk), and replay clips — and reaching it costs exactly one terminal paste,
   assists `assert_visual`/final-confirm checks, and the cloud key covers those too when Nano
   is unavailable, which is the common case on a fresh non-technical machine given the 22GB
   free-space + ~2GB download gate). This is the zero-terminal core; it already works.
-- **One-liner daemon installer** — `install/install.ps1` / `install/install.sh`: node-check → `npm i -g browser-qa-subagent` → `qa daemon --install-service` → green dot. Idempotent, per-user, no admin.
+- **One-liner daemon installer** — `install/install.ps1` / `install/install.sh`: node-check → `npm i -g spike-agent` → `spike daemon --install-service` → green dot. Idempotent, per-user, no admin.
 - **Auto-start service** — `src/service/install-service.ts` registers a Windows Scheduled Task (`ONLOGON /RU <user>`), a macOS LaunchAgent (`RunAtLoad`), or a Linux `systemd --user` unit, so the daemon survives reboots with no terminal.
-- **Panel "Connect the desktop app" block** — `extension/panel.js` already holds the REAL `INSTALL_BASE` (`raw.githubusercontent.com/uvesarshad/spike/main/install`) and renders the per-OS one-liner; `extension/panel.html:196` has the block; `extension/panel.css:937` styles it.
+- **Panel "Connect Spike Core" block** — `extension/panel.js` already holds the REAL `INSTALL_BASE` (`raw.githubusercontent.com/uvesarshad/spike/main/install`) and renders the per-OS one-liner; `extension/panel.html:196` has the block; `extension/panel.css:937` styles it.
 - **Extension icons** — `extension/manifest.json` already references 16/32/48/128 PNGs (a Store prerequisite, already met).
 
 ## Gaps to close
@@ -71,7 +71,7 @@ on disk), and replay clips — and reaching it costs exactly one terminal paste,
    panel already emits the correct `raw.githubusercontent.com/uvesarshad/spike/main/install`
    URL — just align the two script comments so a user reading the script sees the real URL.
 2. **Make BYOK the panel's first-run default.** First run should invite "paste a Gemini or
-   Anthropic key," NOT assume a daemon or CLI. The daemon ("Connect the desktop app") must
+   Anthropic key," NOT assume a daemon or CLI. The daemon ("Connect Spike Core") must
    read as explicitly optional — "unlocks auto-fix + saved replays," not "required to start."
 3. **Node-not-installed is still a dead end.** The script tells the user to go install Node
    and re-run. For true non-tech, offer `winget install OpenJS.NodeJS.LTS` (Windows) or point
@@ -81,7 +81,7 @@ on disk), and replay clips — and reaching it costs exactly one terminal paste,
 
 - The panel currently foregrounds the daemon (a red connection dot), which reads as "broken
   until you install something" — the wrong signal for a BYOK-only user who never needs the daemon.
-- Reword so the hierarchy is explicit: **"Test right now with an API key. The desktop app is
+- Reword so the hierarchy is explicit: **"Test right now with an API key. Spike Core is
   optional and adds auto-fix + saved replays."** The red dot should not imply the product is
   non-functional without it.
 
@@ -107,9 +107,9 @@ on disk), and replay clips — and reaching it costs exactly one terminal paste,
 
 ## Definition of done
 
-- **The npm package `browser-qa-subagent` is actually published under that exact name.**
+- **The npm package `spike-agent` is actually published under that exact name.**
   Both `install/install.ps1` / `install/install.sh` and the extension service worker run
-  `npm i -g browser-qa-subagent` — if the package isn't live on npm under this name, the
+  `npm i -g spike-agent` — if the package isn't live on npm under this name, the
   entire daemon path (Click 2) fails at the last step for every user.
 - **The GitHub repo `github.com/uvesarshad/spike` is public and serves
   `install/install.ps1` + `install/install.sh` at `main`.** The panel's `INSTALL_BASE`

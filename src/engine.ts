@@ -82,7 +82,7 @@ export interface QaRunOptions {
   /** Trust the explicit `url` the caller named as a target worth interacting
    * with — its host (plus the www./bare-domain variant, since apex↔www
    * redirects are common) is added to the Tier-4 allowedHosts guard for this
-   * run, so `qa run "..." --url <anything>` can click/type end-to-end against
+   * run, so `spike run "..." --url <anything>` can click/type end-to-end against
    * any site/app/no-code builder without a separate --allow-host flag. Default
    * true for CLI/MCP callers, where naming the URL on the command line already
    * IS the consent. The vibe panel (an unattended browser extension driving
@@ -474,7 +474,7 @@ async function runFreshAiPass(
     await nano.warmup();
     adapters.push(new NanoAdapter(nano));
   } else {
-    progress('rung 0: Gemini Nano not available — ladder starts at rung 1 (run `qa nano --download` to enable $0 visual checks)');
+    progress('rung 0: Gemini Nano not available — ladder starts at rung 1 (run `spike nano --download` to enable $0 visual checks)');
   }
   // The rest of the ladder + the user's two pins: navigator (plan-step, cheap) and
   // brain (plan-goals, smart). Each leads its own ladder; fallback stays intact.
@@ -546,7 +546,7 @@ async function runFreshAiPass(
     if (report.verdict === 'pass' && (opts.record ?? true)) {
       const { jsonPath, specPath } = saveScript(scriptFromReport(report));
       report.recordedScript = jsonPath;
-      progress(`recorded: ${jsonPath} (+ Playwright twin ${specPath}) — replay at $0 with \`qa replay\``);
+      progress(`recorded: ${jsonPath} (+ Playwright twin ${specPath}) — replay at $0 with \`spike replay\``);
       runSpan.addEvent('script.recorded', { jsonPath });
     }
     return report;

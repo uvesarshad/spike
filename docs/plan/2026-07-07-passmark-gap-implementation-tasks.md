@@ -141,7 +141,7 @@ Canonical docs match the current planner/navigator implementation; the driver ha
 
 - [x] Improve generated Playwright specs: add new Phase 1 action generation and artifact/report comments or attachments where possible.
 - [x] Add CLI suite ergonomics.
-  - Make `qa replay --all` output machine-readable summary JSON.
+  - Make `spike replay --all` output machine-readable summary JSON.
   - Ensure exit codes distinguish fail vs uncertain if CI needs it.
 - [x] Evaluate a helper package/API.
   - Export a small Node API only if it does not compromise daemon/MCP positioning.
@@ -282,7 +282,7 @@ Goal: a constrained custom-step escape hatch for app-specific actions that are h
 Goal: promote telemetry from opt-in no-op to always-structured spans plus a local dashboard.
 
 - [x] Always-on structured spans (redacted) around adapter calls, browser actions, assertion consensus, replay failures, and cache hits/misses (`src/telemetry/*`) - no-op exporter still the default, but spans always produced.
-- [x] Local dashboard: a `qa dashboard` CLI command serving a localhost read-only view of `artifacts/<runId>` reports, `model_trace`/`assertion_trace`, token accounting by capability, and cache/replay stats. $0, no backend, reuses `report.json`.
+- [x] Local dashboard: a `spike dashboard` CLI command serving a localhost read-only view of `artifacts/<runId>` reports, `model_trace`/`assertion_trace`, token accounting by capability, and cache/replay stats. $0, no backend, reuses `report.json`.
 - [x] Documented external export: OTLP -> Grafana/Tempo and Axiom setup, opt-in, with secrets/screenshots/clips redacted from spans.
 - [x] Tests: extend `test/v29.telemetry.ts` - spans always emitted with the no-op exporter and zero behavior change; dashboard renders a sample run; exported spans carry no secrets/clips.
 - [x] Docs: `docs/api/external-services.md`, `docs/infra/environment.md`, `docs/state/server-state.md`, README; new `docs/modules/telemetry.md` if it outgrows a section.
@@ -313,8 +313,8 @@ Goal: persisted `settings.json` and code defaults must agree; no run resolves to
 Goal: before a fresh AI run, detect an existing `generated-tests/` script matching task+url and prefer the $0 replay.
 
 - [x] Matcher (`src/recorder/`): normalize task text + url/host; score against recorded scripts (task similarity + host/path match); return the best candidate over a threshold.
-- [x] Wire into `qa run` / `engine.ts` and MCP `qa_run`: a confident match replays first; on replay failure, fall back to a full AI run (optionally `--heal`). Add `--no-replay` to bypass.
-- [x] CLI UX: `qa run` prints "matched replay <name> - using $0 replay (override with --no-replay)".
+- [x] Wire into `spike run` / `engine.ts` and MCP `qa_run`: a confident match replays first; on replay failure, fall back to a full AI run (optionally `--heal`). Add `--no-replay` to bypass.
+- [x] CLI UX: `spike run` prints "matched replay <name> - using $0 replay (override with --no-replay)".
 - [x] Report: record whether the run used a matched replay vs a fresh AI run.
 - [x] Tests: extend `test/e2e.recorder.ts` - a recorded script is matched and replayed for a matching task; a near-miss falls through to AI; `--no-replay` bypasses.
 - [x] Docs: `docs/modules/recorder.md`, `docs/architecture/data-flow.md`, README, `docs/infra/environment.md` if a flag/env is added.

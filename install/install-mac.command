@@ -8,15 +8,15 @@
 # This is SELF-CONTAINED — it does not fetch anything but the npm package, so it
 # works even before the GitHub raw one-liner is live. It:
 #   1. Verifies Node.js >= 20 (the daemon is a Node process).
-#   2. Installs the `qa` CLI globally from npm (browser-qa-subagent).
-#   3. Registers `qa daemon` to auto-start on login (LaunchAgent) and starts it
+#   2. Installs the `spike` CLI globally from npm (spike-agent).
+#   3. Registers `spike daemon` to auto-start on login (LaunchAgent) and starts it
 #      now — so the browser extension's connection dot goes green, no terminal.
 #
 # Re-running is safe (idempotent). Everything is per-user; no sudo required.
 
 set -eu
 
-PKG_NAME='browser-qa-subagent'
+PKG_NAME='spike-agent'
 
 step() { printf '\033[36m==> %s\033[0m\n' "$1"; }
 ok()   { printf '\033[32m[OK] %s\033[0m\n' "$1"; }
@@ -64,14 +64,14 @@ fi
 ok 'qa CLI installed'
 
 step 'Registering the daemon to auto-start on login…'
-if ! qa daemon --install-service; then
+if ! spike daemon --install-service; then
   warn 'Could not register the auto-start service.'
-  echo '  You can still start the daemon manually any time with:  qa daemon'
+  echo '  You can still start the daemon manually any time with:  spike daemon'
   pause_and_exit 1
 fi
 
 echo ''
 ok 'Done. Spike is running and will start on every login.'
 echo '  Go back to the browser extension — the connection dot should turn green shortly.'
-echo '  To remove it later:  qa daemon --uninstall-service'
+echo '  To remove it later:  spike daemon --uninstall-service'
 pause_and_exit 0

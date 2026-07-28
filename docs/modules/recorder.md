@@ -66,13 +66,13 @@ Scoring (READ-ONLY over the recorder's JSON shape — matcher.ts never imports f
 - Within same-host candidates, score = `0.7 × taskSimilarity + 0.3 × pathSimilarity`. Task similarity is Jaccard over a stopword-filtered, `{{...}}`-placeholder-stripped bag of words (secrets/run-data never affect matching). Path similarity is 1 for an exact pathname match, 0.5 for a shared first path segment, else 0.
 - Default threshold 0.62 (`DEFAULT_THRESHOLD`); the highest-scoring script at or above it wins. No script over threshold → `null`, and `qaRun` falls through to a fresh AI pass.
 
-On a match, `qaRun` calls `qaReplay(match.name, ...)`; a non-`fail` verdict returns immediately with `replayMatch: { name, score }` attached to the result (surfaced in `qa dashboard` as a "$0 replay" pill). A `fail` verdict or a thrown error falls back to a fresh AI run. Opt out entirely with `qa run "<task>" --url <url> --no-replay`.
+On a match, `qaRun` calls `qaReplay(match.name, ...)`; a non-`fail` verdict returns immediately with `replayMatch: { name, score }` attached to the result (surfaced in `spike dashboard` as a "$0 replay" pill). A `fail` verdict or a thrown error falls back to a fresh AI run. Opt out entirely with `spike run "<task>" --url <url> --no-replay`.
 
 ## Playwright Twin
 
-buildPlaywrightSpec() emits a .spec.ts file co-located with the JSON script. Each ScriptStep becomes a Playwright call where possible: page.goto(url), page.getByRole(role, { name }).click(), .hover(), .fill(text), .selectOption(value), page.keyboard.press(key), page.reload(), page.goBack(), .setInputFiles(paths) for upload_file, .dragTo(target) for drag_and_drop (a comment when no drop target was resolved), .blur(), page.mouse.move/down/up for mouse, or expect(...).toBeVisible() for assert_dom. Extract, visual/video assertions, open_tab/switch_tab/close_tab, and script steps are emitted as comments because the QA subagent owns those semantics during `qa replay` (tab/script Playwright equivalents are noted in the comment: context.newPage(), tracked pages[], page.close()).
+buildPlaywrightSpec() emits a .spec.ts file co-located with the JSON script. Each ScriptStep becomes a Playwright call where possible: page.goto(url), page.getByRole(role, { name }).click(), .hover(), .fill(text), .selectOption(value), page.keyboard.press(key), page.reload(), page.goBack(), .setInputFiles(paths) for upload_file, .dragTo(target) for drag_and_drop (a comment when no drop target was resolved), .blur(), page.mouse.move/down/up for mouse, or expect(...).toBeVisible() for assert_dom. Extract, visual/video assertions, open_tab/switch_tab/close_tab, and script steps are emitted as comments because the QA subagent owns those semantics during `spike replay` (tab/script Playwright equivalents are noted in the comment: context.newPage(), tracked pages[], page.close()).
 
-AGENT NOTE: The .spec.ts twin is a best-effort translation. It is not kept in sync after the JSON script is modified manually. Regenerate it by running qa replay <name> --heal or by re-recording.
+AGENT NOTE: The .spec.ts twin is a best-effort translation. It is not kept in sync after the JSON script is modified manually. Regenerate it by running spike replay <name> --heal or by re-recording.
 
 ## Update Triggers
 

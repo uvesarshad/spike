@@ -3,7 +3,7 @@
  * reason — ~2K tokens). The calling agent reads report.json from
  * evidence_paths when it wants the full step-by-step evidence.
  *
- * Register in a coding agent as: command "qa", args ["mcp"]
+ * Register in a coding agent as: command "spike", args ["mcp"]
  * (or: npx tsx src/mcp-server.ts during development). */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -13,7 +13,7 @@ import { qaRun } from './engine.js';
 import { slimReport } from './report/report.js';
 
 export async function startMcpServer(): Promise<void> {
-  const server = new McpServer({ name: 'browser-qa-subagent', version: '0.1.0' });
+  const server = new McpServer({ name: 'spike-agent', version: '0.0.1' });
 
   server.tool(
     'qa_run',

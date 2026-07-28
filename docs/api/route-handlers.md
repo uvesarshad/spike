@@ -13,7 +13,7 @@ AGENT OWNER: src/cli.ts, src/mcp-server.ts
 
 ## MCP Tool: qa_run
 
-Registered by src/mcp-server.ts via @modelcontextprotocol/sdk. The MCP server is started as a stdio transport (reads from stdin, writes to stdout) and is registered in the coding agent's tool config as command 'qa', args ['mcp'].
+Registered by src/mcp-server.ts via @modelcontextprotocol/sdk. The MCP server is started as a stdio transport (reads from stdin, writes to stdout) and is registered in the coding agent's tool config as command 'spike', args ['mcp'].
 
 Tool name: qa_run
 Input schema:
@@ -21,13 +21,13 @@ Input schema:
 - url (string, required, must be a valid URL) — the starting URL for the run.
 - maxSteps (number, optional, 1-30) — step budget override; defaults to cfg.maxSteps (12).
 
-AGENT NOTE: unlike `qa run` on the CLI, the MCP tool's input schema has no `via` or `record` flag — every qa_run call goes through qaRun(task, url, { maxSteps }) with the daemon's configured transport (cfg.via) and default recording behavior. To drive transport/record/allow-host for a given call, use the CLI instead.
+AGENT NOTE: unlike `spike run` on the CLI, the MCP tool's input schema has no `via` or `record` flag — every qa_run call goes through qaRun(task, url, { maxSteps }) with the daemon's configured transport (cfg.via) and default recording behavior. To drive transport/record/allow-host for a given call, use the CLI instead.
 
 Response: the slim Report object — verdict, failing_step, console_error, evidence_paths, reason, plus an optional spendSummary (present only when a spend cap is configured). Approximately 2K tokens. Returned as `content: [{ type: 'text', text: <JSON> }]`; `isError` is left `false`/`undefined` even on a failing verdict — a failing TEST is still a successful TOOL call, only a thrown exception surfaces as an MCP error.
 
 AGENT NOTE: The MCP server suppresses all progress lines (onProgress is a no-op). The calling agent sees only the final verdict object. This is intentional — the slim contract is exactly what the calling agent needs to understand what happened.
 
-## CLI: qa run
+## CLI: spike run
 
 node dist/cli.js run "<task>" --url <url> [--max-steps <n>] [--via cdp|extension] [--allow-host <host>] [--action-cache|--no-action-cache] [--no-record] [--no-replay] [--fix] [--max-fix-attempts <n>] [--json]
 
@@ -43,35 +43,35 @@ Runs a QA session; exits 0 pass / 1 fail / 2 uncertain. Streams progress lines t
 - `--max-fix-attempts <n>` — number of test→fix→retest rounds with --fix (default 2).
 - `--json` — print the slim JSON verdict only (implies no progress lines).
 
-## CLI: qa replay
+## CLI: spike replay
 
 node dist/cli.js replay [name|path] [--all] [--heal] [--via cdp|extension] [--allow-host <host>] [--json]
 
-Replays a recorded QaScript at $0 (no planner, Nano-only visuals); exits 0 pass / 1 fail / 2 uncertain. name matches generated-tests/<name>.json. --all replays every script in generated-tests/ (the regression suite). --heal re-engages the driver on the original task if the replay fails and re-emits the script. --allow-host is repeatable and works like `qa run`'s (the recorded script's own url host is trusted automatically). With --all --json, the CLI prints one JSON array of replay results for CI consumers; otherwise each result prints individually as it completes.
+Replays a recorded QaScript at $0 (no planner, Nano-only visuals); exits 0 pass / 1 fail / 2 uncertain. name matches generated-tests/<name>.json. --all replays every script in generated-tests/ (the regression suite). --heal re-engages the driver on the original task if the replay fails and re-emits the script. --allow-host is repeatable and works like `spike run`'s (the recorded script's own url host is trusted automatically). With --all --json, the CLI prints one JSON array of replay results for CI consumers; otherwise each result prints individually as it completes.
 
-## CLI: qa daemon
+## CLI: spike daemon
 
 node dist/cli.js daemon [--bridge-port <n>]
 node dist/cli.js daemon --install-service
 node dist/cli.js daemon --uninstall-service
 
-Plain `qa daemon` starts the vibe-mode daemon: opens BridgeServer on `--bridge-port` (default cfg.bridgePort, 9410), starts VibeService, and keeps the process alive. The extension's service worker connects to this bridge. The daemon does not launch Chrome.
+Plain `spike daemon` starts the vibe-mode daemon: opens BridgeServer on `--bridge-port` (default cfg.bridgePort, 9410), starts VibeService, and keeps the process alive. The extension's service worker connects to this bridge. The daemon does not launch Chrome.
 
-`--install-service` / `--uninstall-service` are one-shot: they register (or remove) an OS-native auto-start entry for `qa daemon` and then exit immediately — they do not run the daemon inline. This is the mechanism behind the install scripts' "no terminal after setup" UX; see docs/infra/deployment.md for the per-OS detail (Windows Scheduled Task / macOS LaunchAgent / Linux systemd --user). `--install-service` also starts the daemon immediately after registering it, so the extension's connection dot doesn't wait for the next login.
+`--install-service` / `--uninstall-service` are one-shot: they register (or remove) an OS-native auto-start entry for `spike daemon` and then exit immediately — they do not run the daemon inline. This is the mechanism behind the install scripts' "no terminal after setup" UX; see docs/infra/deployment.md for the per-OS detail (Windows Scheduled Task / macOS LaunchAgent / Linux systemd --user). `--install-service` also starts the daemon immediately after registering it, so the extension's connection dot doesn't wait for the next login.
 
-## CLI: qa fix
+## CLI: spike fix
 
 node dist/cli.js fix <runIdOrPath> [--apply]
 
 Prints the paste-ready fix prompt for a past run. `<runIdOrPath>` may be a runId under artifacts/, a path to a report.json, or a path to an artifacts/<runId> directory — the command tries all three forms. The prompt is synthesized by buildFixPrompt(report); if the run passed, it prints a "no fix prompt needed" message instead. With `--apply`, the prompt is dispatched headlessly to the configured coding agent (claude/codex/gemini, auto-detected) via dispatchFix() instead of just being printed — exits 0 on success, 1 on failure.
 
-## CLI: qa mcp
+## CLI: spike mcp
 
 node dist/cli.js mcp
 
 Starts the MCP stdio server inline (same as running dist/mcp-server.js directly). Used when registering the tool in a coding agent config via a command invocation rather than the prebuilt binary.
 
-## CLI: qa nano
+## CLI: spike nano
 
 node dist/cli.js nano --check
 node dist/cli.js nano --download
@@ -80,13 +80,13 @@ node dist/cli.js nano --download
 
 --download triggers the ~2 GB on-device model download. The Chrome instance (on cfg.chromeProfile) must already be running, or is launched by the command.
 
-## CLI: qa fixture
+## CLI: spike fixture
 
 node dist/cli.js fixture --bug on|off [--port <n>]
 
 Starts the dogfood fixture app (fixture/server.ts) on `--port` (default cfg.fixturePort, 9401). --bug on enables the intentional bugs (order.total undefined, /api/order 500). --bug off (the default) runs the healthy version. Primarily used for e2e tests and manual verification.
 
-## CLI: qa secret
+## CLI: spike secret
 
 node dist/cli.js secret set <name> <value>
 node dist/cli.js secret get <name> [--reveal]
@@ -95,7 +95,7 @@ node dist/cli.js secret delete <name>
 
 `set` encrypts a secret with Windows DPAPI and stores it in the Vault. `get` confirms a secret exists without printing it, unless `--reveal` is passed. `list` prints all stored secret names. `delete` removes one. Secrets are referenced in QA tasks as {{secret:NAME}} placeholders; the driver resolves them at execute time without logging the value.
 
-## CLI: qa config
+## CLI: spike config
 
 node dist/cli.js config show
 node dist/cli.js config set [--provider <p>] [--mode <m>] [--model <m>] [--debug-mode <d>] [--debug-agent <a>]
@@ -107,21 +107,21 @@ Reads or writes SettingsStore settings — this is the **planner** ("browsing-co
 - `--debug-mode <d>` — prompt | auto.
 - `--debug-agent <a>` — auto | claude | codex | gemini.
 
-Not for API keys — those go in `qa secret`.
+Not for API keys — those go in `spike secret`.
 
-## CLI: qa dashboard
+## CLI: spike dashboard
 
 node dist/cli.js dashboard [--port <n>]
 
-Serves a local, read-only HTML dashboard over artifacts/<runId>/report.json files: an index of runs (verdict, task, url, steps, duration, replay/cache source) linking to a per-run page (model_trace, assertion_trace, action-cache stats, token accounting, step list). Hand-rolled HTML with no client-side JS, no external fonts/scripts, and zero non-Node dependencies; never mutates artifacts/. Listens on `--port` (default 9420, or QA_DASHBOARD_PORT) and stays alive like `qa daemon`. $0, no backend, no external calls.
+Serves a local, read-only HTML dashboard over artifacts/<runId>/report.json files: an index of runs (verdict, task, url, steps, duration, replay/cache source) linking to a per-run page (model_trace, assertion_trace, action-cache stats, token accounting, step list). Hand-rolled HTML with no client-side JS, no external fonts/scripts, and zero non-Node dependencies; never mutates artifacts/. Listens on `--port` (default 9420, or QA_DASHBOARD_PORT) and stays alive like `spike daemon`. $0, no backend, no external calls.
 
 ## Update Triggers
 
 - When a new CLI subcommand is added to src/cli.ts.
 - When the MCP tool's input schema or response shape changes.
-- When qa run / qa replay gain or lose flags.
-- When the qa daemon startup behavior changes, including --install-service/--uninstall-service.
-- When qa config's settings surface (planner/navigator/debug) changes shape.
+- When spike run / spike replay gain or lose flags.
+- When the spike daemon startup behavior changes, including --install-service/--uninstall-service.
+- When spike config's settings surface (planner/navigator/debug) changes shape.
 
 ## Related Docs
 

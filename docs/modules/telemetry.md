@@ -1,6 +1,6 @@
 # Module: Telemetry
 
-> Scope: Structured tracing (`src/telemetry/*`), the always-on no-op default, the optional OTLP exporter, and the `qa dashboard` CLI command.
+> Scope: Structured tracing (`src/telemetry/*`), the always-on no-op default, the optional OTLP exporter, and the `spike dashboard` CLI command.
 > Rendering context: Server-side (Node.js daemon / CLI)
 > Project tier: 3
 > Last updated: 2026-07-09
@@ -34,7 +34,7 @@ Within the files this module owns (`src/engine.ts` — the shared core both the 
 - `model.call` — one span per adapter INVOCATION (in `src/router/model-router.ts`), including every down-ladder fallback attempt. Attributes: `capability` (`visual-verdict`/`plan-step`/`plan-goals`), `adapter` name, `rung`, `step`. Accurate wall-clock duration; `error` status on a failed attempt (the router then falls to the next rung). Non-secret attributes only — never the prompt, image bytes, or resolved secrets. Complements `report.model_trace` (the in-report per-call cost record).
 - `browser.action` — one span per executed driver action (in `src/driver/loop.ts`). Attributes: `type` (click/type/navigate/upload_file/…), `step`, and `kind` for `mouse`. `error` status when the step records a failure. Non-secret attributes only (never type text, full urls, or targets).
 
-Together these give a full `qa.run → qa.run.driver_loop → browser.action` / `model.call` tree in a tracing backend. Action-cache hits/misses remain in `report.json` (and the `qa dashboard`), not spans. A test hook, `setDefaultTracerForTest()` in `telemetry/env.ts`, lets tests pin a mock-exporter tracer to observe these spans (see `test/v33.trace-spans.ts`).
+Together these give a full `qa.run → qa.run.driver_loop → browser.action` / `model.call` tree in a tracing backend. Action-cache hits/misses remain in `report.json` (and the `spike dashboard`), not spans. A test hook, `setDefaultTracerForTest()` in `telemetry/env.ts`, lets tests pin a mock-exporter tracer to observe these spans (see `test/v33.trace-spans.ts`).
 
 ## Redaction guarantees
 
@@ -80,11 +80,11 @@ QA_OTLP_ENDPOINT=https://api.axiom.co/v1/traces
 QA_OTLP_HEADERS={"Authorization":"Bearer <axiom-api-token>","X-Axiom-Dataset":"<dataset-name>"}
 ```
 
-`QA_OTLP_HEADERS` is a JSON object string merged onto every export POST — invalid JSON logs a warning and exports without extra headers rather than throwing. `QA_OTLP_SERVICE_NAME` overrides the `service.name` resource attribute (default `browser-qa-subagent`).
+`QA_OTLP_HEADERS` is a JSON object string merged onto every export POST — invalid JSON logs a warning and exports without extra headers rather than throwing. `QA_OTLP_SERVICE_NAME` overrides the `service.name` resource attribute (default `spike-agent`).
 
-## `qa dashboard`
+## `spike dashboard`
 
-`qa dashboard [--port <n>]` (`src/cli.ts`) serves a read-only, localhost-only HTML view over `artifacts/<runId>/report.json` files — no database, no build step, no external calls, nothing written to disk. Default port 9420 (or `QA_DASHBOARD_PORT`).
+`spike dashboard [--port <n>]` (`src/cli.ts`) serves a read-only, localhost-only HTML view over `artifacts/<runId>/report.json` files — no database, no build step, no external calls, nothing written to disk. Default port 9420 (or `QA_DASHBOARD_PORT`).
 
 - `/` — every run under `cfg.artifactsDir`, newest first: verdict, task, url, step count, duration, and source (fresh AI run / matched $0 replay with its score / self-heal outcome), plus action-cache hit ratio when enabled.
 - `/run/<runId>` — one run's full detail: token accounting (`report.tokens` — navigator/brain/visual call counts, cheap-model total), `model_trace`, `assertion_trace` when present, per-step outcomes, and the failure reason.
@@ -96,7 +96,7 @@ It reads `report.json` files already written by `qaRun()`/`qaReplay()` — it do
 - When a new boundary in `src/engine.ts` gets a span (update the "Boundaries wrapped" list above).
 - When telemetry env var names or defaults change.
 - When the OTLP payload shape or trace-id derivation changes.
-- When `qa dashboard`'s routes or the fields it reads from `report.json` change.
+- When `spike dashboard`'s routes or the fields it reads from `report.json` change.
 
 ## Related Docs
 

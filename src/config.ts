@@ -244,7 +244,7 @@ function deadPlannerHint(role: 'brain' | 'navigator'): string {
   return (
     `[qa] warning: ${role} is pinned to gemini:cli — the Gemini CLI free tier (Gemini Code Assist ` +
     'for individuals) ended 2026-06-18 and this client now hard-fails auth. Switch via ' +
-    '`qa config set --provider claude --mode cli` (or another BYOK key: glm/gemini/claude/openai), ' +
+    '`spike config set --provider claude --mode cli` (or another BYOK key: glm/gemini/claude/openai), ' +
     'use the `claude`/`codex` CLI, or point googleCliBin at the Antigravity CLI once installed.'
   );
 }

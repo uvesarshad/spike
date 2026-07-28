@@ -1,7 +1,7 @@
 /* M2 verification — NanoRunnerPage reproduces spike A through the port:
  * availability, warm session, verdict discrimination on the spike's
  * good/bad screenshots (spikes/cdp-logpoint/shots/, created by capture-shots.js).
- * Exits 2 (skip) when the model isn't downloaded yet — run `qa nano --download`. */
+ * Exits 2 (skip) when the model isn't downloaded yet — run `spike nano --download`. */
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -32,7 +32,7 @@ await nano.start();
 const a = await nano.availability();
 console.log('availability:', a);
 if (a !== 'available') {
-  console.error('model not available — run `qa nano --download` first');
+  console.error('model not available — run `spike nano --download` first');
   await nano.close();
   process.exit(2);
 }

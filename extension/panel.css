@@ -1,5 +1,5 @@
 /* ===========================================================================
-   QA Subagent — side panel theme
+   Spike — side panel theme
    Dark, near-black canvas · single high-energy lime accent · white floating
    panels for primary results (strong figure/ground) · generously rounded
    pill components · geometric sans with strong size/weight contrast.
@@ -946,7 +946,7 @@ body {
 }
 .settings-note-warn .ico-svg { color: var(--amber); }
 
-/* ---- "Connect the desktop app" one-liner block ----------------------------- */
+/* ---- "Connect Spike Core" one-liner block ----------------------------- */
 .connect-app {
   display: flex;
   flex-direction: column;

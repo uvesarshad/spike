@@ -1,13 +1,13 @@
 #!/bin/sh
 # Spike installer — one-line (macOS / Linux)
 #
-# Usage (from the extension's "Connect desktop app" button, or by hand):
+# Usage (from the extension's "Connect Spike Core" button, or by hand):
 #     curl -fsSL https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.sh | sh
 #
 # What it does, in order:
 #   1. Verifies Node.js >= 20 is present (the daemon is a Node process).
-#   2. Installs the `qa` CLI globally from npm (browser-qa-subagent).
-#   3. Registers `qa daemon` to auto-start on login (LaunchAgent on macOS,
+#   2. Installs the `spike` CLI globally from npm (spike-agent).
+#   3. Registers `spike daemon` to auto-start on login (LaunchAgent on macOS,
 #      systemd --user on Linux) and starts it now — so the extension's
 #      connection dot goes green with no terminal.
 #
@@ -18,14 +18,14 @@
 #   `main` branch (see INSTALL_BASE in the extension panel) — there is no
 #   pinned commit/tag and no signature/checksum check on the script content
 #   itself. A compromised push to `main` would run unverified on the next
-#   click of "Connect the desktop app." The blast radius is bounded, though:
+#   click of "Connect Spike Core." The blast radius is bounded, though:
 #   this script's only side effect beyond registering an autostart unit is
-#   `npm install -g browser-qa-subagent`, and npm registry integrity
+#   `npm install -g spike-agent`, and npm registry integrity
 #   (package signing/checksums) already covers that actual payload — this
 #   script is just a thin, auditable bootstrapper around it. There is also a
 #   non-remote-script fallback (the panel's "without a remote script (npm)"
 #   toggle) that skips fetching this file entirely.
-#   package.json currently has a version field (0.1.0) but this repo has no
+#   package.json currently has a version field (0.0.1) but this repo has no
 #   git tags / GitHub Releases yet, so there is no tagged install script to
 #   pin to instead of `main` today. If tagged releases are introduced later,
 #   prefer fetching install.sh from that tag instead of `main` — until then,
@@ -33,7 +33,7 @@
 
 set -eu
 
-PKG_NAME='browser-qa-subagent'
+PKG_NAME='spike-agent'
 
 step() { printf '\033[36m==> %s\033[0m\n' "$1"; }
 ok()   { printf '\033[32m[OK] %s\033[0m\n' "$1"; }
@@ -67,13 +67,13 @@ fi
 ok 'qa CLI installed'
 
 step 'Registering the daemon to auto-start on login…'
-if ! qa daemon --install-service; then
+if ! spike daemon --install-service; then
   warn 'Could not register the auto-start service.'
-  echo '  You can still start the daemon manually any time with:  qa daemon'
+  echo '  You can still start the daemon manually any time with:  spike daemon'
   exit 1
 fi
 
 echo ''
 ok 'Done. Spike is running and will start on every login.'
 echo '  Go back to the browser extension — the connection dot should turn green shortly.'
-echo '  To remove it later:  qa daemon --uninstall-service'
+echo '  To remove it later:  spike daemon --uninstall-service'

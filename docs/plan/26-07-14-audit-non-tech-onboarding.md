@@ -12,7 +12,7 @@ Evidence was checked against the code, not just re-read from the plan. Findings 
 
 ### A1 (P0) — The daemon one-liner's distribution preconditions are unverified and silently assumed
 The whole "Click 2" path depends on two things being live that the plan never confirms:
-- **npm package `browser-qa-subagent` is published** — `install.ps1:42` / `install.sh:43` run `npm i -g browser-qa-subagent`, and `sw.js:398` / lite copy reference it. If it isn't published (or is private), every daemon install 404s at npm.
+- **npm package `spike-agent` is published** — `install.ps1:42` / `install.sh:43` run `npm i -g spike-agent`, and `sw.js:398` / lite copy reference it. If it isn't published (or is private), every daemon install 404s at npm.
 - **`github.com/uvesarshad/spike` is public with `install/` on `main`** — the panel's `INSTALL_BASE` (`panel.js:140`) points at `raw.githubusercontent.com/uvesarshad/spike/main/install`. If that repo is private/renamed/empty, `irm … | iex` fetches a 404 and the copy-paste silently fails for the user.
 
 **Action:** Before shipping any onboarding, verify (a) the npm package is published under that exact name, and (b) the GitHub repo is public and serves `install/install.ps1` + `install.sh` at `main`. Add both as explicit preconditions in the plan's "Definition of done."
@@ -36,7 +36,7 @@ The plan repeatedly frames the zero-daemon path as "Lite mode (BYOK + Nano)." In
 ### A4 (P1) — Extension↔daemon version skew: the Store auto-updates one half, npm pins the other
 The plan sells Web Store "auto-updates" as a benefit (Gap A intro). But the daemon is a global npm install pinned to whatever version the user first ran; it does **not** auto-update. The two halves speak a WS JSON-RPC protocol (`{id}`/`{rid}`/`{event}`, per CLAUDE.md). A Store-updated panel against a months-old daemon can show a **green dot but broken runs** — the worst failure mode for a non-tech user (looks connected, silently misbehaves).
 
-**Action:** Add a bridge **protocol-version handshake** on connect; if the daemon is older than the panel needs, surface "update the desktop app: re-run the one-liner" instead of failing opaquely. Add this as a Gap-B task.
+**Action:** Add a bridge **protocol-version handshake** on connect; if the daemon is older than the panel needs, surface "update Spike Core: re-run the one-liner" instead of failing opaquely. Add this as a Gap-B task.
 
 ### A5 (P1) — No cost or safety guardrail for the least-equipped audience
 The plan targets users who vibe-code and won't grasp the Tier-4 host guard, autonomous click/type risk, or per-run token spend — yet it has **zero findings** on:
@@ -48,7 +48,7 @@ The plan targets users who vibe-code and won't grasp the Tier-4 host guard, auto
 ### A6 (P1) — "Zero terminal after setup" oversells the daemon path
 The headline "two clicks + one paste, zero terminal" is only true for the **Lite/BYOK** path. "Click 2" is literally pasting `irm … | iex` into PowerShell (`panel.js:142`) — that *is* a terminal. The plan half-acknowledges this but the top-line promise doesn't scope it.
 
-**Action:** Scope the headline: "Lite mode: zero terminal, ever. Optional desktop app: one terminal paste, once." Manage tester expectations so the terminal step isn't a surprise that reads as "I thought this was one-click."
+**Action:** Scope the headline: "Lite mode: zero terminal, ever. Optional Spike Core: one terminal paste, once." Manage tester expectations so the terminal step isn't a surprise that reads as "I thought this was one-click."
 
 ---
 
@@ -77,5 +77,5 @@ The plan notes a privacy policy URL is mandatory (Gap A2) but not what it must d
 - **In-panel spend meter + monthly cap** (also A5) — turns an invisible risk into a visible control; strong trust signal for non-tech users pasting their own key.
 - **First-run read-only/dry-run mode** (also A5) — the agent explores and reports without clicking/typing until the user explicitly enables mutation. Safe default for the audience least able to predict consequences.
 - **Daemon auto-update nudge** — panel pings npm `outdated` and offers a one-click "re-run installer" when the daemon lags the extension (pairs with A4).
-- **One-click uninstall from the panel** — surfaces `qa daemon --uninstall-service` as a button so leaving is as easy as arriving.
+- **One-click uninstall from the panel** — surfaces `spike daemon --uninstall-service` as a button so leaving is as easy as arriving.
 - **Onboarding that shows, not tells** — a 15-second inline GIF of "Add to Chrome → paste key → run → verdict," since the audience won't read a `TESTING.md`. Pairs with the infobar heads-up from A2.

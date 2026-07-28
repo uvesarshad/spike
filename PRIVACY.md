@@ -1,7 +1,7 @@
 # Privacy Policy
 
 **Effective date:** [EFFECTIVE DATE — e.g. 2026-06-20]
-**Applies to:** the Browser QA Subagent CLI/daemon and the companion Chrome extension ("the Software"), provided by [LEGAL ENTITY / PRODUCT NAME] ("we", "us").
+**Applies to:** the Spike CLI/Spike Core daemon and the Spike Chrome extension ("the Software"), provided by [LEGAL ENTITY / PRODUCT NAME] ("we", "us").
 
 > This document is the source text for the privacy policy page published on our
 > website. Replace every `[BRACKETED]` value before publishing. It describes how

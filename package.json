@@ -1,11 +1,12 @@
 {
-  "name": "browser-qa-subagent",
+  "name": "spike-agent",
   "version": "0.0.1",
-  "description": "Browser QA/debug subagent: a cheap-model ladder drives a real Chrome and returns a ~2K-token verdict to your coding agent.",
+  "description": "Spike — browser QA/debug agent: a cheap-model ladder drives a real Chrome and returns a ~2K-token verdict to your coding agent.",
   "type": "module",
   "license": "Apache-2.0",
   "private": false,
   "keywords": [
+    "spike",
     "browser",
     "qa",
     "testing",
@@ -30,7 +31,7 @@
     "node": ">=20"
   },
   "bin": {
-    "qa": "dist/cli.js"
+    "spike": "dist/cli.js"
   },
   "files": [
     "dist",

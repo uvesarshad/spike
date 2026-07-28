@@ -15,7 +15,7 @@ export interface OtlpHttpExporterOptions {
   endpoint: string;
   /** Extra headers merged onto the POST (auth bearer token, dataset header, …). */
   headers?: Record<string, string>;
-  /** OTLP resource `service.name` attribute. Default 'browser-qa-subagent'. */
+  /** OTLP resource `service.name` attribute. Default 'spike-agent'. */
   serviceName?: string;
   /** Best-effort fetch timeout in ms. export() NEVER throws — a broken/absent
    * collector must never affect a QA run. Default 5000. */
@@ -41,7 +41,7 @@ export class OtlpHttpExporter implements TelemetryExporter {
   constructor(opts: OtlpHttpExporterOptions) {
     this.endpoint = opts.endpoint;
     this.headers = { 'content-type': 'application/json', ...(opts.headers ?? {}) };
-    this.resourceAttrs = [{ key: 'service.name', value: { stringValue: opts.serviceName ?? 'browser-qa-subagent' } }];
+    this.resourceAttrs = [{ key: 'service.name', value: { stringValue: opts.serviceName ?? 'spike-agent' } }];
     this.timeoutMs = opts.timeoutMs ?? 5_000;
   }
 
@@ -108,7 +108,7 @@ function toOtlpPayload(span: TelemetrySpan, resourceAttrs: OtlpAttr[]): unknown 
         resource: { attributes: resourceAttrs },
         scopeSpans: [
           {
-            scope: { name: 'browser-qa-subagent' },
+            scope: { name: 'spike-agent' },
             spans: [
               {
                 traceId: traceIdFor(span),

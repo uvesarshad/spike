@@ -1,4 +1,4 @@
-# Browser QA Subagent
+# Spike
 
 > **Opus writes the code. A $0 model tests it. Your context stays clean.**
 
@@ -27,7 +27,7 @@ This project flips that: one tool call — `qa_run(task, url)` — delegates the
 
 The exact error with file:line, the failing step, the failed network call, and a screenshot — for ~660 bytes of the calling agent's context.
 
-📚 Full product vision, research, and competitive landscape: [`docs/browser-qa-subagent-product-doc.md`](docs/browser-qa-subagent-product-doc.md)
+📚 Full product vision, research, and competitive landscape: [`docs/spike-agent-product-doc.md`](docs/spike-agent-product-doc.md)
 🧑‍🏫 Plain-English architecture tour (no prior knowledge assumed): [`docs/architecture-explainer.md`](docs/architecture-explainer.md)
 
 ## How it works
@@ -66,7 +66,7 @@ Key design decisions:
 - **CDP logpoints** (the spike-B trick): when diagnosing, the daemon can inject `console.log`s at any file:line of a *running* page with **zero source edits** — `Debugger.setBreakpointByUrl` with a condition that logs and returns `false`. No dirty diffs, no cleanup, works on sites you don't own.
 - **CDP and extension transports**: the engine only talks to a `BrowserPort` interface. `CdpBrowser` drives a daemon-owned Chrome over `--remote-debugging-port`; `ExtensionBrowser` drives the user's existing Chrome tab through the MV3 bridge and `chrome.debugger`, so vibe mode can use real logged-in sessions without rewriting the engine.
 - **Evidence per step**: console and network buffers are drained between steps, so each step record carries exactly the fallout it caused.
-- **Durability features**: optional consensus visual assertions (`QA_ASSERTION_POLICY`), verified action reuse (`qa run --action-cache`), runtime data placeholders such as `{{run.email}}`, extraction into `{{run.*}}`, and `qa replay --all --json` for CI summaries.
+- **Durability features**: optional consensus visual assertions (`QA_ASSERTION_POLICY`), verified action reuse (`spike run --action-cache`), runtime data placeholders such as `{{run.email}}`, extraction into `{{run.*}}`, and `spike replay --all --json` for CI summaries.
 
 ## Tech stack
 
@@ -107,7 +107,7 @@ node dist/cli.js replay --all --json
 Register as an MCP tool in Claude Code:
 
 ```powershell
-claude mcp add qa -- node E:\path\to\repo\dist\mcp-server.js
+claude mcp add spike -- node E:\path\to\repo\dist\mcp-server.js
 ```
 
 …then any agent in that session can call `qa_run(task, url)`.
@@ -117,10 +117,10 @@ claude mcp add qa -- node E:\path\to\repo\dist\mcp-server.js
 **CLI / daemon (npm).** Once published you can run it without a clone:
 
 ```powershell
-npx browser-qa-subagent run "<task>" --url http://localhost:3000
-# or install the `qa` binary globally:
-npm i -g browser-qa-subagent
-qa run "<task>" --url http://localhost:3000
+npx spike-agent run "<task>" --url http://localhost:3000
+# or install the `spike` binary globally:
+npm i -g spike-agent
+spike run "<task>" --url http://localhost:3000
 ```
 
 Until then, use the local checkout (`npm install && npm run build`, then `node dist/cli.js …` as shown above).
@@ -134,7 +134,7 @@ Until then, use the local checkout (`npm install && npm run build`, then `node d
 
 The extension uses the `debugger` permission to drive the page over CDP; Chrome shows a banner while a debug session is attached.
 
-Prerequisites: Node 20+, desktop Chrome 138+ (148+ for multimodal Nano), and a planner. **Note:** the free Gemini CLI tier (Gemini Code Assist for individuals) ended 2026-06-18 — `gemini -p` now returns `IneligibleTierError`, so the default rung-1 planner no longer works for individuals. Use a BYOK key instead (`GEMINI_API_KEY`, or `qa config set --provider glm` + `qa secret set glm <key>`, or Anthropic/OpenAI), or the `claude`/`codex` CLI as the rung-1 planner. Without Nano the ladder starts at rung 1. Configuration via `qa.config.json` / env (`QA_CDP_PORT`, `QA_CHROME_PROFILE`, `QA_GOOGLE_CLI_BIN`…) — see `src/config.ts`.
+Prerequisites: Node 20+, desktop Chrome 138+ (148+ for multimodal Nano), and a planner. **Note:** the free Gemini CLI tier (Gemini Code Assist for individuals) ended 2026-06-18 — `gemini -p` now returns `IneligibleTierError`, so the default rung-1 planner no longer works for individuals. Use a BYOK key instead (`GEMINI_API_KEY`, or `spike config set --provider glm` + `spike secret set glm <key>`, or Anthropic/OpenAI), or the `claude`/`codex` CLI as the rung-1 planner. Without Nano the ladder starts at rung 1. Configuration via `qa.config.json` / env (`QA_CDP_PORT`, `QA_CHROME_PROFILE`, `QA_GOOGLE_CLI_BIN`…) — see `src/config.ts`.
 
 Using a specific BYOK provider (rung 2) — e.g. **GLM-5.2 (z.ai)**:
 
@@ -158,7 +158,7 @@ src/
 ├─ report/       report.json contract + artifacts (screenshots) on disk
 ├─ engine.ts     qaRun() — the single core
 ├─ mcp-server.ts MCP stdio transport (tool: qa_run)
-└─ cli.ts        qa run | mcp | nano | fixture | config
+└─ cli.ts        spike run | mcp | nano | fixture | config
 fixture/         dogfood shop app with a toggleable checkout bug
 test/            m1/m2/m4/m5/m6 suites + e2e.run-fixture.ts (the oracle)
 spikes/          frozen de-risking spikes (never imported by src/)
@@ -186,9 +186,9 @@ Conventions worth knowing: logpoint lines are located by content, never hardcode
 | 2026-06-06 | **Spike B**: CDP logpoints — instrumentation with zero source edits, live variable capture | ✅ PASS |
 | 2026-06-07 | **Spike A**: Gemini Nano — schema-enforced JSON verdicts on screenshots, $0, ~5.5s warm; rung-1 Gemini CLI verdicts | ✅ PASS |
 | 2026-06-07 | **MVP vertical slice**: `qa_run` over MCP + CLI, driver loop, model ladder (rungs 0–2), evidence capture, report.json, fixture app — e2e 6/6, MCP smoke 4/4 | ✅ shipped |
-| 2026-06-07 | **Recorder**: passed run → JSON trace + Playwright `.spec.ts`; `qa replay` is deterministic, ~9s, $0 AI tokens; self-heals on UI drift and re-emits — e2e 12/12 | ✅ shipped |
+| 2026-06-07 | **Recorder**: passed run → JSON trace + Playwright `.spec.ts`; `spike replay` is deterministic, ~9s, $0 AI tokens; self-heals on UI drift and re-emits — e2e 12/12 | ✅ shipped |
 | 2026-06-07 | **Extension transport**: MV3 extension drives Chrome via `chrome.debugger` over a WS bridge; same 7/7 port contract as plain CDP; Nano through the extension's Prompt API; `--via extension` | ✅ shipped |
-| 2026-06-07 | **Vibe mode (core)**: side-panel chat (`qa daemon`), ghost-cursor overlay (glide/ripples/captions), plain-English reports + paste-ready fix prompts (`qa fix`) — headless e2e green | ✅ shipped |
+| 2026-06-07 | **Vibe mode (core)**: side-panel chat (`spike daemon`), ghost-cursor overlay (glide/ripples/captions), plain-English reports + paste-ready fix prompts (`spike fix`) — headless e2e green | ✅ shipped |
 | next | Dogfood against a real app (MontrAI social module) | 🔜 |
 | then | **Vibe mode (polish)**: shareable replay clips (MP4/GIF), guided Nano onboarding from the panel, run history | planned |
 | then | **Tier 4 guardrails**: local credential vault (model never sees secrets), read-only-by-default on third-party sites, audit log | planned |

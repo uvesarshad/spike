@@ -1,4 +1,4 @@
-/* `qa` CLI — thin wrapper over the engine; the MCP server shares the same core.
+/* `spike` CLI — thin wrapper over the engine; the MCP server shares the same core.
  * Subcommands grow with the milestones: run, mcp, nano, fixture. */
 
 import fs from 'node:fs';
@@ -56,7 +56,7 @@ function printSettings(s: QaSettings): void {
 }
 
 const program = new Command();
-program.name('qa').description('Browser QA subagent — a cheap-model ladder tests your app in a real Chrome');
+program.name('spike').description('Spike — a cheap-model ladder tests your app in a real Chrome and reports a verdict');
 
 /** Commander collector for the repeatable --allow-host flag. */
 function collectHost(value: string, previous: string[]): string[] {
@@ -148,7 +148,7 @@ program
       return;
     }
     if (action !== 'set') {
-      console.error('usage: qa config <show|set>');
+      console.error('usage: spike config <show|set>');
       process.exit(2);
     }
     // action === 'set'
@@ -306,14 +306,14 @@ program
     switch (action) {
       case 'set':
         if (!name || value === undefined) {
-          console.error('usage: qa secret set <name> <value>');
+          console.error('usage: spike secret set <name> <value>');
           process.exit(2);
         }
         vault.set(name, value);
         console.log(`set "${name}" — use it in tasks as {{secret:${name}}}`);
         break;
       case 'get': {
-        if (!name) { console.error('usage: qa secret get <name> [--reveal]'); process.exit(2); }
+        if (!name) { console.error('usage: spike secret get <name> [--reveal]'); process.exit(2); }
         const v = vault.get(name);
         if (v === undefined) { console.error(`no secret "${name}"`); process.exit(1); }
         console.log(opts?.reveal ? v : `"${name}" exists (use --reveal to print)`);
@@ -323,18 +323,18 @@ program
         console.log(vault.list().join('\n') || '(no secrets)');
         break;
       case 'delete':
-        if (!name) { console.error('usage: qa secret delete <name>'); process.exit(2); }
+        if (!name) { console.error('usage: spike secret delete <name>'); process.exit(2); }
         console.log(vault.delete(name) ? `deleted "${name}"` : `no secret "${name}"`);
         break;
       default:
-        console.error('usage: qa secret <set|get|list|delete>');
+        console.error('usage: spike secret <set|get|list|delete>');
         process.exit(2);
     }
   });
 
 program
   .command('mcp')
-  .description('start the MCP stdio server (register in a coding agent as: command "qa", args ["mcp"])')
+  .description('start the MCP stdio server (register in a coding agent as: command "spike", args ["mcp"])')
   .action(async () => {
     const { startMcpServer } = await import('./mcp-server.js');
     await startMcpServer();
@@ -381,7 +381,7 @@ program
   });
 
 /* ---------------------------------------------------------------------------
- * `qa dashboard` — a read-only, $0, no-backend localhost view over
+ * `spike dashboard` — a read-only, $0, no-backend localhost view over
  * artifacts/<runId>/report.json files. Hand-rolled HTML (no template engine,
  * no client-side JS, no external fonts/scripts — the CLI has zero non-Node
  * dependencies for this and it stays that way). Never mutates artifacts/. */
@@ -490,12 +490,12 @@ function renderDashboardIndex(runs: DashboardRunSummary[], artifactsDir: string)
       </tr>`;
     })
     .join('\n');
-  return `<!doctype html><html><head><meta charset="utf-8"><title>qa dashboard</title><style>${DASHBOARD_STYLE}</style></head><body>
-    <h1>browser-qa-subagent — run dashboard</h1>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>spike dashboard</title><style>${DASHBOARD_STYLE}</style></head><body>
+    <h1>Spike — run dashboard</h1>
     <div class="sub">${runs.length} run(s) in ${escapeHtml(artifactsDir)} — read-only, local only, no external calls</div>
     <table>
       <tr><th>run</th><th>verdict</th><th>task</th><th>url</th><th>steps</th><th>duration</th><th>source</th></tr>
-      ${rows || '<tr><td colspan="7">no runs yet — \`qa run\` writes one here on completion</td></tr>'}
+      ${rows || '<tr><td colspan="7">no runs yet — \`spike run\` writes one here on completion</td></tr>'}
     </table>
   </body></html>`;
 }
@@ -536,7 +536,7 @@ function renderDashboardRun(report: Report & { replayMatch?: { name: string; sco
     .map((s) => `<tr><td>${s.index}</td><td>${s.ok ? 'ok' : 'FAIL'}</td><td>${escapeHtml(s.description)}</td><td>${escapeHtml(s.error ?? '')}</td></tr>`)
     .join('\n');
 
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(report.runId)} — qa dashboard</title><style>${DASHBOARD_STYLE}</style></head><body>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(report.runId)} — spike dashboard</title><style>${DASHBOARD_STYLE}</style></head><body>
     <a class="back" href="/">&larr; all runs</a>
     <h1 class="${verdictClass(report.verdict)}">${escapeHtml(report.runId)} — ${escapeHtml(report.verdict)}</h1>
     <div class="sub">${escapeHtml(report.task)}<br>${escapeHtml(report.url)}<br>${source}</div>

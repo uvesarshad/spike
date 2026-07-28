@@ -5010,7 +5010,7 @@ var OtlpHttpExporter = class {
   constructor(opts) {
     this.endpoint = opts.endpoint;
     this.headers = { "content-type": "application/json", ...opts.headers ?? {} };
-    this.resourceAttrs = [{ key: "service.name", value: { stringValue: opts.serviceName ?? "browser-qa-subagent" } }];
+    this.resourceAttrs = [{ key: "service.name", value: { stringValue: opts.serviceName ?? "spike-agent" } }];
     this.timeoutMs = opts.timeoutMs ?? 5e3;
   }
   async export(span) {
@@ -5065,7 +5065,7 @@ function toOtlpPayload(span, resourceAttrs) {
         resource: { attributes: resourceAttrs },
         scopeSpans: [
           {
-            scope: { name: "browser-qa-subagent" },
+            scope: { name: "spike-agent" },
             spans: [
               {
                 traceId: traceIdFor(span),
@@ -5118,7 +5118,7 @@ function buildTracerFromEnv() {
   const exporter = new OtlpHttpExporter({
     endpoint,
     headers,
-    serviceName: process.env.QA_OTLP_SERVICE_NAME || "browser-qa-subagent"
+    serviceName: process.env.QA_OTLP_SERVICE_NAME || "spike-agent"
   });
   const secretValues = [
     process.env.GEMINI_API_KEY,
@@ -10291,7 +10291,7 @@ function resolveSecrets(text, vault) {
   return text.replace(SECRET_RE, (_m, name) => {
     const value = vault?.get(name);
     if (value === void 0) {
-      throw new Error(`secret "${name}" not found \u2014 add it with: qa secret set ${name}`);
+      throw new Error(`secret "${name}" not found \u2014 add it with: spike secret set ${name}`);
     }
     return value;
   });
@@ -10885,7 +10885,7 @@ function resolveSecrets2(text, vault) {
     const value = vault?.get(name);
     if (value === void 0) {
       throw new SecretNotFoundError(
-        `secret "${name}" not found \u2014 add it with: qa secret set ${name}`
+        `secret "${name}" not found \u2014 add it with: spike secret set ${name}`
       );
     }
     return value;

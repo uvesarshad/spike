@@ -1,6 +1,6 @@
 /* SettingsStore — the user's non-secret picks (which "browsing control AI" drives
  * the planner, and how debugging is handled). Persisted as plain JSON at a stable
- * per-machine path so the side panel (via the daemon) and the `qa config` CLI
+ * per-machine path so the side panel (via the daemon) and the `spike config` CLI
  * share ONE source of truth. API KEYS NEVER LAND HERE — those go in the encrypted
  * Vault (src/vault/vault.ts). loadConfig() folds these settings in below env, so
  * QA_* env vars still win for power users / tests.
@@ -62,7 +62,7 @@ export class SettingsStore {
    * to the dead Gemini CLI free tier, or a persisted config with no `navigator`
    * key at all (pre-split), is rewritten to the current daemon defaults
    * (brain → claude:cli, navigator → nano) right here, once, so every other
-   * reader (this file, `qa config` CLI, the panel) sees the fixed values
+   * reader (this file, `spike config` CLI, the panel) sees the fixed values
    * without re-deriving the migration themselves. */
   readRaw(): Partial<QaSettings> {
     let stat: fs.Stats | undefined;

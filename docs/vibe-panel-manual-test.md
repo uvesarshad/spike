@@ -67,7 +67,7 @@ to the daemon directly: it speaks to the extension service worker over a
 ## Error cases to sanity-check
 
 - **Daemon not running**: with the daemon stopped, clicking Run shows the error
-  banner **"daemon not running — start it with: qa daemon"** (the SW rejects
+  banner **"daemon not running — start it with: spike daemon"** (the SW rejects
   `vibe.run` because its WebSocket is closed).
 - **Run already in progress**: a second Run while one is active surfaces the
   daemon's "a run is already in progress" error in the banner.

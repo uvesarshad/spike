@@ -42,7 +42,7 @@ export class ExtensionNano implements NanoPort {
     if (a === 'available') return a;
     throw new Error(
       `Gemini Nano not available in extension mode (availability: ${a}) — ` +
-        'not implemented for extension mode yet — download via qa nano',
+        'not implemented for extension mode yet — download via spike nano',
     );
   }
 

@@ -83,7 +83,7 @@ cd spikes/cdp-logpoint && npm install && npm run spike
 
 AGENT NOTE: m2 (NanoPort) and v3 (ExtensionBrowser) require specific hardware and setup: Nano needs 22 GB free and the model downloaded; v3 needs the extension bridge running (chrome.debugger + BridgeServer). These are not suitable as automated CI gates on generic runners.
 
-AGENT NOTE: e2e.run-fixture.ts starts the fixture app internally. Do not start `qa fixture` manually before running it, or the port will conflict.
+AGENT NOTE: e2e.run-fixture.ts starts the fixture app internally. Do not start `spike fixture` manually before running it, or the port will conflict.
 
 ## Fixture App as Test Oracle
 
@@ -93,7 +93,7 @@ The fixture app (fixture/server.ts) is intentionally deterministic:
 
 This determinism makes the e2e.run-fixture.ts assertion exact: the report must contain the specific TypeError message in console_error.
 
-AGENT AVOID: Do not randomize the fixture app's behavior. The e2e tests assert specific error messages, and the QA spike results documented in docs/browser-qa-subagent-product-doc.md Section 6.5 depend on this exact behavior.
+AGENT AVOID: Do not randomize the fixture app's behavior. The e2e tests assert specific error messages, and the QA spike results documented in docs/spike-agent-product-doc.md Section 6.5 depend on this exact behavior.
 
 ## What is NOT Tested
 

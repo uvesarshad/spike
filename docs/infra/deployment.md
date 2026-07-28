@@ -7,7 +7,7 @@
 
 ## Overview
 
-The project builds to a Node.js CLI binary and an MCP stdio server (both in dist/), plus a second bundle (extension/lite-engine.js) that gives the Chrome extension a daemon-free "Lite mode" execution path. The rest of the Chrome extension is plain MV3 JavaScript (no compile step) under extension/, packaged to dist/extension.zip for Chrome Web Store distribution via `npm run pack:extension`. The fixture app runs via tsx (no compile) from fixture/server.ts. Deployment also covers registering `qa daemon` as a per-user OS auto-start service (Windows Scheduled Task / macOS LaunchAgent / Linux systemd --user) and the two one-line install scripts (install/install.ps1, install/install.sh) that a non-technical user runs to get both the CLI and that auto-start registration in one shot.
+The project builds to a Node.js CLI binary and an MCP stdio server (both in dist/), plus a second bundle (extension/lite-engine.js) that gives the Chrome extension a daemon-free "Lite mode" execution path. The rest of the Chrome extension is plain MV3 JavaScript (no compile step) under extension/, packaged to dist/extension.zip for Chrome Web Store distribution via `npm run pack:extension`. The fixture app runs via tsx (no compile) from fixture/server.ts. Deployment also covers registering `spike daemon` as a per-user OS auto-start service (Windows Scheduled Task / macOS LaunchAgent / Linux systemd --user) and the two one-line install scripts (install/install.ps1, install/install.sh) that a non-technical user runs to get both the CLI and that auto-start registration in one shot.
 
 AGENT OWNER: tsup.config.ts, tsup.lite.config.ts, scripts/pack-extension.ts, package.json, src/service/install-service.ts, install/install.ps1, install/install.sh
 
@@ -27,7 +27,7 @@ AGENT OWNER: tsup.config.ts, tsup.lite.config.ts, scripts/pack-extension.ts, pac
 
 `npm run typecheck` — runs `tsc --noEmit` over src/, fixture/, and test/. Does not emit; type errors must be clean before publishing. This is the CI gate.
 
-`npm run pack:extension` — runs scripts/pack-extension.ts, which zips extension/* (contents, not the parent folder — manifest.json ends up at the zip root, as the Chrome Web Store expects) into dist/extension.zip, then prints a submission-readiness checklist (128px icon present + wired into manifest, description ≤132 chars, permission justifications reminder, screenshot/promo-tile reminders). Shells out to PowerShell's `Compress-Archive`/`System.IO.Compression.ZipFile` — **Windows-only today**; the script's own header flags this as a cross-platform TODO (a `zip` dep or a platform-detected `zip -r` fallback would be needed for macOS/Linux CI).
+`npm run pack:extension` — runs scripts/pack-extension.ts, which zips extension/* (contents, not the parent folder — manifest.json ends up at the zip root, as the Chrome Web Store expects) into dist/extension.zip, then prints a submission-readiness checklist (128px icon present + wired into manifest, description ≤132 chars, permission justifications reminder, screenshot/promo-tile reminders). Cross-platform: on Windows it shells out to PowerShell's `Compress-Archive`/`System.IO.Compression.ZipFile`; on macOS/Linux it uses the stock `zip -r -X -q` (and `unzip -Z1` to verify entries). No zip dependency in package.json.
 
 `npm run share` — `npm run build && npm run pack:extension`; the one-shot "produce everything distributable" command.
 
@@ -39,7 +39,7 @@ AGENT OWNER: tsup.config.ts, tsup.lite.config.ts, scripts/pack-extension.ts, pac
 
 ## Binary Distribution
 
-The package.json `"bin"` field maps `qa` → `dist/cli.js`. After `npm install -g browser-qa-subagent`, the `qa` command is available on PATH. When used as an MCP tool, the coding agent config registers command `qa` with args `["mcp"]` to start the stdio server. Package name on npm: `browser-qa-subagent`; current version 0.1.0. No git tags / GitHub Releases exist yet (relevant to the install-script trust model below — there is no tagged script to pin to instead of `main`).
+The package.json `"bin"` field maps `spike` → `dist/cli.js`. After `npm install -g spike-agent`, the `spike` command is available on PATH. When used as an MCP tool, the coding agent config registers command `spike` with args `["mcp"]` to start the stdio server. Package name on npm: `spike-agent`; current version 0.0.1. No git tags / GitHub Releases exist yet (relevant to the install-script trust model below — there is no tagged script to pin to instead of `main`).
 
 ## Port Allocation
 
@@ -50,13 +50,13 @@ All daemon ports are fixed and distinct from the spike ports so a still-running 
 | Daemon CDP | 9322 | QA_CDP_PORT |
 | Nano runner HTTP | 9400 | QA_RUNNER_PORT |
 | Fixture HTTP | 9401 | QA_FIXTURE_PORT |
-| Extension bridge WS | 9410 | QA_BRIDGE_PORT (or `qa daemon --bridge-port <n>`) |
-| Local dashboard HTTP | 9420 | QA_DASHBOARD_PORT (or `qa dashboard --port <n>`) |
+| Extension bridge WS | 9410 | QA_BRIDGE_PORT (or `spike daemon --bridge-port <n>`) |
+| Local dashboard HTTP | 9420 | QA_DASHBOARD_PORT (or `spike dashboard --port <n>`) |
 | Spike B CDP | 9223 | (spike-only, never override) |
 | Spike A CDP | 9224 | (spike-only, never override) |
 | Spike HTTP | 9333/9334 | (spike-only, never override) |
 
-The dashboard port (`qa dashboard`, src/cli.ts) is a newer addition — it is read directly from `QA_DASHBOARD_PORT` in the CLI rather than being part of `QaConfig`'s env-parsing table in src/config.ts, but the effective default (9420) and override behavior are the same shape as the other ports.
+The dashboard port (`spike dashboard`, src/cli.ts) is a newer addition — it is read directly from `QA_DASHBOARD_PORT` in the CLI rather than being part of `QaConfig`'s env-parsing table in src/config.ts, but the effective default (9420) and override behavior are the same shape as the other ports.
 
 AGENT NOTE: If any daemon port is already in use (another process, a stale Chrome), Chrome/the bridge/the dashboard will fail to bind. Check with `netstat -ano | findstr :<port>` (Windows) or `lsof -i :<port>` (macOS/Linux) and kill the occupying process, or override with the QA_* env vars / CLI flags above.
 
@@ -70,9 +70,9 @@ Extension-driver spike profile: `spikes/.chrome-profile/` — inside the repo, g
 
 AGENT AVOID: Never point two Chrome instances at the same profile directory simultaneously — Chrome locks its profile and the second instance will crash or refuse to start.
 
-## Auto-Start Service Registration (`qa daemon --install-service`)
+## Auto-Start Service Registration (`spike daemon --install-service`)
 
-`src/service/install-service.ts` registers `qa daemon` to auto-start on login for the current user, so the daemon comes up with no terminal and the extension side panel's connection dot goes green on its own. `qa daemon --install-service` registers and starts it immediately (idempotent — safe to re-run, e.g. on upgrade); `qa daemon --uninstall-service` removes it. Both are one-shot: they print a result message and exit rather than running the daemon inline (see docs/api/route-handlers.md for the CLI contract). Everything is **per-user — no admin/root elevation required** on any platform.
+`src/service/install-service.ts` registers `spike daemon` to auto-start on login for the current user, so the daemon comes up with no terminal and the extension side panel's connection dot goes green on its own. `spike daemon --install-service` registers and starts it immediately (idempotent — safe to re-run, e.g. on upgrade); `spike daemon --uninstall-service` removes it. Both are one-shot: they print a result message and exit rather than running the daemon inline (see docs/api/route-handlers.md for the CLI contract). Everything is **per-user — no admin/root elevation required** on any platform.
 
 Every platform re-invokes the exact same `node` executable and `cli.js` path that ran the install command (`resolveSelf()`, via `process.execPath` / `process.argv[1]`, realpath-resolved) — so a global npm install, an nvm-managed node, or a packaged binary all resolve correctly, and the AVG-TLS workaround `NODE_OPTIONS=--use-system-ca` is baked into the registered service's environment (`serviceEnv()`) so the daemon's own CLI-planner child processes don't hit OAuth/TLS exit 41.
 
@@ -80,36 +80,36 @@ Per-platform mechanism:
 
 | Platform | Mechanism | Identifier / path | Notes |
 |---|---|---|---|
-| Windows | Scheduled Task via `schtasks` | Task name `"QA Subagent Daemon"` | `ONLOGON` trigger, **`/RU <username>`** (required — a bare `ONLOGON` trigger needs a machine-level logon-trigger right a non-elevated shell lacks, otherwise "Access is denied"), `/F` to overwrite on re-install. Env vars are injected via a `cmd /c set "K=V"&& ...` prefix chained ahead of the real `node "<cli>" daemon --bridge-port <n>` command (schtasks has no native env-var flag); keys/values containing `"` or a newline are rejected outright rather than mis-escaped. After registering, the task is started immediately via `schtasks /Run` (non-fatal if that fails). Uninstall: `schtasks /End` then `/Delete /F`. |
+| Windows | Scheduled Task via `schtasks` | Task name `"Spike Core"` | `ONLOGON` trigger, **`/RU <username>`** (required — a bare `ONLOGON` trigger needs a machine-level logon-trigger right a non-elevated shell lacks, otherwise "Access is denied"), `/F` to overwrite on re-install. Env vars are injected via a `cmd /c set "K=V"&& ...` prefix chained ahead of the real `node "<cli>" daemon --bridge-port <n>` command (schtasks has no native env-var flag); keys/values containing `"` or a newline are rejected outright rather than mis-escaped. After registering, the task is started immediately via `schtasks /Run` (non-fatal if that fails). Uninstall: `schtasks /End` then `/Delete /F`. |
 | macOS | LaunchAgent plist | `~/Library/LaunchAgents/com.qa-subagent.daemon.plist` | `RunAtLoad` + `KeepAlive` both true. Installed via `launchctl bootstrap gui/<uid> <plist>` (preceded by a best-effort `bootout` so re-install is idempotent) and enabled via `launchctl enable`. Uninstall: `launchctl bootout` then delete the plist file. |
 | Linux | systemd --user unit | `$XDG_CONFIG_HOME/systemd/user/qa-subagent-daemon.service` (falls back to `~/.config/...`) | `ExecStart=<node> <cli> daemon --bridge-port <n>`, `Restart=on-failure` (3s backoff). Installed via `systemctl --user daemon-reload` then `enable --now`; needs a user systemd instance (most desktop Linux) — fails with a clear message in containers/minimal hosts (`loginctl enable-linger $USER` may be needed for the unit to survive logout). Uninstall: `systemctl --user disable --now` then delete the unit file. Env values containing a newline are rejected (would inject a second unit-file directive, e.g. a spoofed `ExecStart=`). |
-| other | unsupported | — | `installService()`/`uninstallService()` return `ok: false` with a message to run `qa daemon` manually. |
+| other | unsupported | — | `installService()`/`uninstallService()` return `ok: false` with a message to run `spike daemon` manually. |
 
 All external command spawns (`schtasks`, `launchctl`, `systemctl`) route through a single `run()` indirection that tests stub via `__setRunner` to assert exact args with zero OS persistence — per CLAUDE.md, never smoke-test `--install-service` by actually registering a real task/agent/unit, since that persists beyond the session.
 
 ## One-Line Install Scripts (install/install.ps1, install/install.sh)
 
-Two scripts give a non-technical user a single copy-pasted command that ends with the daemon auto-starting — surfaced in the extension side panel's "Connect the desktop app" card (shown while the daemon dot is red), per-OS, from `extension/panel.js`'s `INSTALL_CMDS`:
+Two scripts give a non-technical user a single copy-pasted command that ends with the daemon auto-starting — surfaced in the extension side panel's "Connect Spike Core" card (shown while the daemon dot is red), per-OS, from `extension/panel.js`'s `INSTALL_CMDS`:
 
 - Windows: `irm https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.ps1 | iex`
 - macOS / Linux: `curl -fsSL https://raw.githubusercontent.com/uvesarshad/spike/main/install/install.sh | sh`
 
-`INSTALL_BASE` (`extension/panel.js`) is `https://raw.githubusercontent.com/uvesarshad/spike/main/install` — **nothing is hosted server-side**: GitHub Raw serves the two static install scripts off the `main` branch ($0, no backend), npm hosts the `browser-qa-subagent` package itself, and the daemon that ends up running is on the user's own machine (`localhost:9410`). The panel also offers a "without a remote script (npm)" toggle (`INSTALL_CMDS_NPM`) that skips fetching install.ps1/install.sh entirely and runs the equivalent two commands directly: `npm i -g browser-qa-subagent` then `qa daemon --install-service`.
+`INSTALL_BASE` (`extension/panel.js`) is `https://raw.githubusercontent.com/uvesarshad/spike/main/install` — **nothing is hosted server-side**: GitHub Raw serves the two static install scripts off the `main` branch ($0, no backend), npm hosts the `spike-agent` package itself, and the daemon that ends up running is on the user's own machine (`localhost:9410`). The panel also offers a "without a remote script (npm)" toggle (`INSTALL_CMDS_NPM`) that skips fetching install.ps1/install.sh entirely and runs the equivalent two commands directly: `npm i -g spike-agent` then `spike daemon --install-service`.
 
 Both scripts do the same three things, in order, and are safe to re-run (idempotent — upgrades the package, re-registers the service):
 
 1. Verify Node.js >=20 is on PATH (exit 1 with an install-Node hint if missing or too old).
-2. `npm install -g browser-qa-subagent`, with `NODE_OPTIONS=--use-system-ca` exported first (the same AVG-TLS workaround baked into the registered service's env, needed here so the `npm install` itself doesn't hit TLS interception).
-3. Run `qa daemon --install-service` (Scheduled Task on Windows / LaunchAgent on macOS / systemd --user on Linux, per the table above) and report success/failure.
+2. `npm install -g spike-agent`, with `NODE_OPTIONS=--use-system-ca` exported first (the same AVG-TLS workaround baked into the registered service's env, needed here so the `npm install` itself doesn't hit TLS interception).
+3. Run `spike daemon --install-service` (Scheduled Task on Windows / LaunchAgent on macOS / systemd --user on Linux, per the table above) and report success/failure.
 
-Trust model (documented in both scripts' headers and in docs/plan/26-07-14-audit-perf-security.md A18): fetching over `irm | iex` / `curl | sh` from GitHub Raw's `main` branch has no pinned commit/tag and no signature/checksum on the script content — a compromised push to `main` would run unverified on the next click of "Connect the desktop app." The blast radius is bounded: the script's only side effects are `npm install -g browser-qa-subagent` (covered by npm registry package integrity) and registering a per-user autostart entry — no other privilege escalation. There are no git tags/GitHub Releases yet to pin to instead of `main`; if tagged releases are introduced later, prefer fetching the install script from that tag. The npm-only fallback in the panel sidesteps this class of risk entirely by never fetching the remote script.
+Trust model (documented in both scripts' headers and in docs/plan/26-07-14-audit-perf-security.md A18): fetching over `irm | iex` / `curl | sh` from GitHub Raw's `main` branch has no pinned commit/tag and no signature/checksum on the script content — a compromised push to `main` would run unverified on the next click of "Connect Spike Core." The blast radius is bounded: the script's only side effects are `npm install -g spike-agent` (covered by npm registry package integrity) and registering a per-user autostart entry — no other privilege escalation. There are no git tags/GitHub Releases yet to pin to instead of `main`; if tagged releases are introduced later, prefer fetching the install script from that tag. The npm-only fallback in the panel sidesteps this class of risk entirely by never fetching the remote script.
 
 ## MCP Tool Registration
 
 Add to the coding agent's MCP config (e.g., Claude Code's .claude/settings.json or MCP config file):
 
-name: "qa"
-command: "qa" (or full path to dist/cli.js if not globally installed)
+name: "spike"
+command: "spike" (or full path to dist/cli.js if not globally installed)
 args: ["mcp"]
 transport: "stdio"
 
@@ -142,5 +142,5 @@ AGENT NOTE: QA_RECORD_CLIP must be false (or unset) in headless CI. CDP Page.sta
 - docs/infra/environment.md — all env vars and their defaults
 - docs/infra/testing.md — how to run tests (uses the build output)
 - docs/modules/engine.md — Chrome launch and profile management
-- docs/api/route-handlers.md — the `qa daemon --install-service`/`--uninstall-service` and `qa dashboard` CLI contract
+- docs/api/route-handlers.md — the `spike daemon --install-service`/`--uninstall-service` and `spike dashboard` CLI contract
 - docs/modules/vibe-mode.md — the daemon, bridge, and extension panel that surfaces the install one-liners

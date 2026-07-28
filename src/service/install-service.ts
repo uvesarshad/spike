@@ -1,9 +1,9 @@
-/* Cross-platform "run `qa daemon` on login as a background service" installer.
+/* Cross-platform "run `spike daemon` on login as a background service" installer.
  *
  * This is the desktop half of the one-line-installer UX: the install script (or a
- * power user) runs `qa daemon --install-service`, and from then on the daemon
+ * power user) runs `spike daemon --install-service`, and from then on the daemon
  * auto-starts on login and the extension's connection dot goes green with no
- * terminal. Uninstall with `qa daemon --uninstall-service`.
+ * terminal. Uninstall with `spike daemon --uninstall-service`.
  *
  * Per platform we register the OS-native "run this on login" mechanism, pointing
  * at the SAME node + cli.js that invoked us (so a global npm install, an nvm
@@ -41,8 +41,8 @@ function run(file: string, args: string[]): void {
 }
 
 /** Stable identifiers for the registered service across platforms. */
-const SERVICE_ID = 'com.qa-subagent.daemon';
-const TASK_NAME = 'QA Subagent Daemon'; // Windows Scheduled Task display name
+const SERVICE_ID = 'com.spike-agent.daemon';
+const TASK_NAME = 'Spike Core'; // Windows Scheduled Task display name
 
 export interface InstallServiceOptions {
   /** Bridge port the daemon listens on; embedded into the service command. */
@@ -124,14 +124,14 @@ function installWindows(opts: InstallServiceOptions): ServiceResult {
       platform: 'win32',
       message:
         `Registered Scheduled Task "${TASK_NAME}" (runs on logon) and started it now.\n` +
-        `The daemon will auto-start every login. Uninstall: qa daemon --uninstall-service`,
+        `The daemon will auto-start every login. Uninstall: spike daemon --uninstall-service`,
     };
   } catch (e) {
     return {
       ok: false,
       platform: 'win32',
       message: `Could not register the Scheduled Task: ${errMsg(e)}\n` +
-        `You can still run the daemon manually: qa daemon`,
+        `You can still run the daemon manually: spike daemon`,
     };
   }
 }
@@ -203,7 +203,7 @@ ${envXml}
       path: dest,
       message:
         `Installed LaunchAgent → ${dest}\n` +
-        `The daemon will auto-start on login (and is running now). Uninstall: qa daemon --uninstall-service`,
+        `The daemon will auto-start on login (and is running now). Uninstall: spike daemon --uninstall-service`,
     };
   } catch (e) {
     return {
@@ -211,7 +211,7 @@ ${envXml}
       platform: 'darwin',
       path: dest,
       message: `Could not install the LaunchAgent: ${errMsg(e)}\n` +
-        `You can still run the daemon manually: qa daemon`,
+        `You can still run the daemon manually: spike daemon`,
     };
   }
 }
@@ -234,7 +234,7 @@ function uninstallMac(): ServiceResult {
 
 function systemdUnitPath(): string {
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-  return path.join(base, 'systemd', 'user', 'qa-subagent-daemon.service');
+  return path.join(base, 'systemd', 'user', 'spike-core.service');
 }
 
 function installLinux(opts: InstallServiceOptions): ServiceResult {
@@ -244,7 +244,7 @@ function installLinux(opts: InstallServiceOptions): ServiceResult {
     .map(([k, v]) => `Environment=${systemdEscape(k)}=${systemdEscape(v)}`)
     .join('\n');
   const unit = `[Unit]
-Description=QA Subagent daemon (extension bridge)
+Description=Spike Core (Spike extension bridge daemon)
 After=network.target
 
 [Service]
@@ -264,7 +264,7 @@ WantedBy=default.target
     // Requires a user systemd instance (most desktop Linux). Fails clearly in
     // containers/minimal hosts — we surface that rather than pretending success.
     run('systemctl', ['--user', 'daemon-reload']);
-    run('systemctl', ['--user', 'enable', '--now', 'qa-subagent-daemon.service']);
+    run('systemctl', ['--user', 'enable', '--now', 'spike-core.service']);
     return {
       ok: true,
       platform: 'linux',
@@ -272,7 +272,7 @@ WantedBy=default.target
       message:
         `Installed systemd --user unit → ${dest}\n` +
         `Enabled + started. It auto-starts on login (you may need: loginctl enable-linger $USER).\n` +
-        `Uninstall: qa daemon --uninstall-service`,
+        `Uninstall: spike daemon --uninstall-service`,
     };
   } catch (e) {
     return {
@@ -281,14 +281,14 @@ WantedBy=default.target
       path: dest,
       message:
         `Wrote ${dest} but could not enable it via systemctl --user: ${errMsg(e)}\n` +
-        `If this host has no user systemd, just run the daemon manually: qa daemon`,
+        `If this host has no user systemd, just run the daemon manually: spike daemon`,
     };
   }
 }
 
 function uninstallLinux(): ServiceResult {
   const dest = systemdUnitPath();
-  try { run('systemctl', ['--user', 'disable', '--now', 'qa-subagent-daemon.service']); } catch { /* not enabled */ }
+  try { run('systemctl', ['--user', 'disable', '--now', 'spike-core.service']); } catch { /* not enabled */ }
   try {
     if (fs.existsSync(dest)) fs.unlinkSync(dest);
     try { run('systemctl', ['--user', 'daemon-reload']); } catch { /* best-effort */ }
@@ -302,7 +302,7 @@ function uninstallLinux(): ServiceResult {
 // public entry points
 // ---------------------------------------------------------------------------
 
-/** Register `qa daemon` to auto-start on login for the current user. */
+/** Register `spike daemon` to auto-start on login for the current user. */
 export function installService(opts: InstallServiceOptions): ServiceResult {
   switch (process.platform) {
     case 'win32':  return installWindows(opts);
@@ -312,7 +312,7 @@ export function installService(opts: InstallServiceOptions): ServiceResult {
       return {
         ok: false,
         platform: process.platform,
-        message: `Auto-start service is not supported on ${process.platform}. Run the daemon manually: qa daemon`,
+        message: `Auto-start service is not supported on ${process.platform}. Run the daemon manually: spike daemon`,
       };
   }
 }
