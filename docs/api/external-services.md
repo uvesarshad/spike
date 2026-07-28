@@ -27,7 +27,7 @@ AGENT NOTE: Nano-as-navigator is real but still rough (see CLAUDE.md) — on at 
 
 What it does: plan-step / plan-goals (generates the next action or goal-plan JSON) and visual-verdict as fallback.
 Module: src/router/adapters/google-cli.ts (`GoogleCliAdapter`, `supports()` returns true for all three capabilities).
-Credentials: none for free quota (uses Google account OAuth managed by the gemini CLI). The CLI binary must be on PATH (cfg.googleCliBin, default 'gemini'; env override QA_GOOGLE_CLI_BIN). Model: cfg.googleCliModel, default `gemini-3-flash-preview` (env override QA_GOOGLE_CLI_MODEL).
+Credentials: none for free quota (uses Google account OAuth managed by the gemini CLI). The CLI binary must be on PATH (cfg.googleCliBin, default 'gemini'; env override SPIKE_GOOGLE_CLI_BIN). Model: cfg.googleCliModel, default `gemini-3-flash-preview` (env override SPIKE_GOOGLE_CLI_MODEL).
 Env injection: cfg.googleCliEnv (default { NODE_OPTIONS: '--use-system-ca' }) is injected into every child process. This is required on machines with AVG or Zscaler TLS interception.
 Rate limit: free quota limits apply per Google account. Errors surface as CLI non-zero exits; the adapter escalates.
 Fallback: on any non-zero exit or JSON parse failure, escalates to the next rung.
@@ -48,11 +48,11 @@ Fallback: escalates to the next rung on any error (non-zero exit, timeout, unpar
 What it does: plan-step, plan-goals, visual-verdict, AND video-verdict (Phase 8) — the first concrete video-capable adapter in the ladder.
 Module: src/router/adapters/byok-gemini.ts (`ByokGeminiAdapter`, `readonly supportsVideo = true`).
 Credentials: Vault key 'gemini' or GEMINI_API_KEY env var (`cfg.geminiApiKey`). Auth is the `x-goog-api-key` request header (switched from a `?key=` query-string param as of 2026-07-18 — keeps the key out of URLs/logs) on both `generateContent` and the Files API upload/poll calls.
-Default model: gemini-3-flash-preview for the navigator role, same for brain (no confirmed "pro" id yet — flash stays the brain default too). Set via navigator/brain selection (QA_PLANNER_MODEL / QA_NAVIGATOR_MODEL / panel), not a separate env var.
+Default model: gemini-3-flash-preview for the navigator role, same for brain (no confirmed "pro" id yet — flash stays the brain default too). Set via navigator/brain selection (SPIKE_PLANNER_MODEL / SPIKE_NAVIGATOR_MODEL / panel), not a separate env var.
 Video verdict: `videoVerdict(clipPath, expectation)` uploads the clip to the Gemini Files API (multipart, WebM/MP4/GIF → the matching MIME type), polls `GET /v1beta/{name}` every 2s until the file leaves `PROCESSING` (30s deadline; a `FAILED` state throws), then asks for a schema-enforced verdict referencing the uploaded `fileUri`. Only reachable when `cfg.videoAssertions` is true (opt-in, default false — see "Video Assertion Routing" below).
 Rate limit: governed by the API key's quota.
 Fallback: escalates to the next rung on error; rung 2 is unavailable when no key is configured.
-AGENT NOTE: When cfg.preferFreePlanner is false (default) AND a BYOK key is set, the router promotes rung 2 ahead of rung 1 for plan-step (~3× faster HTTP vs CLI cold-spawn). Set QA_PREFER_FREE_PLANNER=1 to keep free quota first.
+AGENT NOTE: When cfg.preferFreePlanner is false (default) AND a BYOK key is set, the router promotes rung 2 ahead of rung 1 for plan-step (~3× faster HTTP vs CLI cold-spawn). Set SPIKE_PREFER_FREE_PLANNER=1 to keep free quota first.
 AGENT NOTE: Do NOT pass req.schema as Gemini's native `responseSchema` — this codebase's schemas use constructs (`additionalProperties`, `minItems`, `$`-keywords) that Gemini's strict schema subset rejects with a 400 "Unknown name" error. The adapter steers the shape in-prompt instead (`withSchemaInstruction`) plus `responseMimeType: 'application/json'`.
 
 ## Anthropic API (Rung 2)
@@ -115,7 +115,7 @@ Default model: llama3.2-vision.
 Availability: a 300ms-timeout `GET /api/tags` probe, cached 30s (mirrors the CLI adapters' pattern) so a not-running Ollama doesn't cost a slow probe on every step.
 Rate limit: governed by local hardware.
 Fallback: the privacy floor. If all other rungs fail, Ollama is the last resort. Unavailable when Ollama is not running.
-AGENT NOTE: Ollama is the only rung guaranteed to keep data off external servers. In sensitive testing environments, set QA_PLANNER_PROVIDER=ollama (and/or QA_NAVIGATOR_PROVIDER=ollama) to pin it.
+AGENT NOTE: Ollama is the only rung guaranteed to keep data off external servers. In sensitive testing environments, set SPIKE_PLANNER_PROVIDER=ollama (and/or SPIKE_NAVIGATOR_PROVIDER=ollama) to pin it.
 
 ## Video Assertion Routing
 

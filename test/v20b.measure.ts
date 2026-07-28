@@ -1,14 +1,14 @@
 /* v20b — ONE real measured QA run, fully env-isolated, to populate the launch
  * benchmark (docs/benchmark.md). It:
- *  - starts the healthy fixture on QA_FIXTURE_PORT (9422),
+ *  - starts the healthy fixture on SPIKE_FIXTURE_PORT (9422),
  *  - runs ONE qaRun in cdp mode against a THROWAWAY mkdtemp Chrome profile (so
  *    Nano is unavailable → rung 1 / Google CLI does ALL the work → fully
  *    measured), on its own CDP/runner/fixture ports,
  *  - prints report.tokens + a per-trace usage table, and saves nothing else.
  *
  * Isolation (a parallel agent owns the default 9322 Chrome — stay off it):
- *   QA_CDP_PORT=9342  QA_FIXTURE_PORT=9422  QA_RECORD_CLIP=0
- *   QA_CHROME_PROFILE=<mkdtemp>  QA_RUNNER_PORT=9442
+ *   SPIKE_CDP_PORT=9342  SPIKE_FIXTURE_PORT=9422  SPIKE_RECORD_CLIP=0
+ *   SPIKE_CHROME_PROFILE=<mkdtemp>  SPIKE_RUNNER_PORT=9442
  *
  * Run: npx tsx test/v20b.measure.ts
  * (Needs the gemini CLI logged in + internet; several minutes — each planner
@@ -20,11 +20,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const PROFILE = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-measure-'));
-process.env.QA_CDP_PORT = '9342';
-process.env.QA_FIXTURE_PORT = '9422';
-process.env.QA_RUNNER_PORT = '9442';
-process.env.QA_RECORD_CLIP = '0';
-process.env.QA_CHROME_PROFILE = PROFILE;
+process.env.SPIKE_CDP_PORT = '9342';
+process.env.SPIKE_FIXTURE_PORT = '9422';
+process.env.SPIKE_RUNNER_PORT = '9442';
+process.env.SPIKE_RECORD_CLIP = '0';
+process.env.SPIKE_CHROME_PROFILE = PROFILE;
 
 const { loadConfig } = await import('../src/config.js');
 const { qaRun } = await import('../src/engine.js');

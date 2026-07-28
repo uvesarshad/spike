@@ -42,7 +42,7 @@ Node.js >=20 daemon + Chrome MV3 extension. TypeScript 5.8 compiled by tsup. Bro
 - src/driver/loop.ts — the a11y-tree-first driver loop
 - src/ports/browser-port.ts — the BrowserPort interface all browser control flows through
 - src/router/model-router.ts — ModelRouter: walks the cost ladder
-- src/config.ts — loadConfig(); all env vars and qa.config.json keys resolved here
+- src/config.ts — loadConfig(); all env vars and spike.config.json keys resolved here
 - src/cli.ts — CLI entry point (commander subcommands)
 - src/mcp-server.ts — MCP stdio server (registers qa_run tool)
 - extension/ — Chrome MV3 extension (no compile step; plain JS)

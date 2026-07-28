@@ -42,7 +42,7 @@ When cfg.debugMode is 'auto', the auto-fix loop:
 4. Re-runs qaRun() on the same task and URL.
 5. Loops until the verdict is 'pass' or a max-attempts guard fires.
 
-The coding agent binary and args are fully configurable (QA_FIX_AGENT_BIN, QA_FIX_AGENT_ARGS) and are never hardcoded. '{prompt}' in the args array is substituted with the actual fix prompt.
+The coding agent binary and args are fully configurable (SPIKE_FIX_AGENT_BIN, SPIKE_FIX_AGENT_ARGS) and are never hardcoded. '{prompt}' in the args array is substituted with the actual fix prompt.
 
 AGENT AVOID: Do not hardcode 'claude' or 'codex' as the fix agent binary. The config key is cfg.fixAgentBin; 'auto' means detect on PATH at runtime.
 
@@ -64,7 +64,7 @@ AGENT AVOID: Do not add a `node:*` import (or anything that transitively pulls o
 
 Persists the user's non-secret picks to %LOCALAPPDATA%\qa-subagent\settings.json (Windows) or $HOME/qa-subagent/settings.json (other platforms). Fields: planner (Brain PlannerSelection), navigator (Navigator PlannerSelection), debugMode ('prompt' | 'auto'), debugAgent ('auto' | 'claude' | 'codex' | 'gemini'). API keys never land here — those go in the Vault.
 
-loadConfig() folds SettingsStore below env vars, so QA_* env vars always win for power users and CI.
+loadConfig() folds SettingsStore below env vars, so SPIKE_* env vars always win for power users and CI.
 
 Runtime-generated data is not SettingsStore state. Reports, screenshots, audit logs, and clips belong under ArtifactStore; generated replay scripts belong under generated-tests/; the last failed report/fix prompt is daemon memory derived from a Report.
 
@@ -125,4 +125,4 @@ cli.ts starts BridgeServer on cfg.bridgePort (default 9410), instantiates VibeSe
 - docs/modules/browser-port.md — ExtensionBrowser and BridgeServer detail (bridge pairing token, Origin check, protocol-version handshake)
 - docs/modules/engine.md — how the injected bridge is threaded into qaRun
 - docs/state/server-state.md — SettingsStore and Vault persistence
-- docs/infra/environment.md — QA_DEBUG_MODE, QA_FIX_AGENT_BIN, QA_BRIDGE_PORT
+- docs/infra/environment.md — SPIKE_DEBUG_MODE, SPIKE_FIX_AGENT_BIN, SPIKE_BRIDGE_PORT

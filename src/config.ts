@@ -1,7 +1,8 @@
-/* Central config. Resolution order: explicit overrides → env → qa.config.json → defaults.
+/* Central config. Resolution order: explicit overrides → env → spike.config.json → defaults.
  * Ports deliberately differ from the spikes (CDP 9223/9224, HTTP 9333/9334) so a
  * still-running spike Chrome never collides with the daemon. */
 
+import './env-compat.js'; // aliases legacy QA_* env vars onto SPIKE_* — must precede any env read
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -114,16 +115,16 @@ const DEFAULTS: QaConfig = {
   cdpPort: 9322,
   runnerPort: 9400,
   fixturePort: 9401,
-  chromeProfile: path.join(process.env.LOCALAPPDATA ?? process.env.HOME ?? '.', 'qa-subagent-chrome-profile'),
+  chromeProfile: path.join(process.env.LOCALAPPDATA ?? process.env.HOME ?? '.', 'spike-chrome-profile'),
   googleCliBin: 'gemini',
   googleCliModel: 'gemini-3-flash-preview',
   googleCliEnv: { NODE_OPTIONS: '--use-system-ca' },
   artifactsDir: path.resolve('artifacts'),
   actionCache: false,
-  actionCacheDir: path.resolve('.qa-action-cache'),
+  actionCacheDir: path.resolve('.spike-action-cache'),
   maxSteps: 12,
   allowedHosts: ['localhost', '127.0.0.1'],
-  // opt-in (QA_RECORD_CLIP=1): GIF capture works over raw CDP (test/v14) but
+  // opt-in (SPIKE_RECORD_CLIP=1): GIF capture works over raw CDP (test/v14) but
   // chrome.debugger does NOT expose Page.startScreencast (extension mode), and
   // one cdp-mode run showed an unexplained input interaction — see TODO.md.
   // Vibe-mode clips need a chrome.tabCapture recorder (planned).
@@ -149,61 +150,69 @@ const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'o
 const DEBUG_AGENTS: DebugAgent[] = ['auto', 'claude', 'codex', 'gemini'];
 const ASSERTION_POLICIES: AssertionPolicy[] = ['single-ladder', 'fail-on-disagreement', 'arbiter-on-disagreement'];
 
+/** Config filenames, most-preferred first. `qa.config.json` is the pre-Spike
+ * name, still read so an existing checkout keeps working — drop it at 1.0
+ * alongside src/env-compat.ts. */
+const CONFIG_FILENAMES = ['spike.config.json', 'qa.config.json'];
+
 function fromFile(cwd: string): Partial<QaConfig> {
-  const p = path.join(cwd, 'qa.config.json');
-  if (!fs.existsSync(p)) return {};
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return {}; }
+  for (const name of CONFIG_FILENAMES) {
+    const p = path.join(cwd, name);
+    if (!fs.existsSync(p)) continue;
+    try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return {}; }
+  }
+  return {};
 }
 
 function fromEnv(): Partial<QaConfig> {
   const e = process.env;
   const out: Partial<QaConfig> = {};
-  if (e.QA_VIA === 'cdp' || e.QA_VIA === 'extension') out.via = e.QA_VIA;
-  if (e.QA_BRIDGE_PORT) out.bridgePort = Number(e.QA_BRIDGE_PORT);
-  if (e.QA_BRIDGE_HOST) out.bridgeHost = e.QA_BRIDGE_HOST;
-  if (e.QA_EXTENSION_DIR) out.extensionDir = e.QA_EXTENSION_DIR;
-  if (e.QA_CDP_PORT) out.cdpPort = Number(e.QA_CDP_PORT);
-  if (e.QA_RUNNER_PORT) out.runnerPort = Number(e.QA_RUNNER_PORT);
-  if (e.QA_FIXTURE_PORT) out.fixturePort = Number(e.QA_FIXTURE_PORT);
-  if (e.QA_CHROME_PROFILE) out.chromeProfile = e.QA_CHROME_PROFILE;
-  if (e.QA_GOOGLE_CLI_BIN) out.googleCliBin = e.QA_GOOGLE_CLI_BIN;
-  if (e.QA_GOOGLE_CLI_MODEL) out.googleCliModel = e.QA_GOOGLE_CLI_MODEL;
+  if (e.SPIKE_VIA === 'cdp' || e.SPIKE_VIA === 'extension') out.via = e.SPIKE_VIA;
+  if (e.SPIKE_BRIDGE_PORT) out.bridgePort = Number(e.SPIKE_BRIDGE_PORT);
+  if (e.SPIKE_BRIDGE_HOST) out.bridgeHost = e.SPIKE_BRIDGE_HOST;
+  if (e.SPIKE_EXTENSION_DIR) out.extensionDir = e.SPIKE_EXTENSION_DIR;
+  if (e.SPIKE_CDP_PORT) out.cdpPort = Number(e.SPIKE_CDP_PORT);
+  if (e.SPIKE_RUNNER_PORT) out.runnerPort = Number(e.SPIKE_RUNNER_PORT);
+  if (e.SPIKE_FIXTURE_PORT) out.fixturePort = Number(e.SPIKE_FIXTURE_PORT);
+  if (e.SPIKE_CHROME_PROFILE) out.chromeProfile = e.SPIKE_CHROME_PROFILE;
+  if (e.SPIKE_GOOGLE_CLI_BIN) out.googleCliBin = e.SPIKE_GOOGLE_CLI_BIN;
+  if (e.SPIKE_GOOGLE_CLI_MODEL) out.googleCliModel = e.SPIKE_GOOGLE_CLI_MODEL;
   if (e.GEMINI_API_KEY) out.geminiApiKey = e.GEMINI_API_KEY;
-  if (e.QA_ARTIFACTS_DIR) out.artifactsDir = e.QA_ARTIFACTS_DIR;
-  if (e.QA_ACTION_CACHE) out.actionCache = e.QA_ACTION_CACHE !== '0' && e.QA_ACTION_CACHE !== 'false';
-  if (e.QA_ACTION_CACHE_DIR) out.actionCacheDir = e.QA_ACTION_CACHE_DIR;
-  if (e.QA_MAX_STEPS) out.maxSteps = Number(e.QA_MAX_STEPS);
-  if (e.QA_FIX_AGENT_BIN) out.fixAgentBin = e.QA_FIX_AGENT_BIN;
-  if (e.QA_FIX_AGENT_ARGS) {
-    try { out.fixAgentArgs = JSON.parse(e.QA_FIX_AGENT_ARGS); } catch { /* ignore malformed */ }
+  if (e.SPIKE_ARTIFACTS_DIR) out.artifactsDir = e.SPIKE_ARTIFACTS_DIR;
+  if (e.SPIKE_ACTION_CACHE) out.actionCache = e.SPIKE_ACTION_CACHE !== '0' && e.SPIKE_ACTION_CACHE !== 'false';
+  if (e.SPIKE_ACTION_CACHE_DIR) out.actionCacheDir = e.SPIKE_ACTION_CACHE_DIR;
+  if (e.SPIKE_MAX_STEPS) out.maxSteps = Number(e.SPIKE_MAX_STEPS);
+  if (e.SPIKE_FIX_AGENT_BIN) out.fixAgentBin = e.SPIKE_FIX_AGENT_BIN;
+  if (e.SPIKE_FIX_AGENT_ARGS) {
+    try { out.fixAgentArgs = JSON.parse(e.SPIKE_FIX_AGENT_ARGS); } catch { /* ignore malformed */ }
   }
-  if (e.QA_FIX_AGENT_CWD) out.fixAgentCwd = e.QA_FIX_AGENT_CWD;
-  if (e.QA_ALLOWED_HOSTS) out.allowedHosts = e.QA_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
-  if (e.QA_RECORD_CLIP) out.recordClip = e.QA_RECORD_CLIP !== '0' && e.QA_RECORD_CLIP !== 'false';
-  if (e.QA_ASSERTION_POLICY && ASSERTION_POLICIES.includes(e.QA_ASSERTION_POLICY as AssertionPolicy)) {
-    out.assertionPolicy = e.QA_ASSERTION_POLICY as AssertionPolicy;
+  if (e.SPIKE_FIX_AGENT_CWD) out.fixAgentCwd = e.SPIKE_FIX_AGENT_CWD;
+  if (e.SPIKE_ALLOWED_HOSTS) out.allowedHosts = e.SPIKE_ALLOWED_HOSTS.split(',').map((h) => h.trim()).filter(Boolean);
+  if (e.SPIKE_RECORD_CLIP) out.recordClip = e.SPIKE_RECORD_CLIP !== '0' && e.SPIKE_RECORD_CLIP !== 'false';
+  if (e.SPIKE_ASSERTION_POLICY && ASSERTION_POLICIES.includes(e.SPIKE_ASSERTION_POLICY as AssertionPolicy)) {
+    out.assertionPolicy = e.SPIKE_ASSERTION_POLICY as AssertionPolicy;
   }
-  if (e.QA_VIDEO_ASSERTIONS) out.videoAssertions = e.QA_VIDEO_ASSERTIONS !== '0' && e.QA_VIDEO_ASSERTIONS !== 'false';
-  if (e.QA_READ_ONLY) out.readOnly = e.QA_READ_ONLY !== '0' && e.QA_READ_ONLY !== 'false';
-  if (e.QA_SPEND_CAP_USD) {
-    const n = Number(e.QA_SPEND_CAP_USD);
+  if (e.SPIKE_VIDEO_ASSERTIONS) out.videoAssertions = e.SPIKE_VIDEO_ASSERTIONS !== '0' && e.SPIKE_VIDEO_ASSERTIONS !== 'false';
+  if (e.SPIKE_READ_ONLY) out.readOnly = e.SPIKE_READ_ONLY !== '0' && e.SPIKE_READ_ONLY !== 'false';
+  if (e.SPIKE_SPEND_CAP_USD) {
+    const n = Number(e.SPIKE_SPEND_CAP_USD);
     if (Number.isFinite(n) && n > 0) out.spendCapUsd = n; // 0/garbage → leave unset (no cap)
   }
-  if (e.QA_PREFER_FREE_PLANNER) out.preferFreePlanner = e.QA_PREFER_FREE_PLANNER !== '0' && e.QA_PREFER_FREE_PLANNER !== 'false';
+  if (e.SPIKE_PREFER_FREE_PLANNER) out.preferFreePlanner = e.SPIKE_PREFER_FREE_PLANNER !== '0' && e.SPIKE_PREFER_FREE_PLANNER !== 'false';
   // planner (BRAIN) selection — env wins over the SettingsStore (power-users / tests).
   const planner: Partial<PlannerSelection> = {};
-  if (e.QA_PLANNER_PROVIDER && PROVIDERS.includes(e.QA_PLANNER_PROVIDER as ProviderId)) planner.provider = e.QA_PLANNER_PROVIDER as ProviderId;
-  if (e.QA_PLANNER_MODE === 'api' || e.QA_PLANNER_MODE === 'cli') planner.mode = e.QA_PLANNER_MODE as PlannerMode;
-  if (e.QA_PLANNER_MODEL) planner.model = e.QA_PLANNER_MODEL;
+  if (e.SPIKE_PLANNER_PROVIDER && PROVIDERS.includes(e.SPIKE_PLANNER_PROVIDER as ProviderId)) planner.provider = e.SPIKE_PLANNER_PROVIDER as ProviderId;
+  if (e.SPIKE_PLANNER_MODE === 'api' || e.SPIKE_PLANNER_MODE === 'cli') planner.mode = e.SPIKE_PLANNER_MODE as PlannerMode;
+  if (e.SPIKE_PLANNER_MODEL) planner.model = e.SPIKE_PLANNER_MODEL;
   if (Object.keys(planner).length) out.planner = planner as PlannerSelection;
-  // navigator selection — mirrors QA_PLANNER_* (also accepts 'ondevice' for nano).
+  // navigator selection — mirrors SPIKE_PLANNER_* (also accepts 'ondevice' for nano).
   const navigator: Partial<PlannerSelection> = {};
-  if (e.QA_NAVIGATOR_PROVIDER && PROVIDERS.includes(e.QA_NAVIGATOR_PROVIDER as ProviderId)) navigator.provider = e.QA_NAVIGATOR_PROVIDER as ProviderId;
-  if (e.QA_NAVIGATOR_MODE === 'api' || e.QA_NAVIGATOR_MODE === 'cli' || e.QA_NAVIGATOR_MODE === 'ondevice') navigator.mode = e.QA_NAVIGATOR_MODE as PlannerMode;
-  if (e.QA_NAVIGATOR_MODEL) navigator.model = e.QA_NAVIGATOR_MODEL;
+  if (e.SPIKE_NAVIGATOR_PROVIDER && PROVIDERS.includes(e.SPIKE_NAVIGATOR_PROVIDER as ProviderId)) navigator.provider = e.SPIKE_NAVIGATOR_PROVIDER as ProviderId;
+  if (e.SPIKE_NAVIGATOR_MODE === 'api' || e.SPIKE_NAVIGATOR_MODE === 'cli' || e.SPIKE_NAVIGATOR_MODE === 'ondevice') navigator.mode = e.SPIKE_NAVIGATOR_MODE as PlannerMode;
+  if (e.SPIKE_NAVIGATOR_MODEL) navigator.model = e.SPIKE_NAVIGATOR_MODEL;
   if (Object.keys(navigator).length) out.navigator = navigator as PlannerSelection;
-  if (e.QA_DEBUG_MODE === 'prompt' || e.QA_DEBUG_MODE === 'auto') out.debugMode = e.QA_DEBUG_MODE;
-  if (e.QA_DEBUG_AGENT && DEBUG_AGENTS.includes(e.QA_DEBUG_AGENT as DebugAgent)) out.debugAgent = e.QA_DEBUG_AGENT as DebugAgent;
+  if (e.SPIKE_DEBUG_MODE === 'prompt' || e.SPIKE_DEBUG_MODE === 'auto') out.debugMode = e.SPIKE_DEBUG_MODE;
+  if (e.SPIKE_DEBUG_AGENT && DEBUG_AGENTS.includes(e.SPIKE_DEBUG_AGENT as DebugAgent)) out.debugAgent = e.SPIKE_DEBUG_AGENT as DebugAgent;
   return out;
 }
 
@@ -253,16 +262,16 @@ function deadPlannerHint(role: 'brain' | 'navigator'): string {
  * only when the FINAL merged config (after settings/env/overrides) still
  * resolves to gemini:cli — the common on-disk case is already migrated away by
  * SettingsStore.readRaw(), so this mainly catches an explicit env/override/
- * qa.config.json pin a power user set deliberately. */
+ * spike.config.json pin a power user set deliberately. */
 function warnIfDeadPlanner(cfg: QaConfig): void {
   if (isDeadPlannerSelection(cfg.planner)) console.warn(deadPlannerHint('brain'));
   if (isDeadPlannerSelection(cfg.navigator)) console.warn(deadPlannerHint('navigator'));
 }
 
 export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd()): QaConfig {
-  // precedence (low → high): defaults < qa.config.json < SettingsStore < env < overrides.
+  // precedence (low → high): defaults < spike.config.json < SettingsStore < env < overrides.
   // planner env may be a PARTIAL selection — merge it onto whatever's beneath so a
-  // lone QA_PLANNER_MODEL doesn't wipe provider/mode.
+  // lone SPIKE_PLANNER_MODEL doesn't wipe provider/mode.
   const fileCfg = fromFile(cwd);
   const settingsCfg = fromSettings();
   const envCfg = fromEnv();
@@ -274,7 +283,7 @@ export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd(
     ...(envCfg.planner ?? {}),
     ...(overrides.planner ?? {}),
   };
-  // navigator: same partial-merge precedence as planner (a lone QA_NAVIGATOR_MODEL
+  // navigator: same partial-merge precedence as planner (a lone SPIKE_NAVIGATOR_MODEL
   // must not wipe provider/mode).
   merged.navigator = {
     ...DEFAULTS.navigator,

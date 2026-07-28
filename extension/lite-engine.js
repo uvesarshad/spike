@@ -5098,27 +5098,27 @@ function getDefaultTracer() {
   return cached;
 }
 function buildTracerFromEnv() {
-  const mode = (process.env.QA_TELEMETRY_EXPORTER ?? "none").toLowerCase();
+  const mode = (process.env.SPIKE_TELEMETRY_EXPORTER ?? "none").toLowerCase();
   if (mode !== "otlp") return createTelemetryTracer();
-  const endpoint = process.env.QA_OTLP_ENDPOINT;
+  const endpoint = process.env.SPIKE_OTLP_ENDPOINT;
   if (!endpoint) {
     console.error(
-      "telemetry: QA_TELEMETRY_EXPORTER=otlp is set but QA_OTLP_ENDPOINT is missing \u2014 falling back to the no-op sink (zero external calls)."
+      "telemetry: SPIKE_TELEMETRY_EXPORTER=otlp is set but SPIKE_OTLP_ENDPOINT is missing \u2014 falling back to the no-op sink (zero external calls)."
     );
     return createTelemetryTracer();
   }
   let headers = {};
-  if (process.env.QA_OTLP_HEADERS) {
+  if (process.env.SPIKE_OTLP_HEADERS) {
     try {
-      headers = JSON.parse(process.env.QA_OTLP_HEADERS);
+      headers = JSON.parse(process.env.SPIKE_OTLP_HEADERS);
     } catch {
-      console.error("telemetry: QA_OTLP_HEADERS is not valid JSON \u2014 exporting without extra headers.");
+      console.error("telemetry: SPIKE_OTLP_HEADERS is not valid JSON \u2014 exporting without extra headers.");
     }
   }
   const exporter = new OtlpHttpExporter({
     endpoint,
     headers,
-    serviceName: process.env.QA_OTLP_SERVICE_NAME || "spike-agent"
+    serviceName: process.env.SPIKE_OTLP_SERVICE_NAME || "spike-agent"
   });
   const secretValues = [
     process.env.GEMINI_API_KEY,
@@ -11684,7 +11684,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
     }
     if (readOnlyBlock) {
       verdict = "uncertain";
-      reason = `read-only mode: ${readOnlyBlock} is not in allowedHosts \u2014 add it via QA_ALLOWED_HOSTS or qa.config.json to allow interaction`;
+      reason = `read-only mode: ${readOnlyBlock} is not in allowedHosts \u2014 add it via SPIKE_ALLOWED_HOSTS or spike.config.json to allow interaction`;
       break;
     }
     if (!done && !finishReplan && stepsInGoal >= perGoalMaxSteps) {
@@ -13085,7 +13085,7 @@ var DEFAULT_SETTINGS = {
   debugAgent: "auto",
   videoAssertions: false,
   // A5b: safe by default — first runs must not click/type until the user
-  // explicitly opts in (panel toggle / QA_READ_ONLY=0).
+  // explicitly opts in (panel toggle / SPIKE_READ_ONLY=0).
   readOnly: true
   // spendCapUsd intentionally absent here — undefined/OFF is the default; the
   // user opts in with an explicit positive USD figure.

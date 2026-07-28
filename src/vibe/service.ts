@@ -256,7 +256,7 @@ export class VibeService {
       // A5b: dry-run toggle — plain boolean coercion, same as videoAssertions.
       if (p.readOnly !== undefined) patch.readOnly = Boolean(p.readOnly);
       // A5a: optional spend cap — 0/negative/non-finite clears it (explicit OFF),
-      // matching QA_SPEND_CAP_USD's env parsing in config.ts.
+      // matching SPIKE_SPEND_CAP_USD's env parsing in config.ts.
       if (p.spendCapUsd !== undefined) {
         const n = Number(p.spendCapUsd);
         patch.spendCapUsd = Number.isFinite(n) && n > 0 ? n : undefined;

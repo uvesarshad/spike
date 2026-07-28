@@ -7,7 +7,7 @@
 
 ## Overview
 
-`src/telemetry/*` is a small structured-tracing layer: spans with attributes and events, redacted before they ever leave the process. As of Phase 11, tracing is ALWAYS ON structurally — every wrapped call constructs a real span (sanitized attributes, start/end timestamps, events) — but the default sink discards it. Nothing is exported anywhere unless the operator opts in with `QA_TELEMETRY_EXPORTER=otlp`. Zero config means zero external calls, byte-for-byte the same behavior as before Phase 11.
+`src/telemetry/*` is a small structured-tracing layer: spans with attributes and events, redacted before they ever leave the process. As of Phase 11, tracing is ALWAYS ON structurally — every wrapped call constructs a real span (sanitized attributes, start/end timestamps, events) — but the default sink discards it. Nothing is exported anywhere unless the operator opts in with `SPIKE_TELEMETRY_EXPORTER=otlp`. Zero config means zero external calls, byte-for-byte the same behavior as before Phase 11.
 
 AGENT OWNER: src/telemetry/*, wiring in src/engine.ts
 
@@ -52,8 +52,8 @@ Every span attribute and event attribute passes through `redactValue()` before b
 Off by default. Enable with:
 
 ```
-QA_TELEMETRY_EXPORTER=otlp
-QA_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+SPIKE_TELEMETRY_EXPORTER=otlp
+SPIKE_OTLP_ENDPOINT=http://localhost:4318/v1/traces
 ```
 
 `OtlpHttpExporter` POSTs each span as an OTLP/HTTP (JSON) `resourceSpans` payload via `fetch`. It never throws — a broken or absent collector logs one `console.error` and is silently skipped afterward for the rest of the process; a QA run's outcome is never affected by telemetry export failing. Each span carries a fresh random 16-byte trace id UNLESS its `runId` attribute is set (every `qa.run`/`qa.replay`/`qa.run.driver_loop` span sets one once known), in which case the trace id is a stable hash of that `runId` — so every span belonging to the same QA run groups into one trace/waterfall in the collector's UI. This is a deliberate simplification (no real parent/child span linking, no OpenTelemetry SDK dependency) — good enough for "show me this run's shape," not a full distributed-tracing implementation.
@@ -61,30 +61,30 @@ QA_OTLP_ENDPOINT=http://localhost:4318/v1/traces
 ### Grafana Tempo / Grafana Alloy (local or self-hosted)
 
 ```
-QA_TELEMETRY_EXPORTER=otlp
-QA_OTLP_ENDPOINT=http://localhost:4318/v1/traces
+SPIKE_TELEMETRY_EXPORTER=otlp
+SPIKE_OTLP_ENDPOINT=http://localhost:4318/v1/traces
 ```
 
 No auth needed for a local collector. For Grafana Cloud Tempo, use the tenant's OTLP gateway URL and add the basic-auth header:
 
 ```
-QA_OTLP_ENDPOINT=https://tempo-xxx.grafana.net/tempo/api/push
-QA_OTLP_HEADERS={"Authorization":"Basic <base64 instanceId:apiKey>"}
+SPIKE_OTLP_ENDPOINT=https://tempo-xxx.grafana.net/tempo/api/push
+SPIKE_OTLP_HEADERS={"Authorization":"Basic <base64 instanceId:apiKey>"}
 ```
 
 ### Axiom
 
 ```
-QA_TELEMETRY_EXPORTER=otlp
-QA_OTLP_ENDPOINT=https://api.axiom.co/v1/traces
-QA_OTLP_HEADERS={"Authorization":"Bearer <axiom-api-token>","X-Axiom-Dataset":"<dataset-name>"}
+SPIKE_TELEMETRY_EXPORTER=otlp
+SPIKE_OTLP_ENDPOINT=https://api.axiom.co/v1/traces
+SPIKE_OTLP_HEADERS={"Authorization":"Bearer <axiom-api-token>","X-Axiom-Dataset":"<dataset-name>"}
 ```
 
-`QA_OTLP_HEADERS` is a JSON object string merged onto every export POST — invalid JSON logs a warning and exports without extra headers rather than throwing. `QA_OTLP_SERVICE_NAME` overrides the `service.name` resource attribute (default `spike-agent`).
+`SPIKE_OTLP_HEADERS` is a JSON object string merged onto every export POST — invalid JSON logs a warning and exports without extra headers rather than throwing. `SPIKE_OTLP_SERVICE_NAME` overrides the `service.name` resource attribute (default `spike-agent`).
 
 ## `spike dashboard`
 
-`spike dashboard [--port <n>]` (`src/cli.ts`) serves a read-only, localhost-only HTML view over `artifacts/<runId>/report.json` files — no database, no build step, no external calls, nothing written to disk. Default port 9420 (or `QA_DASHBOARD_PORT`).
+`spike dashboard [--port <n>]` (`src/cli.ts`) serves a read-only, localhost-only HTML view over `artifacts/<runId>/report.json` files — no database, no build step, no external calls, nothing written to disk. Default port 9420 (or `SPIKE_DASHBOARD_PORT`).
 
 - `/` — every run under `cfg.artifactsDir`, newest first: verdict, task, url, step count, duration, and source (fresh AI run / matched $0 replay with its score / self-heal outcome), plus action-cache hit ratio when enabled.
 - `/run/<runId>` — one run's full detail: token accounting (`report.tokens` — navigator/brain/visual call counts, cheap-model total), `model_trace`, `assertion_trace` when present, per-step outcomes, and the failure reason.
@@ -101,5 +101,5 @@ It reads `report.json` files already written by `qaRun()`/`qaReplay()` — it do
 ## Related Docs
 
 - docs/architecture/data-flow.md - where `qa.run`/`qa.replay`/`qa.run.driver_loop` sit in the run lifecycle
-- docs/infra/environment.md - `QA_TELEMETRY_EXPORTER`, `QA_OTLP_*`, `QA_DASHBOARD_PORT`
+- docs/infra/environment.md - `SPIKE_TELEMETRY_EXPORTER`, `SPIKE_OTLP_*`, `SPIKE_DASHBOARD_PORT`
 - docs/modules/recorder.md - the Phase 14 replay matcher whose match/fallback events this module's `qa.run` span records

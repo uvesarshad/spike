@@ -47,22 +47,22 @@ All daemon ports are fixed and distinct from the spike ports so a still-running 
 
 | Service | Port | Override env var |
 |---|---|---|
-| Daemon CDP | 9322 | QA_CDP_PORT |
-| Nano runner HTTP | 9400 | QA_RUNNER_PORT |
-| Fixture HTTP | 9401 | QA_FIXTURE_PORT |
-| Extension bridge WS | 9410 | QA_BRIDGE_PORT (or `spike daemon --bridge-port <n>`) |
-| Local dashboard HTTP | 9420 | QA_DASHBOARD_PORT (or `spike dashboard --port <n>`) |
+| Daemon CDP | 9322 | SPIKE_CDP_PORT |
+| Nano runner HTTP | 9400 | SPIKE_RUNNER_PORT |
+| Fixture HTTP | 9401 | SPIKE_FIXTURE_PORT |
+| Extension bridge WS | 9410 | SPIKE_BRIDGE_PORT (or `spike daemon --bridge-port <n>`) |
+| Local dashboard HTTP | 9420 | SPIKE_DASHBOARD_PORT (or `spike dashboard --port <n>`) |
 | Spike B CDP | 9223 | (spike-only, never override) |
 | Spike A CDP | 9224 | (spike-only, never override) |
 | Spike HTTP | 9333/9334 | (spike-only, never override) |
 
-The dashboard port (`spike dashboard`, src/cli.ts) is a newer addition — it is read directly from `QA_DASHBOARD_PORT` in the CLI rather than being part of `QaConfig`'s env-parsing table in src/config.ts, but the effective default (9420) and override behavior are the same shape as the other ports.
+The dashboard port (`spike dashboard`, src/cli.ts) is a newer addition — it is read directly from `SPIKE_DASHBOARD_PORT` in the CLI rather than being part of `QaConfig`'s env-parsing table in src/config.ts, but the effective default (9420) and override behavior are the same shape as the other ports.
 
-AGENT NOTE: If any daemon port is already in use (another process, a stale Chrome), Chrome/the bridge/the dashboard will fail to bind. Check with `netstat -ano | findstr :<port>` (Windows) or `lsof -i :<port>` (macOS/Linux) and kill the occupying process, or override with the QA_* env vars / CLI flags above.
+AGENT NOTE: If any daemon port is already in use (another process, a stale Chrome), Chrome/the bridge/the dashboard will fail to bind. Check with `netstat -ano | findstr :<port>` (Windows) or `lsof -i :<port>` (macOS/Linux) and kill the occupying process, or override with the SPIKE_* env vars / CLI flags above.
 
 ## Chrome Profile Paths
 
-Daemon profile: `%LOCALAPPDATA%\qa-subagent-chrome-profile` (falls back to `$HOME` when LOCALAPPDATA is unset, e.g. macOS/Linux) — holds the Nano model (~2 GB) once downloaded. Must be on a volume with 22 GB+ free; `nano --check` reporting `unavailable` is usually this storage gate, not a real capability failure. Override with `QA_CHROME_PROFILE`.
+Daemon profile: `%LOCALAPPDATA%\spike-chrome-profile` (falls back to `$HOME` when LOCALAPPDATA is unset, e.g. macOS/Linux) — holds the Nano model (~2 GB) once downloaded. Must be on a volume with 22 GB+ free; `nano --check` reporting `unavailable` is usually this storage gate, not a real capability failure. Override with `SPIKE_CHROME_PROFILE`.
 
 Spike A profile: `%LOCALAPPDATA%\qa-spike-chrome-profile` — separate from the daemon profile; used by spike-a-web.js (persistent, headed).
 
@@ -117,15 +117,15 @@ The MCP server reads from stdin and writes to stdout. It does not open any HTTP 
 
 ## Environment Configuration for Production
 
-For CI or a shared dev environment, set env vars rather than relying on qa.config.json:
-- QA_CDP_PORT, QA_RUNNER_PORT, QA_FIXTURE_PORT, QA_BRIDGE_PORT, QA_DASHBOARD_PORT: choose non-default ports if defaults conflict.
-- QA_CHROME_PROFILE: explicit path on a high-capacity (22 GB+ free) volume.
+For CI or a shared dev environment, set env vars rather than relying on spike.config.json:
+- SPIKE_CDP_PORT, SPIKE_RUNNER_PORT, SPIKE_FIXTURE_PORT, SPIKE_BRIDGE_PORT, SPIKE_DASHBOARD_PORT: choose non-default ports if defaults conflict.
+- SPIKE_CHROME_PROFILE: explicit path on a high-capacity (22 GB+ free) volume.
 - GEMINI_API_KEY or other BYOK keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, GLM_API_KEY/GLM_BASE_URL): injected by CI secrets.
-- QA_NAVIGATOR_PROVIDER/QA_NAVIGATOR_MODE and QA_PLANNER_PROVIDER/QA_PLANNER_MODE: pin the navigator and brain roles independently of the SettingsStore (env beats SettingsStore) — see CLAUDE.md's navigator/brain gotcha for the reliable non-Nano recipe.
-- QA_ALLOWED_HOSTS: add the staging/production host under test (the `--url`/task host is trusted automatically per-run; this is for extra hosts).
-- QA_RECORD_CLIP: set to '0' (or leave unset) in headless CI (Page.startScreencast requires a display).
+- SPIKE_NAVIGATOR_PROVIDER/SPIKE_NAVIGATOR_MODE and SPIKE_PLANNER_PROVIDER/SPIKE_PLANNER_MODE: pin the navigator and brain roles independently of the SettingsStore (env beats SettingsStore) — see CLAUDE.md's navigator/brain gotcha for the reliable non-Nano recipe.
+- SPIKE_ALLOWED_HOSTS: add the staging/production host under test (the `--url`/task host is trusted automatically per-run; this is for extra hosts).
+- SPIKE_RECORD_CLIP: set to '0' (or leave unset) in headless CI (Page.startScreencast requires a display).
 
-AGENT NOTE: QA_RECORD_CLIP must be false (or unset) in headless CI. CDP Page.startScreencast requires a visible Chrome window. Setting QA_VIA=cdp with a headless Chrome on a display-less server will likely fail at the screencast step.
+AGENT NOTE: SPIKE_RECORD_CLIP must be false (or unset) in headless CI. CDP Page.startScreencast requires a visible Chrome window. Setting SPIKE_VIA=cdp with a headless Chrome on a display-less server will likely fail at the screencast step.
 
 ## Update Triggers
 

@@ -7,7 +7,7 @@
  * double-gated:
  *
  *   - `claude --version` must exit 0 (else exit 2 / skip),
- *   - env QA_REAL_AGENT_E2E=1 must be set (else exit 2 / skip).
+ *   - env SPIKE_REAL_AGENT_E2E=1 must be set (else exit 2 / skip).
  *
  * The buggy app (test/fixtures/buggy-shop) is COPIED to a temp work dir so the
  * agent edits the copy and the repo's pristine fixture is never touched. We then
@@ -18,7 +18,7 @@
  * fixed, attempt 2 pass), and the temp checkout.js actually changed (now
  * contains `total` in buildOrder's returned object).
  *
- * Run:  $env:QA_REAL_AGENT_E2E='1'; npx tsx test/e2e.autofix-real.ts
+ * Run:  $env:SPIKE_REAL_AGENT_E2E='1'; npx tsx test/e2e.autofix-real.ts
  */
 
 import fs from 'node:fs';
@@ -59,8 +59,8 @@ if (!claudeWorks()) {
   console.log('SKIP  `claude --version` did not exit 0 — install Claude Code on PATH to run this e2e.');
   process.exit(2);
 }
-if (process.env.QA_REAL_AGENT_E2E !== '1') {
-  console.log('SKIP  set QA_REAL_AGENT_E2E=1 to run the paid e2e (it spends real agent tokens).');
+if (process.env.SPIKE_REAL_AGENT_E2E !== '1') {
+  console.log('SKIP  set SPIKE_REAL_AGENT_E2E=1 to run the paid e2e (it spends real agent tokens).');
   process.exit(2);
 }
 

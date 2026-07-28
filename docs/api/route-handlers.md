@@ -100,7 +100,7 @@ node dist/cli.js secret delete <name>
 node dist/cli.js config show
 node dist/cli.js config set [--provider <p>] [--mode <m>] [--model <m>] [--debug-mode <d>] [--debug-agent <a>]
 
-Reads or writes SettingsStore settings — this is the **planner** ("browsing-control AI") selection plus debugging settings; it does not cover the separate navigator pin (set via the extension panel or QA_NAVIGATOR_* env). `show` prints the current planner provider/mode/model, debugMode, debugAgent, and which API keys are present in the vault (never the values). `set` requires at least one flag:
+Reads or writes SettingsStore settings — this is the **planner** ("browsing-control AI") selection plus debugging settings; it does not cover the separate navigator pin (set via the extension panel or SPIKE_NAVIGATOR_* env). `show` prints the current planner provider/mode/model, debugMode, debugAgent, and which API keys are present in the vault (never the values). `set` requires at least one flag:
 - `--provider <p>` — one of nano | gemini | claude | gpt | ollama | openrouter | glm.
 - `--mode <m>` — api | cli.
 - `--model <m>` — model id; blank means "use the provider/mode default".
@@ -113,7 +113,7 @@ Not for API keys — those go in `spike secret`.
 
 node dist/cli.js dashboard [--port <n>]
 
-Serves a local, read-only HTML dashboard over artifacts/<runId>/report.json files: an index of runs (verdict, task, url, steps, duration, replay/cache source) linking to a per-run page (model_trace, assertion_trace, action-cache stats, token accounting, step list). Hand-rolled HTML with no client-side JS, no external fonts/scripts, and zero non-Node dependencies; never mutates artifacts/. Listens on `--port` (default 9420, or QA_DASHBOARD_PORT) and stays alive like `spike daemon`. $0, no backend, no external calls.
+Serves a local, read-only HTML dashboard over artifacts/<runId>/report.json files: an index of runs (verdict, task, url, steps, duration, replay/cache source) linking to a per-run page (model_trace, assertion_trace, action-cache stats, token accounting, step list). Hand-rolled HTML with no client-side JS, no external fonts/scripts, and zero non-Node dependencies; never mutates artifacts/. Listens on `--port` (default 9420, or SPIKE_DASHBOARD_PORT) and stays alive like `spike daemon`. $0, no backend, no external calls.
 
 ## Update Triggers
 

@@ -97,7 +97,7 @@ Navigator and brain never silently share a mispinned model: `buildLadder()` (src
 - script: a recorded QA run serialized as JSON (generated-tests/*.json) for $0 deterministic replay.
 - fixture: the intentionally-buggy dogfood Express shop app (fixture/server.ts, port 9401).
 - bridge: the WebSocket server (src/bridge/bridge-server.ts) that relays JSON-RPC messages between the daemon and the extension service worker.
-- step budget: the maximum number of driver-loop actions per run (default 12, QA_MAX_STEPS).
+- step budget: the maximum number of driver-loop actions per run (default 12, SPIKE_MAX_STEPS).
 - action cache: optional file-backed records for verified single actions keyed by normalized URL, current goal, action intent, and page signature.
 
 ## Recent Changes

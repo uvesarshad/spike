@@ -110,7 +110,7 @@ Calls a local Ollama instance on localhost:11434. Rung 3. Supports planning and 
 
 ## Video Assertions (Phase 8, opt-in)
 
-Config field cfg.videoAssertions (default false, env QA_VIDEO_ASSERTIONS) gates `assert_visual { mode: 'video' }`. OFF (default): the driver runs the normal screenshot verdict and writes a report note that video was requested but disabled — it never calls router.videoVerdict(). ON: the driver records a clip (CDP screencast or extension tabCapture, per docs/modules/engine.md), calls router.hasVideoVerdict() to check a video-capable candidate is live, then router.videoVerdict(clipPath, expectation, step). Today only ByokGeminiAdapter (byok-gemini.ts) implements the route; Anthropic and the OpenAI-compatible adapters (gpt/openrouter/glm) are screenshot-only. Any failure (no adapter, upload error, timeout) is caught by the driver, which falls back to the screenshot path rather than failing the run.
+Config field cfg.videoAssertions (default false, env SPIKE_VIDEO_ASSERTIONS) gates `assert_visual { mode: 'video' }`. OFF (default): the driver runs the normal screenshot verdict and writes a report note that video was requested but disabled — it never calls router.videoVerdict(). ON: the driver records a clip (CDP screencast or extension tabCapture, per docs/modules/engine.md), calls router.hasVideoVerdict() to check a video-capable candidate is live, then router.videoVerdict(clipPath, expectation, step). Today only ByokGeminiAdapter (byok-gemini.ts) implements the route; Anthropic and the OpenAI-compatible adapters (gpt/openrouter/glm) are screenshot-only. Any failure (no adapter, upload error, timeout) is caught by the driver, which falls back to the screenshot path rather than failing the run.
 
 ## Ladder Ordering Summary
 
@@ -122,7 +122,7 @@ For visual-verdict: rung 0 Nano -> pinnedAdapter if live and not Nano -> remaini
 
 ## PlannerSelection, NavigatorSelection, and SettingsStore
 
-The user's BRAIN choice is stored in cfg.planner and pins plannerAdapter for plan-goals. The user's NAVIGATOR choice is stored in cfg.navigator and pins navigatorAdapter for plan-step. loadConfig() merges defaults, qa.config.json, SettingsStore, env, and explicit overrides; QA_PLANNER_* controls the BRAIN and QA_NAVIGATOR_* controls the NAVIGATOR.
+The user's BRAIN choice is stored in cfg.planner and pins plannerAdapter for plan-goals. The user's NAVIGATOR choice is stored in cfg.navigator and pins navigatorAdapter for plan-step. loadConfig() merges defaults, spike.config.json, SettingsStore, env, and explicit overrides; SPIKE_PLANNER_* controls the BRAIN and SPIKE_NAVIGATOR_* controls the NAVIGATOR.
 
 buildLadder() resolves each role selection to an adapter name, constructs each provider:mode slot once (by default), and passes navigatorAdapter/plannerAdapter into ModelRouter. Role-specific model IDs are applied to the pinned slot; unpinned fallback slots use cheap navigator-tier defaults. Nano resolves to the adapter name "nano"; it can serve plan-step if available but is intentionally absent from plan-goals.
 
@@ -170,7 +170,7 @@ Why this matters: without it, a user (or SettingsStore migration) who pins the n
 
 SettingsStore.readRaw() (src/vibe/settings.ts) reads settings.json exactly as stored, with no default-filling for planner/navigator — this lets config.ts's fromSettings() distinguish "the user explicitly saved a role pin" from "nothing was ever saved, fall through to config.ts's own DEFAULTS" (previously SettingsStore.read()'s always-filled shape silently overrode config.ts's daemon-specific claude:cli brain default with the shared lite DEFAULT_SETTINGS.planner of claude:api, even on a machine with no settings.json at all).
 
-readRaw() also migrates on load: a persisted planner pinned to the dead Gemini CLI free tier (isDeadPlannerSelection() in settings-data.ts: provider 'gemini' + mode 'cli') is rewritten to claude:cli; a persisted config with no navigator key (pre planner/navigator split) is rewritten to nano:ondevice. The migrated result is written back to settings.json once, so every other reader (the panel, `spike config` CLI) sees the fixed values without re-deriving the migration. loadConfig() additionally prints a startup warning (warnIfDeadPlanner()) if the FINAL merged config still resolves either role to gemini:cli — this only fires for an explicit env/qa.config.json/override pin, since the on-disk case is already migrated away.
+readRaw() also migrates on load: a persisted planner pinned to the dead Gemini CLI free tier (isDeadPlannerSelection() in settings-data.ts: provider 'gemini' + mode 'cli') is rewritten to claude:cli; a persisted config with no navigator key (pre planner/navigator split) is rewritten to nano:ondevice. The migrated result is written back to settings.json once, so every other reader (the panel, `spike config` CLI) sees the fixed values without re-deriving the migration. loadConfig() additionally prints a startup warning (warnIfDeadPlanner()) if the FINAL merged config still resolves either role to gemini:cli — this only fires for an explicit env/spike.config.json/override pin, since the on-disk case is already migrated away.
 
 There is no checked-in settings.json in this repo (it is a per-machine file under %LOCALAPPDATA%/qa-subagent/, created on first run) — DEFAULTS.planner in src/config.ts (claude:cli) is the single source of truth for the daemon's out-of-the-box brain pin.
 
@@ -180,14 +180,14 @@ A cheap, reliable non-Nano navigator + visual pair, useful while Nano-as-navigat
 
 ```
 GEMINI_API_KEY=<your key>
-QA_NAVIGATOR_PROVIDER=gemini
-QA_NAVIGATOR_MODE=api
-QA_NAVIGATOR_MODEL=gemini-3-flash-preview   # optional — already the default
-QA_PLANNER_PROVIDER=claude
-QA_PLANNER_MODE=cli                          # or api + ANTHROPIC_API_KEY for BYOK
+SPIKE_NAVIGATOR_PROVIDER=gemini
+SPIKE_NAVIGATOR_MODE=api
+SPIKE_NAVIGATOR_MODEL=gemini-3-flash-preview   # optional — already the default
+SPIKE_PLANNER_PROVIDER=claude
+SPIKE_PLANNER_MODE=cli                          # or api + ANTHROPIC_API_KEY for BYOK
 ```
 
-ByokGeminiAdapter and AnthropicAdapter both declare `supports(cap)` unconditionally true, so either is selectable for BOTH plan-step (navigator) and visual-verdict, not just planning — pin either as navigatorAdapter and it also leads the visual-verdict ladder right after rung-0 Nano (or absolute-first if Nano is unavailable). An all-BYOK pair with no CLI dependency: `GEMINI_API_KEY` + `QA_NAVIGATOR_PROVIDER=gemini QA_NAVIGATOR_MODE=api` for the navigator, `ANTHROPIC_API_KEY` + `QA_PLANNER_PROVIDER=claude QA_PLANNER_MODE=api` for the brain.
+ByokGeminiAdapter and AnthropicAdapter both declare `supports(cap)` unconditionally true, so either is selectable for BOTH plan-step (navigator) and visual-verdict, not just planning — pin either as navigatorAdapter and it also leads the visual-verdict ladder right after rung-0 Nano (or absolute-first if Nano is unavailable). An all-BYOK pair with no CLI dependency: `GEMINI_API_KEY` + `SPIKE_NAVIGATOR_PROVIDER=gemini SPIKE_NAVIGATOR_MODE=api` for the navigator, `ANTHROPIC_API_KEY` + `SPIKE_PLANNER_PROVIDER=claude SPIKE_PLANNER_MODE=api` for the brain.
 
 ## Token Accounting
 

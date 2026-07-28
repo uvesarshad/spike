@@ -119,7 +119,7 @@ const png = Buffer.from('fakepng');
   // isolate LOCALAPPDATA so this never touches the real machine's settings.json
   const savedLocalAppData = process.env.LOCALAPPDATA;
   const savedEnv: Record<string, string | undefined> = {};
-  for (const k of ['QA_PLANNER_PROVIDER', 'QA_PLANNER_MODE', 'QA_PLANNER_MODEL', 'QA_NAVIGATOR_PROVIDER', 'QA_NAVIGATOR_MODE', 'QA_NAVIGATOR_MODEL']) {
+  for (const k of ['SPIKE_PLANNER_PROVIDER', 'SPIKE_PLANNER_MODE', 'SPIKE_PLANNER_MODEL', 'SPIKE_NAVIGATOR_PROVIDER', 'SPIKE_NAVIGATOR_MODE', 'SPIKE_NAVIGATOR_MODEL']) {
     savedEnv[k] = process.env[k];
     delete process.env[k];
   }
@@ -154,22 +154,22 @@ const png = Buffer.from('fakepng');
     check('migration is rewritten to disk (navigator)', onDisk.navigator?.provider === 'nano');
 
     // env still overrides the (migrated) settings-store value.
-    process.env.QA_PLANNER_PROVIDER = 'glm';
-    process.env.QA_PLANNER_MODE = 'api';
+    process.env.SPIKE_PLANNER_PROVIDER = 'glm';
+    process.env.SPIKE_PLANNER_MODE = 'api';
     const envOverridden = loadConfig();
-    check('env (QA_PLANNER_PROVIDER/MODE) overrides the settings store', envOverridden.planner.provider === 'glm' && envOverridden.planner.mode === 'api');
-    delete process.env.QA_PLANNER_PROVIDER;
-    delete process.env.QA_PLANNER_MODE;
+    check('env (SPIKE_PLANNER_PROVIDER/MODE) overrides the settings store', envOverridden.planner.provider === 'glm' && envOverridden.planner.mode === 'api');
+    delete process.env.SPIKE_PLANNER_PROVIDER;
+    delete process.env.SPIKE_PLANNER_MODE;
 
-    // a LONE QA_*_MODEL env var partial-merges onto provider/mode rather than
+    // a LONE SPIKE_*_MODEL env var partial-merges onto provider/mode rather than
     // wiping them back to config.ts's raw DEFAULTS.
-    process.env.QA_PLANNER_MODEL = 'claude-opus-9';
+    process.env.SPIKE_PLANNER_MODEL = 'claude-opus-9';
     const partial = loadConfig();
     check(
-      'a lone QA_PLANNER_MODEL merges onto the migrated provider/mode (no wipe)',
+      'a lone SPIKE_PLANNER_MODEL merges onto the migrated provider/mode (no wipe)',
       partial.planner.provider === 'claude' && partial.planner.mode === 'cli' && partial.planner.model === 'claude-opus-9',
     );
-    delete process.env.QA_PLANNER_MODEL;
+    delete process.env.SPIKE_PLANNER_MODEL;
   } finally {
     if (savedLocalAppData === undefined) delete process.env.LOCALAPPDATA;
     else process.env.LOCALAPPDATA = savedLocalAppData;

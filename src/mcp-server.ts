@@ -6,6 +6,7 @@
  * Register in a coding agent as: command "spike", args ["mcp"]
  * (or: npx tsx src/mcp-server.ts during development). */
 
+import './env-compat.js'; // aliases legacy QA_* env vars onto SPIKE_* — must precede any env read
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';

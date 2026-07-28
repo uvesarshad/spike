@@ -87,7 +87,7 @@ New shape (reuses all existing execute/drain/evidence/secret/read-only-guard/aud
   - **Card 1 "Navigator — does each step (cheap)":** provider select incl. Nano; model; key row (per provider). Copy: "The fast, cheap model that clicks, types, and looks at the page every step."
   - **Card 2 "Brain — makes the plan (smart)":** provider select excl. Nano; model; key row. Copy: "The smarter model, called only to plan and when the navigator gets stuck — so it barely affects cost."
 - Config protocol (panel ↔ sw.js): `config-get`/`config-set` payloads carry BOTH `planner` and `navigator`; `renderSettings`/`refreshSettingsVisibility` handle both cards; per-card `selectedProvider/mode/model`. Keys stay keyed by provider in `qaKeys` (two cards sharing a provider share the key). `runLiteFromPanel` passes both selections; validate BOTH required keys are present (nano needs none).
-- Daemon parity: `src/vibe/service.ts` `vibe.config.get/set` + `src/config.ts` (`QA_NAVIGATOR_*` env) + `SettingsStore` handle the `navigator` field; `buildLiteConfig` in lite-engine adds it too.
+- Daemon parity: `src/vibe/service.ts` `vibe.config.get/set` + `src/config.ts` (`SPIKE_NAVIGATOR_*` env) + `SettingsStore` handle the `navigator` field; `buildLiteConfig` in lite-engine adds it too.
 
 ## Files
 **Modify:** `src/router/adapter.ts`, `src/router/model-router.ts`, `src/driver/loop.ts`, `src/driver/actions.ts`, `src/driver/planner-prompt.ts`, `src/vibe/settings-data.ts`, `src/vibe/settings.ts`, `src/vibe/service.ts`, `src/config.ts`, `src/engine.ts`, `src/extension/lite-engine.ts`, `src/report/report.ts`, `extension/sw.js`, `extension/panel.html`, `extension/panel.js`, `extension/panel.css`.

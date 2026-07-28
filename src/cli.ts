@@ -1,6 +1,7 @@
 /* `spike` CLI — thin wrapper over the engine; the MCP server shares the same core.
  * Subcommands grow with the milestones: run, mcp, nano, fixture. */
 
+import './env-compat.js'; // aliases legacy QA_* env vars onto SPIKE_* — must precede any env read
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
@@ -370,10 +371,10 @@ program
 program
   .command('dashboard')
   .description('serve a local read-only dashboard over artifacts/<runId> reports — model_trace, token accounting, cache/replay stats; $0, no backend, no external calls')
-  .option('--port <n>', 'HTTP port (default 9420, or QA_DASHBOARD_PORT)', (v) => parseInt(v, 10))
+  .option('--port <n>', 'HTTP port (default 9420, or SPIKE_DASHBOARD_PORT)', (v) => parseInt(v, 10))
   .action((opts: { port?: number }) => {
     const cfg = loadConfig();
-    const port = opts.port ?? Number(process.env.QA_DASHBOARD_PORT ?? 9420);
+    const port = opts.port ?? Number(process.env.SPIKE_DASHBOARD_PORT ?? 9420);
     startDashboard(cfg.artifactsDir, port);
     console.log(`dashboard on http://localhost:${port} — reading ${cfg.artifactsDir}`);
     // stay alive; the http.Server owns the process from here

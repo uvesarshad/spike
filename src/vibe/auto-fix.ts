@@ -149,7 +149,7 @@ export async function dispatchFix(report: Report, opts: DispatchOptions = {}): P
     if (!detected) {
       throw new Error(
         'No fix agent found. Install Claude Code / Codex / Gemini CLI on PATH, or set ' +
-          'config.fixAgentBin (env QA_FIX_AGENT_BIN) + config.fixAgentArgs (env QA_FIX_AGENT_ARGS, ' +
+          'config.fixAgentBin (env SPIKE_FIX_AGENT_BIN) + config.fixAgentArgs (env SPIKE_FIX_AGENT_ARGS, ' +
           `a JSON array using "${PROMPT_TOKEN}" where the prompt goes).`,
       );
     }

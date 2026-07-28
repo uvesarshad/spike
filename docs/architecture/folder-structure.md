@@ -39,7 +39,7 @@ src/ports/ — Browser and Nano port interfaces and implementations. browser-por
 
 src/router/ — Model ladder. adapter.ts defines the ModelAdapter interface; model-router.ts walks the ladder and builds the model_trace; gateway.ts normalizes OpenAI-compatible gateway endpoints; verdict.ts defines the NanoVerdict schema. adapters/ holds one file per rung: nano.ts, google-cli.ts, cli-planner.ts, byok-gemini.ts, anthropic.ts, openai-compatible.ts, ollama.ts.
 
-src/telemetry/ — Process-wide span tracer, always instrumented but zero-config no-op by default. index.ts re-exports the package; tracer.ts defines TelemetrySpan/TelemetryTracer and createTelemetryTracer(); redaction.ts strips API keys, bearer tokens, cookies, passwords, secret placeholders, known secret values, and query/userinfo off URLs before a span leaves the process; otlp-exporter.ts is the only way a span ever leaves the machine (OTLP/HTTP JSON, opt-in via QA_TELEMETRY_EXPORTER=otlp — serves local Tempo/Alloy, Grafana Cloud, or Axiom); env.ts builds and memoizes the default tracer from env vars (getDefaultTracer(), resetDefaultTracer()).
+src/telemetry/ — Process-wide span tracer, always instrumented but zero-config no-op by default. index.ts re-exports the package; tracer.ts defines TelemetrySpan/TelemetryTracer and createTelemetryTracer(); redaction.ts strips API keys, bearer tokens, cookies, passwords, secret placeholders, known secret values, and query/userinfo off URLs before a span leaves the process; otlp-exporter.ts is the only way a span ever leaves the machine (OTLP/HTTP JSON, opt-in via SPIKE_TELEMETRY_EXPORTER=otlp — serves local Tempo/Alloy, Grafana Cloud, or Axiom); env.ts builds and memoizes the default tracer from env vars (getDefaultTracer(), resetDefaultTracer()).
 
 src/assertions/ — Assertion policy helpers. visual-policy.ts defines standalone visual verdict policies (`single-ladder`, `fail-on-disagreement`, `arbiter-on-disagreement`); policy.ts adapts those policies to ModelRouter and writes assertion_trace records for driver assertions.
 
@@ -71,11 +71,11 @@ src/vault/ — Credential storage. vault.ts reads/writes API keys; dpapi-key-pro
 
 src/clip/ — Screencast recording. screencast.ts starts/stops a GIF clip recorder using CDP Page.startScreencast; gifenc.d.ts provides TypeScript types.
 
-src/config.ts — Central config. Merges DEFAULTS → qa.config.json → SettingsStore → env vars → explicit overrides. Exports loadConfig() and QaConfig.
+src/config.ts — Central config. Merges DEFAULTS → spike.config.json → SettingsStore → env vars → explicit overrides. Exports loadConfig() and QaConfig.
 
 src/engine.ts — The single core orchestrator. Exports qaRun() and qaReplay(); both transports (CLI, MCP) call these. Also exports openBrowserSession() for no-model tests.
 
-src/cli.ts — CLI entrypoint. Uses commander to register subcommands: run, replay, fixture, nano, daemon, fix, mcp, secret, config, dashboard (hand-rolled, dependency-free localhost HTML view over artifacts/<runId>/report.json — model_trace, token accounting, cache/replay stats; port 9420 default, QA_DASHBOARD_PORT; defined inline in cli.ts, no separate module).
+src/cli.ts — CLI entrypoint. Uses commander to register subcommands: run, replay, fixture, nano, daemon, fix, mcp, secret, config, dashboard (hand-rolled, dependency-free localhost HTML view over artifacts/<runId>/report.json — model_trace, token accounting, cache/replay stats; port 9420 default, SPIKE_DASHBOARD_PORT; defined inline in cli.ts, no separate module).
 
 src/mcp-server.ts — MCP stdio server. Registers the qa_run tool and delegates to qaRun().
 

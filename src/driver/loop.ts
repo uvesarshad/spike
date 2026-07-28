@@ -1248,7 +1248,7 @@ export async function runDriverLoop(
       verdict = 'uncertain';
       reason =
         `read-only mode: ${readOnlyBlock} is not in allowedHosts — ` +
-        'add it via QA_ALLOWED_HOSTS or qa.config.json to allow interaction';
+        'add it via SPIKE_ALLOWED_HOSTS or spike.config.json to allow interaction';
       break;
     }
 

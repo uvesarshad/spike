@@ -48,7 +48,7 @@ Failure scenario: a page under test throws a crafted `console.error` containing 
 
 **A10 — OTLP telemetry redaction doesn't cover the two span attributes most likely to carry secrets**
 `src/engine.ts:365,474` puts the raw `task` string and full `url` into span attributes. `src/telemetry/redaction.ts:4-6` only strips `Bearer/Basic <token>` headers and `sk-…/sk-ant-…/ghp_…`-shaped keys; a key-name check doesn't fire because the attribute keys are literally `task`/`url`. `src/telemetry/env.ts:33-63` (`buildTracerFromEnv`) never supplies `secretValues` to the redactor either.
-Failure scenario: an operator opts into `QA_TELEMETRY_EXPORTER=otlp` for cost dashboards. A task like `"log in with test@x.com / Sup3rSecret! and checkout"` or a URL like `https://app.example.com/reset?token=<JWT>` ships verbatim to a third-party collector — neither form matches the Bearer/`sk-`/`ghp_` regexes. Opt-in by design, but incomplete once opted in.
+Failure scenario: an operator opts into `SPIKE_TELEMETRY_EXPORTER=otlp` for cost dashboards. A task like `"log in with test@x.com / Sup3rSecret! and checkout"` or a URL like `https://app.example.com/reset?token=<JWT>` ships verbatim to a third-party collector — neither form matches the Bearer/`sk-`/`ghp_` regexes. Opt-in by design, but incomplete once opted in.
 
 **A11 — Windows Scheduled Task autostart never bakes in the documented `NODE_OPTIONS=--use-system-ca` fix**
 `src/service/install-service.ts` — `installWindows()` (lines 87-117) builds its `/TR` command directly and never calls `serviceEnv()`; only `installMac()` (141) and `installLinux()` (222) do, despite the file's own header comment saying the service "bakes in" this env var specifically for AVG TLS interception on this machine.

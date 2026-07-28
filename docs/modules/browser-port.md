@@ -119,4 +119,4 @@ AGENT NOTE: During Nano model download, do NOT navigate the runner tab. Navigati
 - docs/architecture/data-flow.md — how the driver loop calls BrowserPort
 - docs/modules/engine.md — how CdpBrowser vs ExtensionBrowser is selected
 - docs/modules/vibe-mode.md — vibe mode uses ExtensionBrowser + BridgeServer
-- docs/infra/environment.md — QA_CDP_PORT, QA_RUNNER_PORT, QA_BRIDGE_PORT
+- docs/infra/environment.md — SPIKE_CDP_PORT, SPIKE_RUNNER_PORT, SPIKE_BRIDGE_PORT

@@ -1,8 +1,11 @@
 node_modules/
 dist/
+spike.config.json
 qa.config.json
 artifacts/
 generated-tests/
+.spike-action-cache/
+.qa-action-cache/
 *.log
 *.tsbuildinfo
 

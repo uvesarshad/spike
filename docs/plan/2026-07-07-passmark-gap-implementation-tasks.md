@@ -29,7 +29,7 @@ Canonical docs match the current planner/navigator implementation; the driver ha
   - Document `QaSettings.navigator`.
   - Confirm API keys remain Vault-only; runtime generated data should not be stored in SettingsStore.
 - [x] Update `docs/infra/environment.md`.
-  - Add `QA_NAVIGATOR_PROVIDER`, `QA_NAVIGATOR_MODE`, and `QA_NAVIGATOR_MODEL`.
+  - Add `SPIKE_NAVIGATOR_PROVIDER`, `SPIKE_NAVIGATOR_MODE`, and `SPIKE_NAVIGATOR_MODEL`.
   - Correct any stale references to single planner behavior.
 - [x] Update README/TODO stale claims.
   - Remove "Ollama stub" wording where it conflicts with `src/router/adapters/ollama.ts`.
@@ -189,7 +189,7 @@ Canonical docs match the current planner/navigator implementation; the driver ha
 ## Update Decision Tree Result
 
 - Runtime code changed: yes, Phases 1-7 changed BrowserPort actions, assertion policy routing, run data/extract, action cache, video-mode evidence, replay JSON output, telemetry, and gateway helpers.
-- Env vars changed: yes, `QA_ASSERTION_POLICY`, `QA_ACTION_CACHE`, and `QA_ACTION_CACHE_DIR` were added and documented in `docs/infra/environment.md`.
+- Env vars changed: yes, `SPIKE_ASSERTION_POLICY`, `SPIKE_ACTION_CACHE`, and `SPIKE_ACTION_CACHE_DIR` were added and documented in `docs/infra/environment.md`.
 - BrowserPort changed: yes, `hover`, `pressKey`, `selectOption`, `reload`, and `goBack` were added to all implementations.
 - Report contract changed: yes, full reports can include `assertion_trace`, `run_data`, `action_cache`, and per-step `video`; the slim five-field MCP response is unchanged.
 - Docs added: yes, this task list plus `docs/modules/action-cache.md`.
@@ -212,10 +212,10 @@ Implemented by three parallel Sonnet-5 lanes (driver/actions, config/router/mode
 - Pure-logic unit checks pass: v26 (9), v27 run-data/extract (21), v28 (16), v29 telemetry (25), v30 video (21), v31 (8), v32 script-runner (24), v25 providers (34), m4 router/config-drift (15), v7 vibe-service (19), v13 (32), v20 (17).
 - Live Chrome: m1/port-contract action parity (22) — upload/drag/blur/mouse/tabs exercised against real Chrome.
 - Phase 14 matcher verified in isolation (6 checks: match, near-miss, unrelated→null, port/domain hard-gate, empty dir).
-- Phase 8 video toggle wired end-to-end: `#setVideoAssert` panel checkbox → panel.js → sw.js/liteSetSettings → vibe.config.set/buildLiteConfig → QaSettings.videoAssertions → config.fromSettings → cfg.videoAssertions → engine → loop.ts video-verdict route (env `QA_VIDEO_ASSERTIONS` still wins).
+- Phase 8 video toggle wired end-to-end: `#setVideoAssert` panel checkbox → panel.js → sw.js/liteSetSettings → vibe.config.set/buildLiteConfig → QaSettings.videoAssertions → config.fromSettings → cfg.videoAssertions → engine → loop.ts video-verdict route (env `SPIKE_VIDEO_ASSERTIONS` still wins).
 
 Nuances (not gaps in the checklist, but worth recording):
-- The two full live-AI e2e suites (`e2e.recorder`, `e2e.run-fixture`) are ENV-GATED: they run real `qaRun()` AI passes needing model quota, and this machine has no BYOK key + a dead `gemini:cli`. Run them with a model configured, e.g. `QA_PLANNER_PROVIDER=claude QA_PLANNER_MODE=cli QA_NAVIGATOR_PROVIDER=claude QA_NAVIGATOR_MODE=cli npm run test:e2e`.
+- The two full live-AI e2e suites (`e2e.recorder`, `e2e.run-fixture`) are ENV-GATED: they run real `qaRun()` AI passes needing model quota, and this machine has no BYOK key + a dead `gemini:cli`. Run them with a model configured, e.g. `SPIKE_PLANNER_PROVIDER=claude SPIKE_PLANNER_MODE=cli SPIKE_NAVIGATOR_PROVIDER=claude SPIKE_NAVIGATOR_MODE=cli npm run test:e2e`.
 - Phase 11 telemetry spans wrap the qa.run / driver-loop / replay boundaries (always-on, redacted, no-op sink by default) plus the Round-1 adapter-call instrumentation; per-individual-browser-action spans were intentionally not added (would require editing driver/router internals mid-parallel-build) and can be a follow-up.
 
 ## Round 2 - Decisions Locked (2026-07-09)
@@ -240,7 +240,7 @@ Goal: `assert_visual { mode: 'video' }` should route the recorded clip to a vide
   - Implement for at least one BYOK provider - Gemini Files API upload -> verdict is the natural first target; document Anthropic/OpenAI as screenshot-only if their frames path is not viable.
   - Leave `mode: 'screenshot'` and the no-video-adapter case exactly as today.
 - [x] Gate behind an explicit enable flag (it is costly).
-  - Config field `assertion.video: boolean` default `false` (`src/config.ts`) + env `QA_VIDEO_ASSERTIONS`.
+  - Config field `assertion.video: boolean` default `false` (`src/config.ts`) + env `SPIKE_VIDEO_ASSERTIONS`.
   - With the flag OFF, `mode: 'video'` does a safe screenshot fallback and writes a report note ("video assertion requested but disabled").
 - [x] Add the panel toggle.
   - Add an "Enable video assertions (paid vision, slower)" checkbox to the extension Settings (`src/vibe/settings.ts`, `src/vibe/settings-data.ts`, side panel), persisted in `QaSettings`, default unchecked, wired to the same config field.
@@ -305,7 +305,7 @@ Goal: persisted `settings.json` and code defaults must agree; no run resolves to
 - [x] Migrate persisted settings on load: if `planner` is `gemini:cli` (dead) or `navigator` is unset, migrate to current code defaults (brain -> `claude` CLI, navigator -> Nano) and rewrite (`src/config.ts`, `src/vibe/settings.ts`).
 - [x] Single source of truth: the code default and the checked-in `settings.json` must match; update the checked-in file.
 - [x] Startup warning if a resolved adapter is known-dead (Gemini free tier) with the recovery hint.
-- [x] Tests: extend `test/m4.router.ts` (or a new config test) - dead-planner settings migrate; env still overrides; a lone `QA_*_MODEL` partial-merge stays intact.
+- [x] Tests: extend `test/m4.router.ts` (or a new config test) - dead-planner settings migrate; env still overrides; a lone `SPIKE_*_MODEL` partial-merge stays intact.
 - [x] Docs: fix the "Navigator/brain pins" gotcha in `CLAUDE.md`, `docs/infra/environment.md`, and `docs/modules/vibe-mode.md` to reflect migration.
 
 ## Phase 14 - Pre-Run Replay Matcher

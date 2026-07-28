@@ -119,7 +119,7 @@ class MockExporter implements TelemetryExporter {
 /* ---------- Phase 11: getDefaultTracer() is env-driven and memoized ---------- */
 
 {
-  delete process.env.QA_TELEMETRY_EXPORTER;
+  delete process.env.SPIKE_TELEMETRY_EXPORTER;
   resetDefaultTracer();
   const before = defaultNoopExporter.exportCount;
   await getDefaultTracer().trace('qa.run', {}, async () => 1);

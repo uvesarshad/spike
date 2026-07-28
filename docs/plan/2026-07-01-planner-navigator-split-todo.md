@@ -26,7 +26,7 @@
 
 ## Phase D — Settings data + ladders + config ✅
 - [x] `settings-data.ts`: `QaSettings.navigator`; `DEFAULT_SETTINGS` (nav=nano/ondevice, brain=claude/api); role-aware `defaultModelFor`; `LITE_NAVIGATOR_PROVIDERS`; `PlannerMode` += `'ondevice'`.
-- [x] `settings.ts` migration merge; `config.ts` `QA_NAVIGATOR_*` env + load; `service.ts` config get/set carry navigator + per-provider nav/brain defaults.
+- [x] `settings.ts` migration merge; `config.ts` `SPIKE_NAVIGATOR_*` env + load; `service.ts` config get/set carry navigator + per-provider nav/brain defaults.
 - [x] `engine.ts` `buildLadder` + `lite-engine.ts` `buildLiteLadder`/`runLite`/`buildLiteConfig`: two pins (navigatorAdapter/plannerAdapter).
 
 ## Phase E — Nano action-picker adapter ✅
@@ -57,5 +57,5 @@
 
 ### Notes surfaced by the live runs (2026-07-03)
 - **Nano-navigator is rough** — guessed a URL instead of clicking a nav link and repeated a failing navigation before the brain caught it. Reinforces: run the `spikes/nano-nav/` GO/NO-GO before making Nano the un-caveated default; a cheap vision cloud navigator (Gemini Flash / Haiku) is the safer default. (Task #16.)
-- **External sites are read-only** (Tier-4 guard) — allow the host(s) via `QA_ALLOWED_HOSTS` (mind `mapleandsand.com`→`www.` redirect) and keep tasks non-destructive.
-- **Per-role env override** needed because saved `settings.json` still pins brain=`gemini:cli` (dead): `QA_PLANNER_PROVIDER/MODE`, `QA_NAVIGATOR_PROVIDER/MODE`.
+- **External sites are read-only** (Tier-4 guard) — allow the host(s) via `SPIKE_ALLOWED_HOSTS` (mind `mapleandsand.com`→`www.` redirect) and keep tasks non-destructive.
+- **Per-role env override** needed because saved `settings.json` still pins brain=`gemini:cli` (dead): `SPIKE_PLANNER_PROVIDER/MODE`, `SPIKE_NAVIGATOR_PROVIDER/MODE`.

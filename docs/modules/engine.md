@@ -33,7 +33,7 @@ Chrome stays up after session.close(). The QA tab closes; Chrome and the runner 
 
 openBrowserSession's deps and openSession's deps both gained an `allowedHosts?: string[]` field (0c278c0, 2026-07-18, extension-transport work). openBrowserSession forwards it straight into the transport constructor — CdpBrowser gets `{ allowedHosts: deps.allowedHosts }`, ExtensionBrowser gets it alongside `bridge`/`attachTabId`/`clientId`. Previously the Tier-4 `allowedHosts` guard was enforced only inside the driver loop; both ports now re-check it themselves at click/type time (A4, P0 defense-in-depth — see docs/spike-agent-product-doc.md's Tier-4 guardrails section), closing the gap where a raw CDP passthrough could bypass the driver-loop check entirely.
 
-AGENT NOTE: cfg.chromeProfile must be on a volume with 22 GB+ free. Gemini Nano is about 2 GB and Chrome refuses to load it otherwise. The daemon profile defaults to %LOCALAPPDATA%\qa-subagent-chrome-profile on Windows.
+AGENT NOTE: cfg.chromeProfile must be on a volume with 22 GB+ free. Gemini Nano is about 2 GB and Chrome refuses to load it otherwise. The daemon profile defaults to %LOCALAPPDATA%\spike-chrome-profile on Windows.
 
 ## Model Ladder Assembly
 
@@ -44,7 +44,7 @@ The engine now passes two role pins into ModelRouter:
 - cfg.navigator becomes navigatorAdapter and leads the plan-step ladder. This is the cheap per-step NAVIGATOR.
 - cfg.planner becomes plannerAdapter and leads the plan-goals ladder. This is the smarter BRAIN used for goal planning and re-planning.
 
-cfg.navigator and cfg.planner come from loadConfig(), which merges defaults, qa.config.json, SettingsStore, env, and explicit overrides. QA_NAVIGATOR_* controls the NAVIGATOR; QA_PLANNER_* controls the BRAIN.
+cfg.navigator and cfg.planner come from loadConfig(), which merges defaults, spike.config.json, SettingsStore, env, and explicit overrides. SPIKE_NAVIGATOR_* controls the NAVIGATOR; SPIKE_PLANNER_* controls the BRAIN.
 
 If a role selects nano, buildLadder() resolves the pin name to "nano". Nano can serve visual-verdict and plan-step when it is available, but it never serves plan-goals. If Nano is unavailable or the pin is not present in candidates for a role, ModelRouter falls through to the next available adapter.
 
@@ -66,7 +66,7 @@ qaRun() constructs ModelRouter with preferFreePlanner, navigatorAdapter, and pla
 
 Token accounting therefore lives in the model trace. Providers that expose prompt/output/total/cached token counts populate usage; Nano and local adapters may omit it.
 
-When cfg.actionCache is enabled, qaRun() constructs FileActionCache(cfg.actionCacheDir) and passes it to runDriverLoop(). The driver records action_cache metadata in the full report: enabled, hits, misses, stale, and stored. CLI `spike run` exposes `--action-cache` and `--no-action-cache` for one-run overrides; QA_ACTION_CACHE and QA_ACTION_CACHE_DIR cover automation defaults.
+When cfg.actionCache is enabled, qaRun() constructs FileActionCache(cfg.actionCacheDir) and passes it to runDriverLoop(). The driver records action_cache metadata in the full report: enabled, hits, misses, stale, and stored. CLI `spike run` exposes `--action-cache` and `--no-action-cache` for one-run overrides; SPIKE_ACTION_CACHE and SPIKE_ACTION_CACHE_DIR cover automation defaults.
 
 qaRun() also passes cfg.assertionPolicy into runDriverLoop(). The driver applies it to explicit assert_visual actions and the final finish:pass confirmation, writing assertion_trace entries in the full report while keeping the slim MCP response unchanged.
 

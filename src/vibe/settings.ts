@@ -3,7 +3,7 @@
  * per-machine path so the side panel (via the daemon) and the `spike config` CLI
  * share ONE source of truth. API KEYS NEVER LAND HERE — those go in the encrypted
  * Vault (src/vault/vault.ts). loadConfig() folds these settings in below env, so
- * QA_* env vars still win for power users / tests.
+ * SPIKE_* env vars still win for power users / tests.
  *
  * Types + pure data/helpers live in settings-data.ts (no node imports) so they
  * can ALSO be bundled into the browser (lite mode). Re-exported here so the

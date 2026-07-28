@@ -15,11 +15,11 @@ AGENT OWNER: src/vibe/settings.ts, src/vault/vault.ts, src/report/artifacts.ts
 
 Stores: QaSettings — planner (Brain PlannerSelection: provider, mode, model), navigator (Navigator PlannerSelection: provider, mode, model), debugMode ('prompt' | 'auto'), debugAgent ('auto' | 'claude' | 'codex' | 'gemini'), videoAssertions (boolean, opt-in `assert_visual { mode: 'video' }` routing; default false), readOnly (boolean, A5b P1 safety dry-run default; default true), spendCapUsd (number, A5a P1 safety optional per-run USD cap; default unset/no cap).
 
-readOnly and spendCapUsd (src/vibe/settings-data.ts) were added 2026-07-14 as part of the non-technical-onboarding safety work: readOnly gates every mutating action (click/type/upload_file/drag_and_drop/blur/mouse/open_tab/switch_tab/close_tab/script) behind an explicit opt-out in src/driver/loop.ts's `isMutatingAction` guard — layered on top of, not replacing, the Tier-4 allowedHosts guard; spendCapUsd aborts a run once the driver's best-effort paid-token spend proxy reaches the cap. Both mirror a same-named QaConfig field and QA_READ_ONLY / QA_SPEND_CAP_USD env var (env still wins) — see docs/infra/environment.md.
+readOnly and spendCapUsd (src/vibe/settings-data.ts) were added 2026-07-14 as part of the non-technical-onboarding safety work: readOnly gates every mutating action (click/type/upload_file/drag_and_drop/blur/mouse/open_tab/switch_tab/close_tab/script) behind an explicit opt-out in src/driver/loop.ts's `isMutatingAction` guard — layered on top of, not replacing, the Tier-4 allowedHosts guard; spendCapUsd aborts a run once the driver's best-effort paid-token spend proxy reaches the cap. Both mirror a same-named QaConfig field and SPIKE_READ_ONLY / SPIKE_SPEND_CAP_USD env var (env still wins) — see docs/infra/environment.md.
 
 File location: %LOCALAPPDATA%\qa-subagent\settings.json (Windows) or $HOME/qa-subagent/settings.json (other platforms).
 
-Read by: loadConfig() (src/config.ts) folds it in below env vars. The SettingsStore layer sits between qa.config.json and env vars in the precedence chain (low to high: defaults < qa.config.json < SettingsStore < env < explicit overrides).
+Read by: loadConfig() (src/config.ts) folds it in below env vars. The SettingsStore layer sits between spike.config.json and env vars in the precedence chain (low to high: defaults < spike.config.json < SettingsStore < env < explicit overrides).
 
 Written by: `spike config set` CLI command and the vibe.config.set bridge message from the extension side panel. write() merges a partial patch (planner and navigator are merged as nested objects, not replaced wholesale).
 
@@ -70,7 +70,7 @@ AGENT NOTE: artifacts/ and generated-tests/ are both git-ignored. Do not rely on
 
 ## Action Cache (src/cache/action-cache.ts)
 
-Stores: optional verified single-action records under cfg.actionCacheDir, laid out as `v1/<hash-prefix>/<hash>.json`. It is enabled only when cfg.actionCache is true, QA_ACTION_CACHE is set, or `spike run --action-cache` is passed.
+Stores: optional verified single-action records under cfg.actionCacheDir, laid out as `v1/<hash-prefix>/<hash>.json`. It is enabled only when cfg.actionCache is true, SPIKE_ACTION_CACHE is set, or `spike run --action-cache` is passed.
 
 Each record contains a normalized URL/goal/action/page-signature key and a redacted action value. Targeted values store role/name/nth/qaId locators, never snapshot nodeIds. Screenshots and reports are not stored in this cache.
 
@@ -106,4 +106,4 @@ src/email/ defines EmailProvider and FakeLocalEmailProvider for local signup/OTP
 - docs/modules/vibe-mode.md — SettingsStore is written by the side panel via vibe.config.set
 - docs/modules/engine.md — Vault and ArtifactStore are instantiated in qaRun
 - docs/modules/action-cache.md — action-cache keying, values, and integration notes
-- docs/infra/environment.md — QA_ARTIFACTS_DIR and other path overrides
+- docs/infra/environment.md — SPIKE_ARTIFACTS_DIR and other path overrides

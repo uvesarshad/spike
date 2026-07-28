@@ -66,7 +66,7 @@ Key design decisions:
 - **CDP logpoints** (the spike-B trick): when diagnosing, the daemon can inject `console.log`s at any file:line of a *running* page with **zero source edits** — `Debugger.setBreakpointByUrl` with a condition that logs and returns `false`. No dirty diffs, no cleanup, works on sites you don't own.
 - **CDP and extension transports**: the engine only talks to a `BrowserPort` interface. `CdpBrowser` drives a daemon-owned Chrome over `--remote-debugging-port`; `ExtensionBrowser` drives the user's existing Chrome tab through the MV3 bridge and `chrome.debugger`, so vibe mode can use real logged-in sessions without rewriting the engine.
 - **Evidence per step**: console and network buffers are drained between steps, so each step record carries exactly the fallout it caused.
-- **Durability features**: optional consensus visual assertions (`QA_ASSERTION_POLICY`), verified action reuse (`spike run --action-cache`), runtime data placeholders such as `{{run.email}}`, extraction into `{{run.*}}`, and `spike replay --all --json` for CI summaries.
+- **Durability features**: optional consensus visual assertions (`SPIKE_ASSERTION_POLICY`), verified action reuse (`spike run --action-cache`), runtime data placeholders such as `{{run.email}}`, extraction into `{{run.*}}`, and `spike replay --all --json` for CI summaries.
 
 ## Tech stack
 
@@ -134,7 +134,7 @@ Until then, use the local checkout (`npm install && npm run build`, then `node d
 
 The extension uses the `debugger` permission to drive the page over CDP; Chrome shows a banner while a debug session is attached.
 
-Prerequisites: Node 20+, desktop Chrome 138+ (148+ for multimodal Nano), and a planner. **Note:** the free Gemini CLI tier (Gemini Code Assist for individuals) ended 2026-06-18 — `gemini -p` now returns `IneligibleTierError`, so the default rung-1 planner no longer works for individuals. Use a BYOK key instead (`GEMINI_API_KEY`, or `spike config set --provider glm` + `spike secret set glm <key>`, or Anthropic/OpenAI), or the `claude`/`codex` CLI as the rung-1 planner. Without Nano the ladder starts at rung 1. Configuration via `qa.config.json` / env (`QA_CDP_PORT`, `QA_CHROME_PROFILE`, `QA_GOOGLE_CLI_BIN`…) — see `src/config.ts`.
+Prerequisites: Node 20+, desktop Chrome 138+ (148+ for multimodal Nano), and a planner. **Note:** the free Gemini CLI tier (Gemini Code Assist for individuals) ended 2026-06-18 — `gemini -p` now returns `IneligibleTierError`, so the default rung-1 planner no longer works for individuals. Use a BYOK key instead (`GEMINI_API_KEY`, or `spike config set --provider glm` + `spike secret set glm <key>`, or Anthropic/OpenAI), or the `claude`/`codex` CLI as the rung-1 planner. Without Nano the ladder starts at rung 1. Configuration via `spike.config.json` / env (`SPIKE_CDP_PORT`, `SPIKE_CHROME_PROFILE`, `SPIKE_GOOGLE_CLI_BIN`…) — see `src/config.ts`.
 
 Using a specific BYOK provider (rung 2) — e.g. **GLM-5.2 (z.ai)**:
 
@@ -176,7 +176,7 @@ Day-to-day development loop:
 5. MCP contract: `npx tsx test/m6.mcp.ts` (drives the **built** server over stdio).
 6. Spike regression: `cd spikes/cdp-logpoint && npm run spike` must keep passing.
 
-Conventions worth knowing: logpoint lines are located by content, never hardcoded; the engine imports interfaces, never concrete browsers; machine-specific settings live in gitignored `qa.config.json`; operational gotchas are recorded in [`CLAUDE.md`](CLAUDE.md).
+Conventions worth knowing: logpoint lines are located by content, never hardcoded; the engine imports interfaces, never concrete browsers; machine-specific settings live in gitignored `spike.config.json`; operational gotchas are recorded in [`CLAUDE.md`](CLAUDE.md).
 
 ## Timeline
 

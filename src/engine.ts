@@ -162,7 +162,7 @@ export async function openBrowserSession(
           `extension transport failed to connect within ~20s: ${
             e instanceof Error ? e.message : String(e)
           }. A Chrome may be running on CDP port ${cfg.cdpPort} WITHOUT the QA extension loaded — ` +
-            `close that Chrome (or set QA_CDP_PORT to a free port) so a fresh Chrome with the extension can launch.`,
+            `close that Chrome (or set SPIKE_CDP_PORT to a free port) so a fresh Chrome with the extension can launch.`,
         );
       }
 
@@ -331,7 +331,7 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; n
   };
 
   const byKey = new Map<string, ModelAdapter>();
-  // gemini keeps cfg.googleCliModel as its explicit base fallback (QA_GOOGLE_CLI_MODEL override).
+  // gemini keeps cfg.googleCliModel as its explicit base fallback (SPIKE_GOOGLE_CLI_MODEL override).
   const SLOTS: Array<[ProviderId, PlannerMode, string | undefined]> = [
     ['gemini', 'cli', cfg.googleCliModel],
     ['gemini', 'api', cfg.googleCliModel],

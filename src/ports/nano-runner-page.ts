@@ -157,7 +157,7 @@ export class NanoRunnerPage implements NanoPort {
     const free = freeGiBOnVolume(this.opts.profileDir);
     const storage =
       free !== null && free < 22
-        ? ` Likely cause: Gemini Nano needs 22 GB free on the volume holding the Chrome profile, and ${path.parse(path.resolve(this.opts.profileDir)).root} has only ${free.toFixed(1)} GB free. Move the profile (QA_CHROME_PROFILE) to a roomier volume.`
+        ? ` Likely cause: Gemini Nano needs 22 GB free on the volume holding the Chrome profile, and ${path.parse(path.resolve(this.opts.profileDir)).root} has only ${free.toFixed(1)} GB free. Move the profile (SPIKE_CHROME_PROFILE) to a roomier volume.`
         : ' Check chrome://on-device-internals for the exact gate (storage, GPU, or platform).';
     return `Gemini Nano reports 'unavailable'.${storage}`;
   }

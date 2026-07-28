@@ -13,7 +13,7 @@ AGENT OWNER: src/cache/action-cache.ts
 
 ## Persistence
 
-`FileActionCache(rootDir)` writes records under `rootDir/v1/<hash-prefix>/<hash>.json`. The root defaults to `./.qa-action-cache` and is controlled by cfg.actionCacheDir / QA_ACTION_CACHE_DIR. The cache is off by default; enable it with cfg.actionCache, QA_ACTION_CACHE, or `spike run --action-cache`.
+`FileActionCache(rootDir)` writes records under `rootDir/v1/<hash-prefix>/<hash>.json`. The root defaults to `./.spike-action-cache` and is controlled by cfg.actionCacheDir / SPIKE_ACTION_CACHE_DIR. The cache is off by default; enable it with cfg.actionCache, SPIKE_ACTION_CACHE, or `spike run --action-cache`.
 
 Record shape:
 - `key`: versioned normalized URL, normalized goal, redacted action intent, page signature, and hash id.
