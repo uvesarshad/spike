@@ -125,7 +125,8 @@ const png = Buffer.from('fakepng');
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-config-drift-'));
   process.env.LOCALAPPDATA = tmp;
-  const settingsPath = path.join(tmp, 'qa-subagent', 'settings.json');
+  // post-rename dir; `qa-subagent/` is migrated onto this by migrateLegacyPath (see test/v34).
+  const settingsPath = path.join(tmp, 'spike', 'settings.json');
 
   try {
     // a fresh machine (no settings.json at all) resolves the DAEMON's own

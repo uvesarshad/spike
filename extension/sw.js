@@ -117,7 +117,7 @@ let handshakeTimer = null;
 const attached = new Set();
 
 function log(...args) {
-  console.log('[qa-subagent:sw]', ...args);
+  console.log('[spike:sw]', ...args);
 }
 
 function send(obj) {
@@ -303,17 +303,52 @@ const localCdpListeners = new Set();
 /** provider id (panel) → chrome.storage key name (the vault CONTRACT name). */
 const LITE_KEY_NAME = { gemini: 'gemini', claude: 'anthropic', gpt: 'openai', openrouter: 'openrouter', glm: 'glm' };
 
+/* chrome.storage.local key names. The `qa*` pair is the pre-Spike naming, kept
+ * only so an already-installed extension doesn't lose its stored API keys and
+ * settings on upgrade — migrateLegacyStorage() moves them across once, then the
+ * old entries are gone. Drop the LEGACY_* constants and the migration at 1.0
+ * (same sweep as src/env-compat.ts). */
+const KEYS_STORAGE_KEY = 'spikeKeys';
+const SETTINGS_STORAGE_KEY = 'spikeSettings';
+const LEGACY_STORAGE_KEYS = [['qaKeys', KEYS_STORAGE_KEY], ['qaSettings', SETTINGS_STORAGE_KEY]];
+
 function storageGet(key) {
   return new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v && v[key])));
 }
 function storageSet(obj) {
   return new Promise((resolve) => chrome.storage.local.set(obj, () => resolve()));
 }
+function storageRemove(key) {
+  return new Promise((resolve) => chrome.storage.local.remove(key, () => resolve()));
+}
+
+/** Copy any pre-Spike storage entry onto its new name and delete the old one.
+ * A value already under the new name always wins (never clobbered). Idempotent
+ * and cheap, which matters because an MV3 worker restart re-runs it. */
+async function migrateLegacyStorage() {
+  for (const [oldKey, newKey] of LEGACY_STORAGE_KEYS) {
+    const legacy = await storageGet(oldKey);
+    if (legacy === undefined) continue;
+    if ((await storageGet(newKey)) === undefined) await storageSet({ [newKey]: legacy });
+    await storageRemove(oldKey);
+  }
+}
+
+/* Memoized so concurrent readers share one migration pass. Reset on worker
+ * restart, which is harmless — the migration is a no-op once it has run. */
+let legacyStorageMigration = null;
+function ensureStorageMigrated() {
+  legacyStorageMigration ??= migrateLegacyStorage().catch(() => { legacyStorageMigration = null; });
+  return legacyStorageMigration;
+}
+
 async function getKeys() {
-  return (await storageGet('qaKeys')) || {};
+  await ensureStorageMigrated();
+  return (await storageGet(KEYS_STORAGE_KEY)) || {};
 }
 async function getSettings() {
-  const s = (await storageGet('qaSettings')) || {};
+  await ensureStorageMigrated();
+  const s = (await storageGet(SETTINGS_STORAGE_KEY)) || {};
   return {
     planner: { ...DEFAULT_SETTINGS.planner, ...(s.planner || {}) },       // BRAIN role
     navigator: { ...DEFAULT_SETTINGS.navigator, ...(s.navigator || {}) }, // NAVIGATOR role
@@ -331,7 +366,7 @@ async function liteSetKey(provider, key) {
   if (!key) throw new Error('a non-empty key is required');
   const keys = await getKeys();
   keys[name] = String(key);
-  await storageSet({ qaKeys: keys });
+  await storageSet({ [KEYS_STORAGE_KEY]: keys });
 }
 async function liteClearKey(provider) {
   const name = LITE_KEY_NAME[provider];
@@ -339,7 +374,7 @@ async function liteClearKey(provider) {
   const keys = await getKeys();
   const had = name in keys;
   delete keys[name];
-  await storageSet({ qaKeys: keys });
+  await storageSet({ [KEYS_STORAGE_KEY]: keys });
   return had;
 }
 async function liteSetSettings(patch) {
@@ -359,7 +394,7 @@ async function liteSetSettings(patch) {
     planner: { ...cur.planner, ...(patch.planner || {}) },        // BRAIN role
     navigator: { ...cur.navigator, ...(patch.navigator || {}) },  // NAVIGATOR role
   };
-  await storageSet({ qaSettings: next });
+  await storageSet({ [SETTINGS_STORAGE_KEY]: next });
   return next;
 }
 

@@ -16,8 +16,29 @@
  * old prefix keep working through the rename. Deleting this file and its three
  * imports is the entire removal. */
 
+import fs from 'node:fs';
+
 const LEGACY_PREFIX = 'QA_';
 const PREFIX = 'SPIKE_';
+
+/** One-time on-disk migration for state dirs/files that were named `qa-*` before
+ * the rename (the SettingsStore dir, the secrets Vault dir). Moves `legacy` to
+ * `next` when `next` does not exist yet, so a user's settings and encrypted API
+ * keys survive the rename instead of silently reappearing as defaults.
+ *
+ * Returns the path the caller should use. Best-effort: if the move fails (locked
+ * file, read-only volume, cross-device) we fall back to the legacy path rather
+ * than losing access to real user data. Drop at 1.0 with the rest of this file. */
+export function migrateLegacyPath(legacy: string, next: string): string {
+  try {
+    if (fs.existsSync(next)) return next;
+    if (!fs.existsSync(legacy)) return next;
+    fs.renameSync(legacy, next);
+    return next;
+  } catch {
+    return fs.existsSync(legacy) ? legacy : next;
+  }
+}
 
 /** Aliases legacy QA_* vars onto SPIKE_*. Returns the names it bridged (for the
  * one-time notice and for tests). Idempotent. */

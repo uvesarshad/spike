@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DEFAULT_SETTINGS, defaultModelFor, isDeadPlannerSelection, isSafeModelId } from './settings-data.js';
+import { migrateLegacyPath } from '../env-compat.js';
 import type {
   ProviderId,
   PlannerMode,
@@ -27,7 +28,9 @@ export type { ProviderId, PlannerMode, ModelRole, DebugMode, DebugAgent, Planner
 
 function defaultSettingsPath(): string {
   const base = process.env.LOCALAPPDATA ?? process.env.HOME ?? '.';
-  return path.join(base, 'qa-subagent', 'settings.json');
+  // pre-Spike dir was `qa-subagent/` — moved once so existing settings survive.
+  const dir = migrateLegacyPath(path.join(base, 'qa-subagent'), path.join(base, 'spike'));
+  return path.join(dir, 'settings.json');
 }
 
 /** Daemon-only migration target for a dead/missing BRAIN pin (Phase 13, config

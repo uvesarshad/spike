@@ -22,6 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DpapiKeyProvider } from './dpapi-key-provider.js';
+import { migrateLegacyPath } from '../env-compat.js';
 
 const ALGO = 'aes-256-gcm';
 const KEY_BYTES = 32;
@@ -70,7 +71,8 @@ export class FileKeyProvider implements KeyProvider {
 
 function defaultVaultDir(): string {
   const base = process.env.LOCALAPPDATA ?? process.env.HOME ?? '.';
-  return path.join(base, 'qa-subagent-vault');
+  // pre-Spike dir was `qa-subagent-vault/` — moved once so stored API keys survive.
+  return migrateLegacyPath(path.join(base, 'qa-subagent-vault'), path.join(base, 'spike-vault'));
 }
 
 export interface VaultOptions {
