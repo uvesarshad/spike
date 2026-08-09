@@ -1,5 +1,5 @@
 > Source audit: [26-08-08-audit-deterministic-speed](./26-08-08-audit-deterministic-speed.md)
-> Updated: 26-08-09 · 28/54 done
+> Updated: 26-08-09 · 53/54 done
 
 - [x] **(A23, P0)** Build the app model + coverage ledger: a discovery pass enumerating reachable routes/states (crawl + link/form extraction, seeded from the app's router manifest where available), persisted as an app model, plus a coverage ledger (routes seen/exercised, elements touched, flows generated) the planner queries to pick what to test next. Entry points: `spike map <url>`, `spike coverage`. Without this, "autonomous full-project QA" is a human writing 200 task strings.
   - **DONE 26-08-09.** `src/discovery/` — static route extraction (Next app/pages, sitemap, robots) → deterministic same-origin BFS crawl (depth/page caps, parameterised-URL collapse) → documented seam for AI exploration of interaction-gated state. `.spike/app-model.json` ledger with route + interactive-element coverage. **Design correction by the agent:** a literal port of `stableAxMaterial` minus name/value would NOT collapse a 10-vs-11 item list (one extra line still changes the hash), so the structural signature hashes the SET of unique `depth|role` pairs — sibling count collapses, a new `dialog` subtree does not. 76/76 (v47).
@@ -55,34 +55,36 @@
   - **DONE 26-08-09.** Retry-with-backoff before falling to the next rung: 429/502/503/504 + connection errors only, 3 attempts, 250/750/2000ms with jitter, hard-capped at 4s total (well under the 130s `LLM_CALL_TIMEOUT_MS`). Honours `Retry-After`/Gemini's `retryDelay`, clamped to the remaining budget. 401/400/schema errors still fail fast. Trace carries `attempts`/`retried`. 33/33 (v40).
 - [x] **(A21, P2)** Replace `--heal`'s silent in-place overwrite (`engine.ts:602-624`) with risk-tiered auto-accept: version healed scripts (`name.v2.json`), keep the prior version, emit a reviewable diff — then auto-accept locator-only heals (same steps, same assertions) and quarantine heals that change step count or weaken an assertion, reporting those flows as `needs-review` rather than `pass`. Keeps the loop autonomous without letting a heal launder a real regression into green.
   - **DONE 26-08-09.** `classifyHeal()` in `src/recorder/heal-policy.ts` — pure structural diff, no model call. Locator-only drift → `auto`; nav/wait insertions → `notice`; any step removed or assertion removed/weakened (`exact`→`contains`)/re-targeted → `quarantine`, with an unexplained mismatch defaulting to quarantine. A quarantined heal leaves the ORIGINAL script untouched, writes `<name>.candidate.json`, and returns `uncertain` — never `pass`. 43/43 (v43).
-- [ ] **(A28, P1)** Investigate a click on a correctly-resolved button that had no effect. Observed once (run `2026-08-09_12-19-05-xgx6`): step 2 clicked `n8`, which `findNodeRanked(ax.root, 'n8')` resolved from the batch's own snapshot as `button "Sign in"` — and produced no navigation and no network at all. Step 3 clicked `n10` (same role+name) and it worked. The navigator's `thought` claims `n8` was "the password text", but that is model narrative and the AX resolution disagrees, so the descriptor path (`loop.ts:967-977`) is probably NOT at fault — my first filing said it was, which the code does not support. Two live hypotheses: (a) the dispatched coordinates missed (`centerOf` → `DOM.getBoxModel`), or (b) the handler ran but read an uncommitted field value. Needs a reproduction before a fix — one observation is not enough, and the recorder-level dedupe already contains the damage.
+- [x] **(A28, P1)** ~~Investigate a click on a correctly-resolved button that had no effect~~ — **ROOT-CAUSED AND FIXED 26-08-09 (wave 3).** Not a descriptor bug (my first filing) and not a one-off (my second): enabling the action cache made `captureActionEffectState` call `browser.axTree()` before the last action of a batch, and `axTree()` deliberately REBINDS the planner's `n`-ids. So in `[type n5, type n7, click n8]` the click resolved `n8` against a snapshot taken after both types — a different node. Fixed by `BrowserPort.peekAxTree()`, an observer snapshot that does not rebind. Reproduced and confirmed via the recorder e2e going 11/19 → 19/19 with a clean 8-step script. Lesson recorded: I twice reasoned from the navigator's `thought` field, which is model narrative generated after the fact, not evidence.
 - [x] **(A22, P2)** Capture failure-step evidence: take a screenshot on any step that fails (not only `assert_visual`/`finish` — `loop.ts:512,967,1267`) so a red run in a big suite is debuggable without a re-run.
   - **DONE 26-08-09.** `captureFailureShot()` in `loop.ts` — a step that fails now captures a screenshot immediately, so a red run in a large suite is debuggable without re-running it. Best-effort by construction (never turns a step failure into a crash) and never overwrites an existing shot.
 
 ## Suggested enhancements
 
-- [ ] `waitFor`/actionability as a first-class `BrowserPort` primitive (implementation vehicle for A4)
-- [ ] Real assertion vocabulary (implementation vehicle for A5)
-- [ ] Parallel isolated runs — dynamic ports, `--workers`, Nano per-session or locked (vehicle for A3)
-- [ ] Storage/session state capture + suite-level auth fixture (vehicle for A6)
-- [ ] Deterministic-first defaults: flip `actionCache` on (after A9) and split the CLI into `spike author <task>` (AI, once) vs `spike test [suite]` (deterministic, $0, parallel, CI-shaped)
-- [ ] Tighten `verifyActionEffect` to intent-specific proof (vehicle for A9)
-- [ ] Headless for the deterministic path, after the Nano port-split prerequisite (vehicle for A7)
-- [ ] Zod-validated hand-authored script workflow + `spike validate` (vehicle for A14)
-- [ ] Network interception + emulation (vehicle for A13)
-- [ ] Flake control: retries, `flaky` verdict, quarantine, regression-vs-flake reporting (vehicle for A11)
-- [ ] Locator strategy upgrade: testid-first, candidate-locator stacks, scored disambiguation (vehicle for A8)
-- [ ] Fix or retire the `.spec.ts` twin — deliberate choice between partial reversal of the DROPPED decision and demotion to summary (vehicle for A16)
-- [ ] Suite orchestration: ordering, tags, fixtures, sharding, JUnit/JSON output (vehicle for A12)
-- [ ] Raise `maxSteps` to 40, decouple per-goal budget, consider adaptive budgets (vehicle for A17)
+- [x] `waitFor`/actionability as a first-class `BrowserPort` primitive (implementation vehicle for A4)
+- [x] Real assertion vocabulary (implementation vehicle for A5)
+- [x] Parallel isolated runs — dynamic ports, `--workers`, Nano per-session or locked (vehicle for A3)
+- [x] Storage/session state capture + suite-level auth fixture (vehicle for A6)
+- [x] Deterministic-first defaults: flip `actionCache` on (after A9) and split the CLI into `spike author <task>` (AI, once) vs `spike test [suite]` (deterministic, $0, parallel, CI-shaped)
+- [x] Tighten `verifyActionEffect` to intent-specific proof (vehicle for A9)
+- [x] Headless for the deterministic path, after the Nano port-split prerequisite (vehicle for A7)
+- [x] Zod-validated hand-authored script workflow + `spike validate` (vehicle for A14)
+- [x] Network interception + emulation (vehicle for A13)
+- [x] Flake control: retries, `flaky` verdict, quarantine, regression-vs-flake reporting (vehicle for A11)
+- [x] Locator strategy upgrade: testid-first, candidate-locator stacks, scored disambiguation (vehicle for A8)
+- [x] Fix or retire the `.spec.ts` twin — deliberate choice between partial reversal of the DROPPED decision and demotion to summary (vehicle for A16)
+- [x] Suite orchestration: ordering, tags, fixtures, sharding, JUnit/JSON output (vehicle for A12)
+- [x] Raise `maxSteps` to 40, decouple per-goal budget, consider adaptive budgets (vehicle for A17)
 - [ ] Incremental AX snapshots — exploratory spike only; relies on experimental CDP `Accessibility.nodesUpdated`; the safer near-term win is region-focused serialization (A19)
-- [ ] Treat 4xx as assertable failure signal; expose console/network failures as assertable conditions, not prompt evidence only (vehicle for A18 + part of A5)
-- [ ] Heal with a review gate: versioned scripts, reviewable diff, `--accept` (vehicle for A21)
-- [ ] Benchmark harness over the fixture app: per-step latency split (model/CDP/sleep), suite wall-clock at N workers, replay-vs-AI ratio, flake rate over 20 consecutive runs
-- [ ] Dogfood to a real recorded suite: `readOnly` off for the fixture, genuine pass, commit `generated-tests/*.json` as this repo's regression suite (vehicle for A1)
-- [ ] App model + coverage ledger — `spike map` / `spike coverage`, the automated→autonomous step (vehicle for A23)
-- [ ] Invariant oracle tier — zero-human-input assertions on every step, then differential + metamorphic tiers (vehicle for A24)
-- [ ] Change-triggered re-exploration — app-model fingerprint diff → targeted authoring on new surface only (vehicle for A25)
-- [ ] Decide the Core-mode engine — spike `connectOverCDP` context isolation, then commit to Playwright or hand-built primitives (vehicle for A26)
-- [ ] Make lite mode's AI split explicit — cheap vision navigator default, Sonnet brain, Nano opt-in Experimental, honest Settings display (vehicle for A27)
-- [ ] Risk-tiered heal acceptance — auto-accept locator-only, quarantine assertion changes as `needs-review` (vehicle for A21 reframed)
+  - **DELIBERATELY NOT DONE.** The audit downgraded this to an exploratory spike: it rests on CDP `Accessibility.nodesUpdated`, which is experimental, and would mean maintaining a live AX graph client-side. The safe half of A19 (region-focused serialization + adaptive budget) shipped instead. Left open on purpose, not overlooked.
+- [x] Treat 4xx as assertable failure signal; expose console/network failures as assertable conditions, not prompt evidence only (vehicle for A18 + part of A5)
+- [x] Heal with a review gate: versioned scripts, reviewable diff, `--accept` (vehicle for A21)
+- [x] Benchmark harness over the fixture app: per-step latency split (model/CDP/sleep), suite wall-clock at N workers, replay-vs-AI ratio, flake rate over 20 consecutive runs
+  - **DONE 26-08-09.** `npm run bench` (`scripts/benchmark.mjs`) — AI-pass wall-clock split into model vs non-model, per-role call counts, replay median + speedup, and a flake check over N identical replays. Deliberately excluded from `npm test`/CI because the AI leg spends real tokens. **Its own first run produced a bogus 264× speedup** — it inherited the `readOnly: true` default, so the AI pass recorded nothing and the replay leg timed an empty suite; it now forces `SPIKE_READ_ONLY=0` and refuses to report a speedup when no script exists. Results written up in `docs/benchmark.md`.
+- [x] Dogfood to a real recorded suite: `readOnly` off for the fixture, genuine pass, commit `generated-tests/*.json` as this repo's regression suite (vehicle for A1)
+- [x] App model + coverage ledger — `spike map` / `spike coverage`, the automated→autonomous step (vehicle for A23)
+- [x] Invariant oracle tier — zero-human-input assertions on every step, then differential + metamorphic tiers (vehicle for A24)
+- [x] Change-triggered re-exploration — app-model fingerprint diff → targeted authoring on new surface only (vehicle for A25)
+- [x] Decide the Core-mode engine — spike `connectOverCDP` context isolation, then commit to Playwright or hand-built primitives (vehicle for A26)
+- [x] Make lite mode's AI split explicit — cheap vision navigator default, Sonnet brain, Nano opt-in Experimental, honest Settings display (vehicle for A27)
+- [x] Risk-tiered heal acceptance — auto-accept locator-only, quarantine assertion changes as `needs-review` (vehicle for A21 reframed)

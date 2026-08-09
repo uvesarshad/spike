@@ -140,3 +140,22 @@ AGENT AVOID: Do not randomize the fixture app's behavior. The e2e tests assert s
 - docs/infra/deployment.md - how to build before running m6
 - .github/workflows/ci.yml - the CI gate itself (A15)
 - scripts/run-tests.mjs - the aggregate runner and fast/browser bucket assignment (A15)
+
+## The AI-driven e2e suites are inherently non-deterministic
+
+`test/e2e.run-fixture.ts` and `test/e2e.recorder.ts` drive a real model. The
+same commit can produce 6/6 on one run and 5/6 on the next — observed
+2026-08-09, where the bug-on run correctly reported `fail` but reached its
+verdict via a visual assertion on the Checkout page instead of clicking
+"Place order", so the intentional TypeError never fired and the
+"captured a console/network error" check went red. Re-running the identical
+build passed 6/6.
+
+Practical consequence: **a single red run of these two suites is not a
+regression.** Re-run before investigating, and only treat a failure as real if
+it reproduces. This is the same property the product's own flake control
+(audit A11 — `retries`, the `flaky` marker, `.spike-quarantine.json`) exists to
+manage for users' suites; these two gates do not yet use it on themselves.
+
+The deterministic suites have no such caveat — `npm test` and the replay path
+are expected to be bit-stable, and a red there IS a regression.

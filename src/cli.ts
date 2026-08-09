@@ -14,6 +14,7 @@ import { slimReport, type Report } from './report/report.js';
 import { resolveSuite } from './suite/config.js';
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
 import { buildJUnitXml } from './suite/reporters.js';
+import { coverageReport, diffAppModel, discoverApp, emptyAppModel, loadAppModel, saveAppModel, type Fetched } from './discovery/index.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
 import { installService, uninstallService } from './service/install-service.js';
@@ -127,6 +128,110 @@ program
     console.log(JSON.stringify(slimReport(report), null, 2));
     if (!opts.json) console.log(`full report: ${report.evidence_paths[0]}`);
     process.exit(report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
+  });
+
+/* A23/A25: discovery + coverage. `map` answers "what does this app contain?"
+ * and `coverage` answers "what haven't we tested?" — the pair that separates
+ * autonomous QA from a human writing 200 task strings.
+ *
+ * The crawler takes an injected fetcher (see src/discovery/crawler.ts) so the
+ * module stays browser-agnostic and unit-testable. Here that is a plain HTTP
+ * fetch: it is $0, needs no Chrome, and reaches every link-reachable route.
+ * Interaction-gated state (modals, wizards) is deliberately NOT reached this
+ * way — discoverApp exposes a seam for an AI exploration pass, which is a
+ * separate, budgeted concern. */
+const httpFetcher = async (url: string): Promise<Fetched | null> => {
+  try {
+    const res = await fetch(url, { redirect: 'follow' });
+    const ct = res.headers.get('content-type') ?? '';
+    if (!ct.includes('html')) return { url: res.url || url, status: res.status, html: '' };
+    return { url: res.url || url, status: res.status, html: await res.text() };
+  } catch {
+    return null; // a dead end, not a crash — the crawler moves on
+  }
+};
+
+function collectAppDirFiles(root: string): { files: string[]; routerKind: 'app' | 'pages' } | undefined {
+  for (const [dir, routerKind] of [['app', 'app'], ['src/app', 'app'], ['pages', 'pages'], ['src/pages', 'pages']] as const) {
+    const abs = path.resolve(root, dir);
+    if (!fs.existsSync(abs)) continue;
+    const files: string[] = [];
+    const walk = (d: string) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p2 = path.join(d, e.name);
+        if (e.isDirectory()) walk(p2);
+        else files.push(path.relative(abs, p2));
+      }
+    };
+    walk(abs);
+    if (files.length) return { files, routerKind };
+  }
+  return undefined;
+}
+
+program
+  .command('map')
+  .description('discover the app: routes + states + interactive elements, into .spike/app-model.json ($0, no browser)')
+  .argument('<url>', 'seed URL — also fixes the same-origin crawl boundary')
+  .option('--max-depth <n>', 'link-hops to follow', (v) => parseInt(v, 10))
+  .option('--max-pages <n>', 'hard cap on pages fetched', (v) => parseInt(v, 10))
+  .option('--diff', 'compare against the stored model and print what changed (A25)', false)
+  .option('--json', 'machine-readable output', false)
+  .action(async (url: string, opts: { maxDepth?: number; maxPages?: number; diff: boolean; json: boolean }) => {
+    const root = process.cwd();
+    const previousModel = loadAppModel(root);
+    const src = collectAppDirFiles(root);
+    const model = await discoverApp({
+      baseUrl: url,
+      fetcher: httpFetcher,
+      ...(src && { appDirFiles: src.files, routerKind: src.routerKind }),
+      previousModel,
+      crawl: {
+        ...(opts.maxDepth !== undefined && { maxDepth: opts.maxDepth }),
+        ...(opts.maxPages !== undefined && { maxPages: opts.maxPages }),
+      },
+    });
+    saveAppModel(model, root);
+    const cov = coverageReport(model);
+    if (opts.diff) {
+      const d = diffAppModel(previousModel ?? emptyAppModel(url), model);
+      if (opts.json) {
+        console.log(JSON.stringify({ coverage: cov, diff: d }, null, 2));
+      } else {
+        console.log(`mapped ${cov.routes.total} route(s) — ${d.newRoutes.length} new, ${d.changedRoutes.length} changed, ${d.removedRoutes.length} removed`);
+        for (const e of d.prioritized.slice(0, 20)) console.log(`  ${e.kind.padEnd(9)} ${e.route}`);
+      }
+      process.exit(0);
+    }
+    if (opts.json) console.log(JSON.stringify({ coverage: cov }, null, 2));
+    else console.log(`mapped ${cov.routes.total} route(s), ${cov.interactiveElements.total} interactive element(s) → .spike/app-model.json`);
+    process.exit(0);
+  });
+
+program
+  .command('coverage')
+  .description('report what has and has NOT been tested, from .spike/app-model.json')
+  .option('--json', 'machine-readable output', false)
+  .action((opts: { json: boolean }) => {
+    const model = loadAppModel(process.cwd());
+    if (!model) {
+      console.error('no app model yet — run `spike map <url>` first');
+      process.exit(2);
+    }
+    const cov = coverageReport(model);
+    if (opts.json) {
+      console.log(JSON.stringify(cov, null, 2));
+      process.exit(0);
+    }
+    const pct = (n: number) => `${Math.round(n * 100)}%`;
+    console.log(`routes    ${cov.routes.exercised}/${cov.routes.total} exercised (${pct(cov.routes.ratio)})`);
+    console.log(`elements  ${cov.interactiveElements.touched}/${cov.interactiveElements.total} touched   (${pct(cov.interactiveElements.ratio)})`);
+    const untested = cov.perRoute.filter((r) => !r.exercised);
+    if (untested.length) {
+      console.log(`\nuntested routes (${untested.length}):`);
+      for (const r of untested.slice(0, 30)) console.log(`  ${r.route}`);
+    }
+    process.exit(0);
   });
 
 program

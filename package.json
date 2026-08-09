@@ -1,7 +1,7 @@
 {
   "name": "spike-agent",
   "version": "0.0.1",
-  "description": "Spike — browser QA/debug agent: a cheap-model ladder drives a real Chrome and returns a ~2K-token verdict to your coding agent.",
+  "description": "Spike \u2014 browser QA/debug agent: a cheap-model ladder drives a real Chrome and returns a ~2K-token verdict to your coding agent.",
   "type": "module",
   "license": "Apache-2.0",
   "private": false,
@@ -51,7 +51,8 @@
     "gen:icons": "tsx scripts/gen-icons.ts",
     "pack:extension": "tsx scripts/pack-extension.ts",
     "share": "npm run build && npm run pack:extension",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "bench": "node scripts/benchmark.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

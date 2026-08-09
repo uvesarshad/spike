@@ -54,3 +54,37 @@ Per-call trace (from `report.model_trace` — every run records this):
 - The free CLI quota is a default, not a foundation (Google's terms shift 2026-06-18); BYOK Flash at current pricing puts the cheap side around a cent per test, and Ollama is the $0 floor.
 - Latency: ~13-20s per planner call on the free CLI (process spawn + auth dominate). BYOK HTTP planning is several times faster. Replays of recorded runs skip the planner entirely (~9s, $0).
 - The comparison run used zero Nano calls; machines with the on-device model shift visual checks to $0/faster.
+
+## Speed baseline (reproducible)
+
+Run it yourself: `npm run bench` (add `--replays 5`, `--json`). It drives the
+local dogfood fixture, so it needs no external site — but the AI leg spends
+real model tokens, which is why it is deliberately NOT part of `npm test` or
+CI. Before v0.2 this file had a single cost figure and no speed baseline, so
+every performance claim in the audit was a one-off nobody could re-derive.
+
+Measured 2026-08-09 (macOS, brain `claude:opus` via CLI, Nano unavailable):
+
+| | |
+|---|---|
+| AI pass | pass, 8 steps, **76.7s** wall |
+| — model latency | 70.3s across 11 calls, avg 6,390ms → **91.6% of wall-clock** |
+| — calls by role | `plan-goals`=1 · `plan-step`=9 · `visual-verdict`=1 |
+| Deterministic replay | median **17.5s** over 3 runs → **4.4× faster** |
+| Flake | stable, 3/3 pass |
+
+Two things worth reading off this:
+
+- **The two-tier split works as designed.** One brain call planned the goals;
+  nine cheap navigator calls drove the steps. Brain cost is O(escalations + 1),
+  not O(steps) — that is the whole cost lever, and it is now measured rather
+  than asserted.
+- **The 4.4× is honest and lower than the in-process figure.** `npm run bench`
+  times a full CLI invocation: process start, Chrome connect, Nano probe, then
+  the flow. Measured inside an already-warm process (`e2e.recorder`), the same
+  replay lands at ~5s against an ~81s AI pass, i.e. ~16×. Both are real; they
+  answer different questions. Quote the 4.4× for "what does a CI step cost",
+  the ~16× for "what does the driver loop cost".
+
+The gap between them is startup, which is also where a parallel suite wins:
+`--workers N` amortises it across flows rather than paying it per flow.
