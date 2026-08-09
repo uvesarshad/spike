@@ -29,6 +29,14 @@ export interface AxNode {
   children?: AxNode[];
 }
 
+/** A32: options forwarded to the AX serializer (see capture/axtree.ts's
+ * SerializeAxTreeOptions — mirrored here so BrowserPort stays free of a
+ * capture-layer import). */
+export interface AxTreeOptions {
+  focus?: { id?: string; role?: string; name?: string };
+  maxChars?: number;
+}
+
 export interface AxSnapshot {
   root: AxNode;
   /** Compact indented text handed to the planner (~800 tokens target). */
@@ -270,8 +278,13 @@ export interface BrowserPort {
   launch(): Promise<void>;
   navigate(url: string): Promise<void>;
   url(): Promise<string>;
-  /** Snapshot the accessibility tree; refreshes the nodeId map used by click/type. */
-  axTree(): Promise<AxSnapshot>;
+  /** Snapshot the accessibility tree; refreshes the nodeId map used by click/type.
+   *
+   * A32: `opts` optionally focuses the serialization on one region (A19). With
+   * no opts the output is byte-identical to before — every existing caller is
+   * unaffected. Implementations that cannot honour a focus hint may ignore it;
+   * the hint is an optimisation, never a correctness requirement. */
+  axTree(opts?: AxTreeOptions): Promise<AxSnapshot>;
   /** Snapshot WITHOUT rebinding the planner's `n7`-style ids.
    *
    * `axTree()` deliberately remaps ids on every call, because the planner

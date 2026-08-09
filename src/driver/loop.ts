@@ -491,6 +491,9 @@ export async function runDriverLoop(
   let stepIndex = 0; // running index across batches, bounded by maxSteps
   let lastBatchFirstSig: string | null = null; // for loop detection
   let lastSnapshotAx: AxSnapshot | null = null; // last tree text, for the uncertain-reason heuristic
+  /** A32: role+name of the most recent successfully-acted-on target — the
+   * anchor for a focused re-serialization when the tree overflows its budget. */
+  let lastTouchedTarget: { role: string; name?: string } | undefined;
   let done = false;
 
   // ---- the plan (two-tier split) ----
@@ -540,7 +543,21 @@ export async function runDriverLoop(
       return 'end';
     }
     brainEscalations++;
-    const ax = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
+    // A32: only ask for a focused serialization when the PREVIOUS snapshot
+    // actually hit the char budget. A19 built the capability; using it
+    // unconditionally would narrow the navigator's view on pages that fit
+    // fine, which is a regression, not an optimisation. When the tree did
+    // truncate, anchor on the region around the last thing we touched — that
+    // is where the next action almost certainly is, and it is the part blind
+    // truncation was most likely to have thrown away.
+    const focusHint =
+      lastSnapshotAx?.truncated && lastTouchedTarget
+        ? { focus: { role: lastTouchedTarget.role, ...(lastTouchedTarget.name && { name: lastTouchedTarget.name }) } }
+        : undefined;
+    const ax = await withTimeout(browser.axTree(focusHint), CDP_CALL_TIMEOUT_MS, 'axTree');
+    if (focusHint) {
+      onStep({ index: stepIndex, kind: 'plan', text: `page too large to serialize whole — focusing on ${focusHint.focus.role}${focusHint.focus.name ? ` "${focusHint.focus.name}"` : ''}` });
+    }
     lastSnapshotAx = ax;
     const nowUrl = await browser.url();
     onStep({ index: stepIndex, kind: 'plan', text: `Stuck — asking the planner: ${failure.slice(0, 80)}` });
@@ -958,6 +975,7 @@ export async function runDriverLoop(
         console: [],
         network: [],
         ts: Date.now(),
+        ...(batchUrl && { url: batchUrl }),
       };
       // remember WHAT the action touches (role+name) — this is what makes the
       // run replayable later; nodeIds die with the snapshot. `extract`'s nodeId
@@ -1250,6 +1268,7 @@ export async function runDriverLoop(
       record.network = browser.drainNetwork();
       await collectInvariants(browser, record);
       await captureFailureShot(browser, artifacts, record);
+      if (record.ok && record.target) lastTouchedTarget = { role: record.target.role, ...(record.target.name && { name: record.target.name }) };
 
       if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {

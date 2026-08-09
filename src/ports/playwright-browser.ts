@@ -58,6 +58,7 @@ import {
   createNetworkIdleTracker,
   hostOfUrl,
   type AxSnapshot,
+  type AxTreeOptions,
   type BrowserPort,
   type ConsoleEntry,
   type LogpointSpec,
@@ -408,8 +409,8 @@ export class PlaywrightBrowser implements BrowserPort {
 
   /* -------------------------- a11y tree -------------------------- */
 
-  async axTree(): Promise<AxSnapshot> {
-    const { snapshot, nodeMap } = await snapshotAxTree(this.c);
+  async axTree(opts?: AxTreeOptions): Promise<AxSnapshot> {
+    const { snapshot, nodeMap } = await snapshotAxTree(this.c, opts);
     this.nodeMap = nodeMap;
     return snapshot;
   }

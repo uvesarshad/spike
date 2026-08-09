@@ -151,6 +151,12 @@ export interface QaConfig {
    * not a replacement: even an allowed host's mutating actions are skipped
    * while this is true. Defaults to true (mirrors DEFAULT_SETTINGS.readOnly). */
   readOnly: boolean;
+  /** A30 (A24 Tier 1): capture a per-flow baseline (AX shape + network shape)
+   * at the end of a run and, when one already exists, diff against it. Default
+   * FALSE: a baseline that nobody blessed will flag every intentional UI change
+   * as a difference, so this must be opted into per project. Off = today's
+   * behaviour exactly. */
+  differential: boolean;
   /** A5a (P1) safety: optional per-run spend cap in USD. undefined = no cap
    * (default). Precise USD isn't derivable (no per-adapter pricing table), so
    * the driver enforces this against a best-available proxy — see
@@ -206,6 +212,7 @@ const DEFAULTS: QaConfig = {
   videoAssertions: false,
   // A5b: safe by default (mirrors DEFAULT_SETTINGS.readOnly).
   readOnly: true,
+  differential: false,
   // spendCapUsd intentionally absent — undefined/OFF is the default.
   preferFreePlanner: false,
   // BRAIN default: claude CLI — the daemon HAS cli rungs and the former gemini:cli
@@ -310,6 +317,7 @@ function fromEnv(): Partial<QaConfig> {
     out.assertionPolicy = e.SPIKE_ASSERTION_POLICY as AssertionPolicy;
   }
   if (e.SPIKE_VIDEO_ASSERTIONS) out.videoAssertions = e.SPIKE_VIDEO_ASSERTIONS !== '0' && e.SPIKE_VIDEO_ASSERTIONS !== 'false';
+  if (e.SPIKE_DIFFERENTIAL) out.differential = e.SPIKE_DIFFERENTIAL !== '0' && e.SPIKE_DIFFERENTIAL !== 'false';
   if (e.SPIKE_READ_ONLY) out.readOnly = e.SPIKE_READ_ONLY !== '0' && e.SPIKE_READ_ONLY !== 'false';
   if (e.SPIKE_SPEND_CAP_USD) {
     const n = Number(e.SPIKE_SPEND_CAP_USD);

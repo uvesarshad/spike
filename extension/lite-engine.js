@@ -11874,6 +11874,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
   let stepIndex = 0;
   let lastBatchFirstSig = null;
   let lastSnapshotAx = null;
+  let lastTouchedTarget;
   let done = false;
   let goals = [];
   let currentGoal = 0;
@@ -11899,7 +11900,11 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       return "end";
     }
     brainEscalations++;
-    const ax = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, "axTree");
+    const focusHint = lastSnapshotAx?.truncated && lastTouchedTarget ? { focus: { role: lastTouchedTarget.role, ...lastTouchedTarget.name && { name: lastTouchedTarget.name } } } : void 0;
+    const ax = await withTimeout(browser.axTree(focusHint), CDP_CALL_TIMEOUT_MS, "axTree");
+    if (focusHint) {
+      onStep({ index: stepIndex, kind: "plan", text: `page too large to serialize whole \u2014 focusing on ${focusHint.focus.role}${focusHint.focus.name ? ` "${focusHint.focus.name}"` : ""}` });
+    }
     lastSnapshotAx = ax;
     const nowUrl = await browser.url();
     onStep({ index: stepIndex, kind: "plan", text: `Stuck \u2014 asking the planner: ${failure.slice(0, 80)}` });
@@ -12239,7 +12244,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         ok: true,
         console: [],
         network: [],
-        ts: Date.now()
+        ts: Date.now(),
+        ...batchUrl && { url: batchUrl }
       };
       if ("nodeId" in action && typeof action.nodeId === "string") {
         const found = findNodeRanked(ax.root, action.nodeId);
@@ -12458,6 +12464,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       record.network = browser.drainNetwork();
       await collectInvariants(browser, record);
       await captureFailureShot(browser, artifacts, record);
+      if (record.ok && record.target) lastTouchedTarget = { role: record.target.role, ...record.target.name && { name: record.target.name } };
       if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {
           const cacheAfter = await captureActionEffectState(browser);

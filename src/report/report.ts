@@ -37,6 +37,11 @@ export interface StepRecord {
   target?: StepTarget;
   ok: boolean;
   error?: string;
+  /** A29: the page URL this step acted on. Evidence in its own right (a
+   * multi-route flow was previously unattributable from the report alone), and
+   * the join key the coverage ledger needs to mark the RIGHT route as
+   * exercised — `report.url` is only the run's seed. */
+  url?: string;
   console: ConsoleEntry[];
   network: NetworkEntry[];
   /** A24 Tier-0 oracle: deterministic invariant violations observed after this
@@ -160,6 +165,26 @@ export interface Report {
   /** A21: set only on a `qaReplay` result that went through `--heal`'s
    * classification step. See `HealReview` for what each tier means. */
   healReview?: HealReview;
+  /** A30 (A24 Tier 1): the differential comparison against this flow's stored
+   * baseline, when one existed. Absent on the first run of a flow (the baseline
+   * is created instead) and when differential mode is off. Evidence only — like
+   * the Tier-0 invariants, it does NOT decide the verdict until it has been
+   * dogfooded long enough to know its false-positive rate on real UI churn. */
+  /** A33 (A24 Tier 2): metamorphic relations that the app's shape SUGGESTS are
+   * checkable here (a cart badge implies add-item-increments-count, a paginator
+   * implies pages-are-disjoint). Suggestions only, and deliberately so:
+   * EXECUTING a relation needs paired observations from two deliberately-varied
+   * runs, which the single-run driver cannot produce. Surfacing them is the
+   * input to the "AI proposes once, then it runs deterministically forever"
+   * workflow — recording the proposal is the honest half that exists today. */
+  metamorphicCandidates?: { relation: string; reason: string }[];
+  differential?: {
+    mode: 'baseline' | 'environment';
+    clean: boolean;
+    axChanges: number;
+    networkChanges: number;
+    detail: string[];
+  };
 }
 
 /** The verdict an MCP/CLI caller pays for, plus (A5a) a compact spend summary

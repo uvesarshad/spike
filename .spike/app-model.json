@@ -1,42 +1,56 @@
 {
   "version": 1,
   "baseUrl": "http://localhost:9401/login",
-  "generatedAt": "2026-08-09T17:08:26.949Z",
+  "generatedAt": "2026-08-09T17:59:01.769Z",
   "routes": [
     {
       "route": "http://localhost:9401/login",
       "source": "crawl",
       "routePattern": "/login",
-      "discoveredAt": "2026-08-09T17:08:11.689Z",
-      "exercised": false,
+      "discoveredAt": "2026-08-09T17:59:01.769Z",
+      "exercised": true,
       "states": [
         {
           "structuralSignature": "d2675d1813ec7a412e23d9b2dbabd7b0d8d32719779811a0a8317e74610a7f62",
-          "firstSeenAt": "2026-08-09T17:08:11.689Z",
-          "lastSeenAt": "2026-08-09T17:08:26.949Z",
+          "firstSeenAt": "2026-08-09T17:59:01.769Z",
+          "lastSeenAt": "2026-08-09T17:59:01.769Z",
           "elements": [
             {
               "role": "textbox",
               "name": "email",
-              "discoveredAt": "2026-08-09T17:08:11.689Z",
-              "coveredByScripts": []
+              "discoveredAt": "2026-08-09T17:59:01.769Z",
+              "coveredByScripts": [
+                "Log in as test@test.com with password pw, add the Widget to "
+              ],
+              "touchedAt": "2026-08-09T18:14:07.512Z"
             },
             {
               "role": "textbox",
               "name": "password",
-              "discoveredAt": "2026-08-09T17:08:11.689Z",
-              "coveredByScripts": []
+              "discoveredAt": "2026-08-09T17:59:01.769Z",
+              "coveredByScripts": [
+                "Log in as test@test.com with password pw, add the Widget to "
+              ],
+              "touchedAt": "2026-08-09T18:14:07.512Z"
             },
             {
               "role": "button",
               "name": "Sign in",
-              "discoveredAt": "2026-08-09T17:08:11.689Z",
-              "coveredByScripts": []
+              "discoveredAt": "2026-08-09T17:59:01.769Z",
+              "coveredByScripts": [
+                "Log in as test@test.com with password pw",
+                "Log in as test@test.com with password pw, add the Widget to "
+              ],
+              "touchedAt": "2026-08-09T18:14:07.512Z"
             }
           ]
         }
       ],
-      "coveredByScripts": []
+      "coveredByScripts": [
+        "Log in as test@test.com with password pw",
+        "Log in as test@test.com with password pw, add the Widget to "
+      ],
+      "lastExercisedAt": "2026-08-09T18:14:07.512Z"
     }
   ]
 }

@@ -1,5 +1,5 @@
 > Source audit: [26-08-08-audit-deterministic-speed](./26-08-08-audit-deterministic-speed.md)
-> Updated: 26-08-09 · 53/54 done
+> Updated: 26-08-09 · 58/59 done
 
 - [x] **(A23, P0)** Build the app model + coverage ledger: a discovery pass enumerating reachable routes/states (crawl + link/form extraction, seeded from the app's router manifest where available), persisted as an app model, plus a coverage ledger (routes seen/exercised, elements touched, flows generated) the planner queries to pick what to test next. Entry points: `spike map <url>`, `spike coverage`. Without this, "autonomous full-project QA" is a human writing 200 task strings.
   - **DONE 26-08-09.** `src/discovery/` — static route extraction (Next app/pages, sitemap, robots) → deterministic same-origin BFS crawl (depth/page caps, parameterised-URL collapse) → documented seam for AI exploration of interaction-gated state. `.spike/app-model.json` ledger with route + interactive-element coverage. **Design correction by the agent:** a literal port of `stableAxMaterial` minus name/value would NOT collapse a 10-vs-11 item list (one extra line still changes the hash), so the structural signature hashes the SET of unique `depth|role` pairs — sibling count collapses, a new `dialog` subtree does not. 76/76 (v47).
@@ -58,6 +58,28 @@
 - [x] **(A28, P1)** ~~Investigate a click on a correctly-resolved button that had no effect~~ — **ROOT-CAUSED AND FIXED 26-08-09 (wave 3).** Not a descriptor bug (my first filing) and not a one-off (my second): enabling the action cache made `captureActionEffectState` call `browser.axTree()` before the last action of a batch, and `axTree()` deliberately REBINDS the planner's `n`-ids. So in `[type n5, type n7, click n8]` the click resolved `n8` against a snapshot taken after both types — a different node. Fixed by `BrowserPort.peekAxTree()`, an observer snapshot that does not rebind. Reproduced and confirmed via the recorder e2e going 11/19 → 19/19 with a clean 8-step script. Lesson recorded: I twice reasoned from the navigator's `thought` field, which is model narrative generated after the fact, not evidence.
 - [x] **(A22, P2)** Capture failure-step evidence: take a screenshot on any step that fails (not only `assert_visual`/`finish` — `loop.ts:512,967,1267`) so a red run in a big suite is debuggable without a re-run.
   - **DONE 26-08-09.** `captureFailureShot()` in `loop.ts` — a step that fails now captures a screenshot immediately, so a red run in a large suite is debuggable without re-running it. Best-effort by construction (never turns a step failure into a crash) and never overwrites an existing shot.
+
+
+## Integration gaps (found 26-08-09 while auditing what is actually wired)
+
+Each of these shipped as a tested library that **nothing in a live run calls**.
+The unit tests pass and the feature does not exist end-to-end. Verified by
+grepping for each symbol outside its own module.
+
+- [x] **(A29, P0)** Coverage never updates. `markRouteExercised`/`markElementTouched` (`src/discovery/app-model.ts`) have ZERO callers, so the ledger is written once by `spike map` and never touched again — `spike coverage` will report 0 exercised forever, and A23's headline question ("what haven't we tested?") is answered wrongly rather than not at all. Wire the driver loop to mark the route + elements it touches per step.
+  - **DONE 26-08-09.** `src/discovery/record-coverage.ts` + engine write-back on EVERY verdict (a failing run still exercised what it reached). Added `StepRecord.url` so touches attribute to the right route, not just the run's seed. Verified end-to-end on the fixture: coverage moved 0/1 → 1/1 routes. **Two bugs found while proving it:** (1) discovery is HTML-based and names inputs from `id` (`email`) while runs are AX-based and name them from `<label>` (`Email`), so exact matching touched 1 of 3 elements — now case/whitespace-insensitive; (2) my own first fix matched fuzzily but then passed the STEP's spelling to `markElementTouched`, which matches exactly, so it found the element and marked nothing. 17/17 (v51).
+- [x] **(A30, P1)** The differential oracle (A24 Tier 1) is unreferenced. `diffAxStructure`/`diffNetworkShape`/`compareToBaseline`/`compareEnvironments` are never called; no run captures or compares a baseline. Needs a capture point at run end and a compare-on-next-run path, plus a CLI surface for `bless`.
+  - **DONE 26-08-09.** Opt-in `differential` config (`SPIKE_DIFFERENTIAL=1`, default off — an unblessed baseline flags every intentional UI change). First run of a flow writes `.spike/baselines/<flow>.json`; later runs diff AX shape + network shape and attach `report.differential`. Evidence only, never a verdict — same reasoning as the Tier-0 invariants. New `spike bless [flow] [--list]` blesses what is ALREADY stored rather than re-driving the app, because "I reviewed this diff" is not the same as "whatever the site looks like now".
+- [x] **(A31, P1)** `retries` is unreachable from the suite. `qaReplay` accepts it, but `src/cli.ts`'s `replay --all` and `src/suite/runner.ts` never pass it — so A11's flake retry cannot be turned on for a suite, which is the only place it matters.
+  - **DONE 26-08-09.** `--retries <n>` on `replay`, threaded into both the single-script path and the suite `runOne`. Default unchanged (0).
+- [x] **(A32, P2)** A19's focus hint is unused. `serializeAxTree`'s `focus`/`maxChars` options are never supplied by `loop.ts`, so dense pages still truncate blind — the hallucination driver A19 exists to reduce.
+  - **DONE 26-08-09.** `BrowserPort.axTree(opts?)` forwards A19's focus hint. The loop supplies one ONLY when the previous snapshot actually truncated, anchored on the last successfully-touched target — using it unconditionally would narrow the navigator's view on pages that fit, which is a regression rather than an optimisation. Byte-identical when no hint is passed (v46 still green).
+- [x] **(A33, P2)** Metamorphic relations (A24 Tier 2) are unreferenced by design-for-now. Expected: the audit rated this research-flavoured. Listed so it is a decision, not an oversight.
+  - **DONE 26-08-09 (detection wired; execution deliberately not).** `detectRelationCandidates` now runs at the end of every run and records `report.metamorphicCandidates`. Executing a relation needs paired observations from two deliberately-varied runs, which the single-run driver cannot produce — so recording proposals is the honest half, and inventing a fake single-run check would not be.
+
+Standing design positions (NOT gaps — restated so they are not mistaken for one):
+- Tier-0 invariants are recorded as evidence and deliberately do **not** decide verdicts, until a green baseline exists to measure their false-positive rate against.
+- The `.spec.ts` twin was deliberately demoted to a reference translation rather than made runnable, to avoid re-opening the DROPPED Playwright-library decision.
 
 ## Suggested enhancements
 

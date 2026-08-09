@@ -14,6 +14,7 @@ import { slimReport, type Report } from './report/report.js';
 import { resolveSuite } from './suite/config.js';
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
 import { buildJUnitXml } from './suite/reporters.js';
+import { DEFAULT_BASELINE_DIR, blessBaseline } from './assertions/differential.js';
 import { coverageReport, diffAppModel, discoverApp, emptyAppModel, loadAppModel, saveAppModel, type Fetched } from './discovery/index.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
@@ -169,6 +170,52 @@ function collectAppDirFiles(root: string): { files: string[]; routerKind: 'app' 
   return undefined;
 }
 
+/* A30: the blessing half of the differential oracle. A baseline diff is only
+ * meaningful if someone can say "yes, that change was intentional" — otherwise
+ * every deliberate UI edit reads as a regression forever and the signal is
+ * abandoned. This is deliberately a separate, explicit human act: nothing in a
+ * run ever blesses a baseline for you.
+ *
+ * (The escape from needing this at all is comparing two ENVIRONMENTS rather
+ * than two points in time — see compareEnvironments in assertions/
+ * differential.ts, which needs no blessing because divergence itself is the
+ * signal.) */
+program
+  .command('bless')
+  .description('accept the CURRENT stored baseline for a flow as intentional (A30 differential oracle)')
+  .argument('[flow]', 'flow name (defaults to every stored baseline)')
+  .option('--list', 'show stored baselines and whether each has been blessed', false)
+  .action(async (flow: string | undefined, opts: { list: boolean }) => {
+    const dir = DEFAULT_BASELINE_DIR;
+    if (!fs.existsSync(dir)) {
+      console.error(`no baselines yet at ${dir} — run with SPIKE_DIFFERENTIAL=1 to create one`);
+      process.exit(2);
+    }
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+    if (opts.list) {
+      for (const f of files) {
+        const b = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')) as { flow: string; blessedAt?: string; createdAt: string };
+        console.log(`${b.blessedAt ? 'blessed' : 'UNBLESSED'}  ${b.flow}  (created ${b.createdAt}${b.blessedAt ? `, blessed ${b.blessedAt}` : ''})`);
+      }
+      process.exit(0);
+    }
+    const targets = flow ? files.filter((f) => f === `${flow}.json` || f.includes(flow)) : files;
+    if (!targets.length) {
+      console.error(`no stored baseline matching "${flow ?? ''}"`);
+      process.exit(2);
+    }
+    for (const f of targets) {
+      const p2 = path.join(dir, f);
+      const b = JSON.parse(fs.readFileSync(p2, 'utf8')) as { flow: string; ax: unknown; network: unknown; blessedAt?: string };
+      // Bless what is ALREADY stored — this command never re-drives the app.
+      // Re-capturing here would bless whatever the site happens to look like
+      // right now, which is not what "I reviewed this diff" means.
+      await blessBaseline(b.flow, { ax: b.ax as never, network: b.network as never }, { dir });
+      console.log(`blessed ${b.flow}`);
+    }
+    process.exit(0);
+  });
+
 program
   .command('map')
   .description('discover the app: routes + states + interactive elements, into .spike/app-model.json ($0, no browser)')
@@ -322,6 +369,7 @@ program
   .option('--tag <tag>', 'with --all + spike.suite.json: run only entries tagged with this (repeatable, OR match)', collectRepeatable, [])
   .option('--filter <substr>', 'with --all: run only scripts whose name/path contains this substring')
   .option('--shard <i/N>', 'with --all: run only shard i of N, deterministically partitioned by sorted script name (1-based i)')
+  .option('--retries <n>', 'A11 flake control: re-run a FAILED script up to n times; a flow that fails then passes is reported flaky rather than red (default 0 — no retries, unchanged behaviour)', (v) => parseInt(v, 10))
   .option('--reporter <type>', 'with --all: also emit a report in this format — currently "junit" (requires --out)')
   .option('--out <path>', 'with --reporter: file path to write the report to')
   .option('--headless', 'run Chrome headless — a script needing assert_visual still gets Nano on its own split-off headed Chrome (A7)', false)
@@ -347,6 +395,7 @@ program
         storageState?: string;
         saveStorageState?: string;
         authFixture: boolean;
+        retries?: number;
       },
     ) => {
       const config = mergeConfig(opts.via, opts.allowHost);
@@ -358,6 +407,7 @@ program
           process.exit(2);
         }
         const report = await qaReplay(name, {
+          ...(opts.retries !== undefined && { retries: opts.retries }),
           heal: opts.heal,
           ...(config && { config }),
           onProgress: opts.json ? undefined : (l) => console.log(l),
@@ -453,6 +503,10 @@ program
         const perCallConfig = isolation ? { ...config, ...isolation } : config;
         const report = await qaReplay(scriptId, {
           heal: opts.heal,
+          // A31: qaReplay has accepted `retries` since A11, but nothing ever
+          // passed it — so flake control was unreachable from `replay --all`,
+          // the only place a suite owner would use it.
+          ...(opts.retries !== undefined && { retries: opts.retries }),
           ...(perCallConfig && { config: perCallConfig }),
           onProgress: opts.json ? undefined : (l) => console.log(l),
           headless: opts.headless,

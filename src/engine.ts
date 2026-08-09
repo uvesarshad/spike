@@ -39,6 +39,9 @@ import { ArtifactStore } from './report/artifacts.js';
 import { runDriverLoop, type StepInfo } from './driver/loop.js';
 import { Vault } from './vault/vault.js';
 import type { Report, RunVerdict } from './report/report.js';
+import { recordRunCoverage } from './discovery/record-coverage.js';
+import { compareToBaseline, loadBaseline, saveBaseline } from './assertions/differential.js';
+import { detectRelationCandidates } from './assertions/metamorphic.js';
 import { diffScripts, loadScript, saveScript, scriptFromReport, scriptsDir, type QaScript } from './recorder/script.js';
 import { classifyHeal, type HealTier } from './recorder/heal-policy.js';
 import { replayScript } from './recorder/replay.js';
@@ -965,6 +968,72 @@ async function runFreshAiPass(
     }
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);
     runSpan.addEvent('driver.loop.completed', { verdict: report.verdict, steps: report.steps.length, durationMs: report.durationMs });
+
+    const lastAxForOracles = await (browser.peekAxTree?.() ?? browser.axTree()).catch(() => undefined);
+    // A33 (A24 Tier 2): record which metamorphic relations this app's shape
+    // suggests. Detection is deterministic and free; EXECUTION is not wired,
+    // because a relation needs paired observations across two deliberately
+    // varied runs and the driver produces one. Recording the proposals is what
+    // makes the "propose once, then run forever" workflow possible — inventing
+    // a fake single-run check would not.
+    if (lastAxForOracles) {
+      const proposals = detectRelationCandidates(lastAxForOracles);
+      if (proposals.length) {
+        report.metamorphicCandidates = proposals.map((p2) => ({ relation: p2.relation.id, reason: p2.reason }));
+      }
+    }
+
+    // A30 (A24 Tier 1): capture or compare this flow's baseline. Opt-in
+    // (cfg.differential), because an unblessed baseline flags every intentional
+    // UI change. First run of a flow WRITES the baseline; later runs diff
+    // against it and attach the result as evidence — never as a verdict, for
+    // the same reason the Tier-0 invariants are non-fatal: nobody has measured
+    // its false-positive rate against real UI churn yet.
+    if (cfg.differential) {
+      try {
+        const flow = report.recordedScript ?? report.task.slice(0, 80);
+        const finalAx = lastAxForOracles ?? (await browser.peekAxTree?.()) ?? (await browser.axTree());
+        const network = report.steps.flatMap((st) => st.network ?? []);
+        const existing = await loadBaseline(flow);
+        if (!existing) {
+          await saveBaseline({ flow, createdAt: new Date().toISOString(), ax: finalAx, network });
+          progress(`differential: baseline created for "${flow}" — future runs will diff against it`);
+        } else {
+          const d = compareToBaseline({ ax: finalAx, network }, existing);
+          report.differential = {
+            mode: d.mode,
+            clean: d.clean,
+            axChanges: d.axChanges.length,
+            networkChanges: d.network.addedRequests.length + d.network.removedRequests.length + d.network.statusClassChanges.length,
+            detail: [
+              ...d.axChanges.slice(0, 10).map((c) => `${c.kind}: ${c.path}`),
+              ...d.network.addedRequests.slice(0, 5).map((k) => `request added: ${k.method} ${k.path} (${k.statusClass})`),
+              ...d.network.removedRequests.slice(0, 5).map((k) => `request removed: ${k.method} ${k.path}`),
+              ...d.network.statusClassChanges.slice(0, 5).map((c) => `status changed: ${c.method} ${c.path} ${c.before} -> ${c.after}`),
+            ],
+          };
+          artifacts.saveReport(report);
+          progress(d.clean ? 'differential: clean vs baseline' : `differential: ${report.differential.axChanges} AX + ${report.differential.networkChanges} network change(s) vs baseline`);
+        }
+      } catch (e) {
+        progress(`differential skipped: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
+    // A29: write the run back to the coverage ledger. Runs on EVERY verdict —
+    // a failing run still exercised the routes it reached, and pretending
+    // otherwise would understate coverage exactly when you most want to know
+    // what was touched. No-ops silently when no ledger exists (nobody has run
+    // `spike map`), which is the common case.
+    {
+      const cov = recordRunCoverage(report.steps, report.recordedScript ?? report.task.slice(0, 60));
+      if (cov.ledgerPresent && (cov.routesMarked.length || cov.elementsMarked)) {
+        progress(`coverage: ${cov.routesMarked.length} route(s), ${cov.elementsMarked} element(s) marked exercised`);
+      }
+      if (cov.unknownRoutes.length) {
+        progress(`coverage: ${cov.unknownRoutes.length} route(s) reached that \`spike map\` never discovered — likely interaction-gated`);
+      }
+    }
 
     if (report.verdict === 'pass' && (opts.record ?? true)) {
       const { jsonPath, specPath } = saveScript(scriptFromReport(report));

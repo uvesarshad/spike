@@ -15,6 +15,7 @@ import {
   hostOfUrl,
   raceTimeout,
   type AxSnapshot,
+  type AxTreeOptions,
   type BrowserPort,
   type ConsoleEntry,
   type LogpointSpec,
@@ -164,8 +165,8 @@ export class CdpBrowser implements BrowserPort {
     return result.value as string;
   }
 
-  async axTree(): Promise<AxSnapshot> {
-    const { snapshot, nodeMap } = await snapshotAxTree(this.c);
+  async axTree(opts?: AxTreeOptions): Promise<AxSnapshot> {
+    const { snapshot, nodeMap } = await snapshotAxTree(this.c, opts);
     this.nodeMap = nodeMap;
     return snapshot;
   }
