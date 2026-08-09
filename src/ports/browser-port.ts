@@ -35,7 +35,17 @@ export interface NetworkEntry {
   url: string;
   status?: number;
   ms?: number;
+  /** Hard failure: a 5xx response or a transport-level loadingFailed. Drives the
+   * loop's batch-abort and firstError() priority — deliberately NOT widened to
+   * 4xx (see clientError). */
   failed?: boolean;
+  /** A18: 4xx response. Kept SEPARATE from `failed` because a 401 auth probe, a
+   * 404 favicon, or a third-party analytics 4xx are all normal — widening
+   * `failed` would change run outcomes. This flag exists so the navigator/brain
+   * prompt and the Tier-0 invariant oracle can see client errors and weigh them
+   * per-origin, rather than them being filtered out before the model ever
+   * looks (which was the pre-A18 behaviour). */
+  clientError?: boolean;
   errorText?: string;
 }
 
@@ -150,6 +160,15 @@ export interface BrowserPort {
    * interaction targets a fallback locator (#9). Optional: a transport may not
    * implement it (the loop guards the call). */
   stampQaId?(nodeId: string): Promise<string | null>;
+  /** A24 Tier-0 oracle: evaluate the invariant probe in the page and return its
+   * raw JSON-serialisable result (parsed by assertions/invariants.ts, which
+   * treats any shape defensively). Deliberately NOT a general `evaluate(js)`:
+   * the port runs one compile-time constant (INVARIANT_PROBE_JS), so no
+   * model-supplied or recorded code can ever reach an eval — the same posture
+   * the script runner takes (see driver/script-runner/schema.ts). Optional: a
+   * transport that cannot evaluate returns undefined and the loop records only
+   * the drain-derived invariants. */
+  probeInvariants?(): Promise<unknown>;
   /** Locate a node in the CURRENT page by a previously-stamped `data-qa-id` and
    * return a nodeId usable with click()/type(), or null when not present (e.g.
    * the attribute was lost across a reload). Implementations register the match

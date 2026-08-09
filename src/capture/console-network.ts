@@ -14,6 +14,16 @@ export interface CaptureBuffers {
   drainNetwork(): NetworkEntry[];
 }
 
+/* A18 (P2): `NetworkEntry.failed` is deliberately narrow — 5xx + transport
+ * failure only, because it also drives loop.ts's hard-stop logic
+ * (drainHasPageError, the batch-abort check) and widening it to include 4xx
+ * would change run outcomes (a 401 auth probe or a missing favicon 404 is
+ * routine, not a broken flow). But `failed` being the ONLY signal meant
+ * 400/401/403/404 — the most common signature of a real broken API call —
+ * never reached the model at all (planner-prompt.ts's networkLines filtered
+ * on `.failed` before this fix). `clientError` on NetworkEntry
+ * (src/ports/browser-port.ts) is the separate, non-fatal signal for that. */
+
 export async function attachCapture(client: CDP.Client): Promise<CaptureBuffers> {
   let consoleBuf: ConsoleEntry[] = [];
   let networkBuf: NetworkEntry[] = [];
@@ -45,14 +55,19 @@ export async function attachCapture(client: CDP.Client): Promise<CaptureBuffers>
     const req = pending.get(requestId);
     if (!req) return;
     pending.delete(requestId);
-    networkBuf.push({
+    // A18: `failed` stays 5xx-only (see the top-of-file note); `clientError`
+    // separately flags 4xx so it can reach the model as weaker, non-fatal
+    // evidence instead of being invisible.
+    const entry: NetworkEntry = {
       ts: req.ts,
       method: req.method,
       url: req.url,
       status: response.status,
       ms: Date.now() - req.ts,
       failed: response.status >= 500,
-    });
+      clientError: response.status >= 400 && response.status < 500,
+    };
+    networkBuf.push(entry);
   });
 
   client.Network.loadingFailed(({ requestId, errorText }) => {
@@ -83,7 +98,10 @@ export async function attachCapture(client: CDP.Client): Promise<CaptureBuffers>
   };
 }
 
-/** First error-shaped evidence in a step's buffers → report.console_error. */
+/** First error-shaped evidence in a step's buffers → report.console_error.
+ * Priority order matters: page error > console error > 5xx/transport failure
+ * > 4xx (A18) — a client error is real signal but weaker than everything
+ * above it, so it only surfaces here when nothing more severe was captured. */
 export function firstError(console_: ConsoleEntry[], network: NetworkEntry[]): string | undefined {
   const pageError = console_.find((e) => e.level === 'page-error');
   if (pageError) return pageError.text;
@@ -92,6 +110,10 @@ export function firstError(console_: ConsoleEntry[], network: NetworkEntry[]): s
   const netFail = network.find((e) => e.failed);
   if (netFail) {
     return `[NET-FAIL] ${netFail.method} ${netFail.url} → ${netFail.status ?? netFail.errorText ?? 'failed'}`;
+  }
+  const netClientError = network.find((e) => e.clientError);
+  if (netClientError) {
+    return `[NET-4XX] ${netClientError.method} ${netClientError.url} → ${netClientError.status}`;
   }
   return undefined;
 }

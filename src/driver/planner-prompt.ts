@@ -14,7 +14,10 @@ export interface PlannerContext {
   maxSteps: number;
 }
 
-const MAX_EVIDENCE_LINES = 8;
+/** Exported for test/v36.client-errors.ts, which unit-tests the A18 4xx
+ * labeling/cap directly rather than round-tripping through a full StepRecord
+ * + buildPlannerPrompt string. */
+export const MAX_EVIDENCE_LINES = 8;
 /** A5 (P0): cap how many past steps ride along in every prompt. Without this,
  * a long run resends its ENTIRE history every call — O(n) per-call, O(n²)
  * total tokens across the run. Only the tail is useful context; older steps
@@ -28,11 +31,26 @@ function consoleLines(entries: ConsoleEntry[]): string[] {
     .map((e) => `console.${e.level}: ${e.text.slice(0, 200)}`);
 }
 
-function networkLines(entries: NetworkEntry[]): string[] {
+/** A18 (P2): `.failed` alone (5xx + transport failure) used to be the only
+ * filter here, which made 400/401/403/404 — the most common signature of a
+ * broken API call — entirely invisible to the navigator/brain during a live
+ * run. `clientError` (console-network.ts) surfaces those too, but labeled
+ * distinctly (`net[4xx]` vs `net`) so the model can weigh a 5xx as stronger
+ * evidence than a 4xx, which is sometimes routine (an auth probe, a missing
+ * favicon, a third-party beacon) rather than proof the flow is broken. The
+ * URL rides along either way so the model can judge first- vs third-party
+ * itself — this file has no origin-filtering to preserve. Same
+ * MAX_EVIDENCE_LINES cap as before: adding a signal must not blow the
+ * token budget on the hot path. */
+export function networkLines(entries: NetworkEntry[]): string[] {
   return entries
-    .filter((e) => e.failed)
+    .filter((e) => e.failed || e.clientError)
     .slice(-MAX_EVIDENCE_LINES)
-    .map((e) => `net: ${e.method} ${e.url} → ${e.status ?? e.errorText ?? 'failed'}`);
+    .map((e) =>
+      e.failed
+        ? `net: ${e.method} ${e.url} → ${e.status ?? e.errorText ?? 'failed'}`
+        : `net[4xx]: ${e.method} ${e.url} → ${e.status}`,
+    );
 }
 
 /** One line per step + any error/console/network/visual evidence it caused.

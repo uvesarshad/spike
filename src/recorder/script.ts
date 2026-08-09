@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Report, StepRecord, StepTarget } from '../report/report.js';
 import type { ScriptRunnerStep } from '../driver/script-runner/schema.js';
+import { validateQaScript } from './schema.js';
 
 /** A script-step locator: role+name plus optional `nth` / `qaId` disambiguators.
  *
@@ -259,7 +260,24 @@ export function loadScript(nameOrPath: string, root = process.cwd()): QaScript {
   const mtimeMs = fs.statSync(p).mtimeMs;
   const cached = scriptCache.get(p);
   if (cached && cached.mtimeMs === mtimeMs) return cached.script;
-  const script = JSON.parse(fs.readFileSync(p, 'utf8')) as QaScript;
+  // A14: JSON.parse alone is a TypeScript-only assertion, not a runtime check
+  // — a hand-written or hand-edited script (the direct answer to "I don't
+  // want the AI hallucinating in my regression suite") deserves a real
+  // validation gate, failing loudly at load time with the specific field(s)
+  // that are wrong rather than blowing up obscurely deep inside replay.
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  } catch (err) {
+    throw new Error(`malformed script at ${p}: not valid JSON (${(err as Error).message})`);
+  }
+  const result = validateQaScript(raw);
+  if (!result.ok) {
+    const shown = result.errors.slice(0, 5);
+    const more = result.errors.length > shown.length ? `\n  ...and ${result.errors.length - shown.length} more` : '';
+    throw new Error(`invalid script at ${p}:\n  ${shown.join('\n  ')}${more}`);
+  }
+  const script = result.script;
   scriptCache.set(p, { mtimeMs, script });
   return script;
 }

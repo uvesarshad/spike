@@ -25,6 +25,13 @@ async function runAgainstFixture(bug: boolean) {
   try {
     return await qaRun(TASK, `http://localhost:${cfg.fixturePort}/login`, {
       onProgress: (l) => console.log(`  [${bug ? 'bug-on' : 'healthy'}] ${l}`),
+      // A1: `readOnly` defaults to TRUE (config.ts) as a safety posture for
+      // arbitrary user sites. This gate drives a fixture app it starts and
+      // stops itself on localhost, so the default made every action a no-op —
+      // the run could never log in, so "expecting pass" and "expecting a
+      // captured error" were both unreachable and this suite had been failing
+      // silently. Opting out here is the whole point of the fixture.
+      config: { ...cfg, readOnly: false },
     });
   } finally {
     await stopFixture(server);

@@ -5437,14 +5437,16 @@ async function attachCapture(client) {
     const req = pending.get(requestId);
     if (!req) return;
     pending.delete(requestId);
-    networkBuf.push({
+    const entry = {
       ts: req.ts,
       method: req.method,
       url: req.url,
       status: response.status,
       ms: Date.now() - req.ts,
-      failed: response.status >= 500
-    });
+      failed: response.status >= 500,
+      clientError: response.status >= 400 && response.status < 500
+    };
+    networkBuf.push(entry);
   });
   client.Network.loadingFailed(({ requestId, errorText }) => {
     const req = pending.get(requestId);
@@ -5480,6 +5482,10 @@ function firstError(console_, network) {
   const netFail = network.find((e) => e.failed);
   if (netFail) {
     return `[NET-FAIL] ${netFail.method} ${netFail.url} \u2192 ${netFail.status ?? netFail.errorText ?? "failed"}`;
+  }
+  const netClientError = network.find((e) => e.clientError);
+  if (netClientError) {
+    return `[NET-4XX] ${netClientError.method} ${netClientError.url} \u2192 ${netClientError.status}`;
   }
   return void 0;
 }
@@ -9873,7 +9879,9 @@ function consoleLines(entries) {
   return entries.filter((e) => e.level === "error" || e.level === "page-error" || e.level === "warn").slice(-MAX_EVIDENCE_LINES).map((e) => `console.${e.level}: ${e.text.slice(0, 200)}`);
 }
 function networkLines(entries) {
-  return entries.filter((e) => e.failed).slice(-MAX_EVIDENCE_LINES).map((e) => `net: ${e.method} ${e.url} \u2192 ${e.status ?? e.errorText ?? "failed"}`);
+  return entries.filter((e) => e.failed || e.clientError).slice(-MAX_EVIDENCE_LINES).map(
+    (e) => e.failed ? `net: ${e.method} ${e.url} \u2192 ${e.status ?? e.errorText ?? "failed"}` : `net[4xx]: ${e.method} ${e.url} \u2192 ${e.status}`
+  );
 }
 function formatHistory(history) {
   const overflow = history.length - MAX_HISTORY_ENTRIES;
@@ -10117,6 +10125,197 @@ function toModelResult(candidate, verdict) {
     rung: candidate.rung,
     verdict
   };
+}
+
+// src/assertions/invariants.ts
+init_buffer_shim();
+var MAX_ITEMS_PER_RULE = 10;
+var MAX_EVIDENCE_LEN = 200;
+var SECRET_PATTERNS = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /\bsk-[A-Za-z0-9_-]{16,}\b/,
+  /\bgh[pousr]_[A-Za-z0-9_]{16,}\b/,
+  /\bAIza[0-9A-Za-z_-]{20,}\b/,
+  /\bAKIA[0-9A-Z]{16}\b/,
+  /\bxox[baprs]-[A-Za-z0-9-]{16,}\b/,
+  /\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\b/
+];
+function redactSecretLikeText(text) {
+  let out = text;
+  for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED]");
+  return out;
+}
+function truncateEvidence(text, max = MAX_EVIDENCE_LEN) {
+  const redacted = redactSecretLikeText(text);
+  return redacted.length > max ? redacted.slice(0, max) + "\u2026" : redacted;
+}
+function isDisabled(config, rule) {
+  return config?.disabled?.includes(rule) ?? false;
+}
+var Capped = class {
+  constructor(config) {
+    this.config = config;
+  }
+  config;
+  counts = /* @__PURE__ */ new Map();
+  push(out, v) {
+    if (isDisabled(this.config, v.rule)) return;
+    const n = this.counts.get(v.rule) ?? 0;
+    if (n >= MAX_ITEMS_PER_RULE) return;
+    this.counts.set(v.rule, n + 1);
+    out.push(v);
+  }
+};
+function originOf(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+var UNHANDLED_REJECTION_RE = /\(in promise\)|unhandled.*rejection/i;
+function checkDrainInvariants(input) {
+  const out = [];
+  const cap = new Capped(input.config);
+  const targetOrigin = originOf(input.url);
+  for (const entry of input.console) {
+    if (entry.level === "page-error") {
+      const isRejection = UNHANDLED_REJECTION_RE.test(entry.text);
+      cap.push(out, {
+        rule: isRejection ? "unhandled-rejection" : "page-error",
+        severity: "error",
+        detail: isRejection ? "An unhandled promise rejection occurred on the page." : "An uncaught page error occurred.",
+        evidence: truncateEvidence(entry.text)
+      });
+    } else if (entry.level === "error") {
+      cap.push(out, {
+        rule: "console-error",
+        severity: "error",
+        detail: "console.error was called.",
+        evidence: truncateEvidence(entry.text)
+      });
+    }
+  }
+  for (const entry of input.network) {
+    const entryOrigin = originOf(entry.url);
+    if (!targetOrigin || !entryOrigin || entryOrigin !== targetOrigin) continue;
+    if (typeof entry.status === "number" && entry.status >= 500) {
+      cap.push(out, {
+        rule: "network-error",
+        severity: "error",
+        detail: `Same-origin request responded with server error ${entry.status}.`,
+        evidence: truncateEvidence(`${entry.method} ${entry.url} -> ${entry.status}`)
+      });
+    } else if (typeof entry.status === "number" && entry.status >= 400) {
+      cap.push(out, {
+        rule: "network-error",
+        severity: "warn",
+        detail: `Same-origin request responded with client error ${entry.status}.`,
+        evidence: truncateEvidence(`${entry.method} ${entry.url} -> ${entry.status}`)
+      });
+    } else if (entry.status === void 0 && entry.failed) {
+      cap.push(out, {
+        rule: "network-error",
+        severity: "error",
+        detail: "Same-origin request failed to load.",
+        evidence: truncateEvidence(`${entry.method} ${entry.url} -> ${entry.errorText ?? "failed"}`)
+      });
+    }
+  }
+  return out;
+}
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+function asRecord(value) {
+  return value && typeof value === "object" ? value : {};
+}
+function checkProbeInvariants(raw, config) {
+  const out = [];
+  const cap = new Capped(config);
+  const root = asRecord(raw);
+  const allowText = config?.allowText ?? [];
+  for (const item of asArray(root.renderedUndefined)) {
+    if (typeof item !== "string" || !item) continue;
+    if (allowText.some((a) => typeof a === "string" && a.length > 0 && item.includes(a))) continue;
+    cap.push(out, {
+      rule: "rendered-undefined",
+      severity: "error",
+      detail: "Visible text renders a raw undefined/NaN/null/Infinity/[object Object] token.",
+      evidence: truncateEvidence(item)
+    });
+  }
+  for (const src of asArray(root.brokenImages)) {
+    if (typeof src !== "string" || !src) continue;
+    cap.push(out, {
+      rule: "broken-image",
+      severity: "error",
+      detail: "An <img> failed to load (naturalWidth is 0).",
+      evidence: truncateEvidence(src)
+    });
+  }
+  const overflow = root.overflow;
+  if (overflow && typeof overflow === "object") {
+    const o = overflow;
+    const scrollWidth = typeof o.scrollWidth === "number" ? o.scrollWidth : void 0;
+    const clientWidth = typeof o.clientWidth === "number" ? o.clientWidth : void 0;
+    if (scrollWidth !== void 0 && clientWidth !== void 0) {
+      cap.push(out, {
+        rule: "layout-overflow",
+        severity: "warn",
+        detail: "The page has horizontal overflow beyond the viewport.",
+        evidence: truncateEvidence(`scrollWidth=${scrollWidth} clientWidth=${clientWidth}`)
+      });
+    }
+  }
+  const landmarksRaw = root.landmarks;
+  if (landmarksRaw && typeof landmarksRaw === "object") {
+    const landmarks = landmarksRaw;
+    const hasMain = landmarks.hasMain === true;
+    const hasH1 = landmarks.hasH1 === true;
+    const mainTextLength = typeof landmarks.mainTextLength === "number" ? landmarks.mainTextLength : 0;
+    if (!hasMain) {
+      cap.push(out, {
+        rule: "empty-required-region",
+        severity: "error",
+        detail: 'No <main> (or role="main") landmark found on the page.'
+      });
+    } else if (mainTextLength === 0) {
+      cap.push(out, {
+        rule: "empty-required-region",
+        severity: "error",
+        detail: "The <main> landmark is empty of text."
+      });
+    }
+    if (!hasH1) {
+      cap.push(out, {
+        rule: "empty-required-region",
+        severity: "error",
+        detail: "No <h1> found on the page."
+      });
+    }
+  }
+  for (const item of asArray(root.stuckLoading)) {
+    if (typeof item !== "string" || !item) continue;
+    cap.push(out, {
+      rule: "stuck-loading",
+      severity: "warn",
+      detail: "A loading/skeleton/spinner indicator is still visible.",
+      evidence: truncateEvidence(item)
+    });
+  }
+  for (const item of asArray(root.duplicateIds)) {
+    const rec = asRecord(item);
+    if (typeof rec.id !== "string" || !rec.id) continue;
+    const count = typeof rec.count === "number" ? rec.count : void 0;
+    cap.push(out, {
+      rule: "duplicate-ids",
+      severity: "error",
+      detail: `DOM id "${truncateEvidence(rec.id, 80)}" is used ${count ?? "more than"} times.`,
+      evidence: truncateEvidence(rec.id)
+    });
+  }
+  return out;
 }
 
 // src/driver/script-runner/index.ts
@@ -10404,7 +10603,7 @@ import path from "path";
 var ACTION_CACHE_VERSION = 1;
 var SECRET_PLACEHOLDER_RE2 = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
 var TRACKING_QUERY_RE = /^(utm_|fbclid$|gclid$|msclkid$)/i;
-var SECRET_PATTERNS = [
+var SECRET_PATTERNS2 = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\bsk-[A-Za-z0-9_-]{16,}\b/,
   /\bgh[pousr]_[A-Za-z0-9_]{16,}\b/,
@@ -10431,11 +10630,11 @@ function normalizeUrlForActionCache(input) {
   }
 }
 function normalizeGoalForActionCache(goal) {
-  return redactSecretLikeText(goal).trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
+  return redactSecretLikeText2(goal).trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
 }
 function pageSignatureFromAx(ax) {
   const material = typeof ax === "string" ? ax : stableAxMaterial(ax.root);
-  const normalized = redactSecretLikeText(material).replace(/\bn\d+\b/g, "n*").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 12e3);
+  const normalized = redactSecretLikeText2(material).replace(/\bn\d+\b/g, "n*").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 12e3);
   return sha256(normalized);
 }
 function buildActionCacheKey(input) {
@@ -10675,7 +10874,7 @@ function targetIntent(target) {
   ].join("|");
 }
 function textForKey(text) {
-  return redactSecretLikeText(text).replace(SECRET_PLACEHOLDER_RE2, "{{secret:*}}").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
+  return redactSecretLikeText2(text).replace(SECRET_PLACEHOLDER_RE2, "{{secret:*}}").trim().toLowerCase().replace(/\s+/g, " ").slice(0, 240);
 }
 function requireCachedTarget(target, actionType) {
   if (!target) throw new ActionCacheRejectedError(`${actionType} cannot be cached without StepRecord.target`);
@@ -10704,7 +10903,7 @@ function assertNoSecretText(text, field) {
 }
 function looksSecretLike(text) {
   const withoutPlaceholders = text.replace(SECRET_PLACEHOLDER_RE2, "{{secret:*}}");
-  if (SECRET_PATTERNS.some((re) => re.test(withoutPlaceholders))) return true;
+  if (SECRET_PATTERNS2.some((re) => re.test(withoutPlaceholders))) return true;
   const compact = withoutPlaceholders.replace(/\s+/g, "");
   const structuredMetadata = /[=:|]/.test(withoutPlaceholders);
   if (!structuredMetadata && compact.length >= 28 && /[a-z]/.test(compact) && /[A-Z]/.test(compact) && /\d/.test(compact) && /[^A-Za-z0-9]/.test(compact)) {
@@ -10712,9 +10911,9 @@ function looksSecretLike(text) {
   }
   return false;
 }
-function redactSecretLikeText(text) {
+function redactSecretLikeText2(text) {
   let out = text.replace(SECRET_PLACEHOLDER_RE2, "{{secret:*}}");
-  for (const re of SECRET_PATTERNS) out = out.replace(re, "[REDACTED]");
+  for (const re of SECRET_PATTERNS2) out = out.replace(re, "[REDACTED]");
   return out;
 }
 function stableAxMaterial(root) {
@@ -10723,7 +10922,7 @@ function stableAxMaterial(root) {
     if (lines.length >= 250) return;
     const parts = [String(depth), node.role];
     if (node.name) parts.push(node.name);
-    if (node.value) parts.push(redactSecretLikeText(node.value));
+    if (node.value) parts.push(redactSecretLikeText2(node.value));
     if (node.states?.length) parts.push(node.states.join(","));
     lines.push(parts.join("|"));
     for (const child of node.children ?? []) walk(child, depth + 1);
@@ -11009,6 +11208,17 @@ function humanizeAction(action, target) {
       return `Run script (${action.steps.length} step(s))`;
   }
 }
+async function collectInvariants(browser, record) {
+  const url = await browser.url().catch(() => "");
+  const violations = checkDrainInvariants({ console: record.console, network: record.network, url });
+  if (browser.probeInvariants) {
+    try {
+      violations.push(...checkProbeInvariants(await browser.probeInvariants()));
+    } catch {
+    }
+  }
+  if (violations.length) record.invariants = violations;
+}
 function drainHasPageError(consoleEntries, networkEntries) {
   return consoleEntries.some((e) => e.level === "error" || e.level === "page-error") || networkEntries.some((e) => e.failed);
 }
@@ -11183,6 +11393,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
     await sleep(150);
     record.console = browser.drainConsole();
     record.network = browser.drainNetwork();
+    await collectInvariants(browser, record);
     await artifacts.appendAudit({
       ts: record.ts,
       runId: artifacts.runId,
@@ -11306,6 +11517,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         }
         record.console = browser.drainConsole();
         record.network = browser.drainNetwork();
+        await collectInvariants(browser, record);
         await artifacts.appendAudit({
           ts: record.ts,
           runId: artifacts.runId,
@@ -11622,6 +11834,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       await sleep(150);
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
+      await collectInvariants(browser, record);
       if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {
           const cacheAfter = await captureActionEffectState(browser);
@@ -13077,10 +13290,21 @@ var DEFAULT_SETTINGS = {
   // (The daemon's config.ts keeps claude:cli as ITS brain default — it has CLI
   // rungs; lite/BYOK has none, so the shared default here is api.)
   planner: { provider: "claude", mode: "api", model: "" },
-  // NAVIGATOR default: Gemini Nano, on-device and $0. It does the frequent grunt
-  // work every step, so cheap/free is the whole point; cloud fallback applies
-  // automatically when Nano can't drive a step (or has no plan-step support yet).
-  navigator: { provider: "nano", mode: "ondevice" },
+  // NAVIGATOR default (A27): a cheap CLOUD model, not Nano. Lite mode is
+  // intentionally AI-powered end to end — one BYOK key (Anthropic) serves BOTH
+  // roles out of the box: a small model (claude-haiku-4-5, see NAVIGATOR_MODELS
+  // below) drives every step, the big model (claude-sonnet-5, via the shared
+  // `planner` default just above) judges/plans. Pinning Nano here used to be a
+  // silent no-op: lite mode can't prove Nano is actually live at config-build
+  // time (no synchronous on-device probe), so ModelRouter's pin match failed and
+  // a cloud adapter took over plan-step ANYWAY, picked by accidental Map-iteration
+  // order instead of a deliberate choice — while the panel kept showing "Nano".
+  // Nano remains fully available as an explicit opt-in ("Experimental" in the
+  // panel) navigator, and unconditionally as the rung-0 $0 visual-verdict adapter
+  // (assert_visual / finish screenshots) — this default only changes which model
+  // drives plan-step out of the box. See lite-engine.ts's buildLiteLadder /
+  // resolveNavigatorName for how a nano pin's real plan-step fate is resolved.
+  navigator: { provider: "claude", mode: "api" },
   debugMode: "prompt",
   debugAgent: "auto",
   videoAssertions: false,
@@ -13369,6 +13593,20 @@ function buildLiteLadder(keys, planner, navigator) {
   const plannerName = planner.provider === "nano" ? "nano" : byKey.get(planner.provider)?.name;
   return { adapters: [...byKey.values()], plannerName, navigatorName };
 }
+function resolveNavigatorName(keys, navigator, planner) {
+  const { adapters, navigatorName } = buildLiteLadder(keys, planner, navigator);
+  const ladder = [
+    { provider: "gemini", key: keys.gemini },
+    { provider: "claude", key: keys.anthropic },
+    { provider: "gpt", key: keys.openai },
+    { provider: "openrouter", key: keys.openrouter },
+    { provider: "glm", key: keys.glm }
+  ];
+  const pinnedHasKey = navigator.provider !== "nano" && Boolean(ladder.find((l) => l.provider === navigator.provider)?.key);
+  if (pinnedHasKey) return navigatorName ?? navigator.provider;
+  const idx = ladder.findIndex((l) => Boolean(l.key));
+  return idx >= 0 ? adapters[idx].name : "nano";
+}
 function buildLiteConfig(keys, settings) {
   const k = keys;
   const providers = PROVIDER_ORDER.map((id) => {
@@ -13392,6 +13630,10 @@ function buildLiteConfig(keys, settings) {
   return {
     planner: settings.planner,
     navigator: settings.navigator,
+    // A27: the honest answer — which adapter will ACTUALLY serve plan-step,
+    // accounting for the nano-pin fallthrough (see resolveNavigatorName above).
+    // Additive only; `navigator` (the raw pin) is unchanged for existing readers.
+    resolvedNavigatorName: resolveNavigatorName(keys, settings.navigator, settings.planner),
     debugMode: settings.debugMode,
     debugAgent: settings.debugAgent,
     videoAssertions: settings.videoAssertions ?? false,
@@ -13428,7 +13670,7 @@ async function runLite(opts) {
     const artifacts = new BrowserArtifactStore();
     progress(`run ${artifacts.runId}: "${opts.task}" on ${opts.url}`);
     const report = await runDriverLoop(browser, router, artifacts, opts.task, opts.url, {
-      maxSteps: opts.maxSteps ?? 12,
+      maxSteps: opts.maxSteps ?? 40,
       onStep: opts.onStep,
       allowedHosts: opts.allowedHosts,
       signal: opts.signal,

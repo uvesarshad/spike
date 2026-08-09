@@ -3,6 +3,7 @@
  * humans and debugging. */
 
 import type { ConsoleEntry, NetworkEntry } from '../ports/browser-port.js';
+import type { InvariantViolation } from '../assertions/invariants.js';
 import type { NanoVerdict } from '../ports/nano-port.js';
 import type { Action } from '../driver/actions.js';
 import type { ModelTraceEntry } from '../router/model-router.js';
@@ -38,6 +39,12 @@ export interface StepRecord {
   error?: string;
   console: ConsoleEntry[];
   network: NetworkEntry[];
+  /** A24 Tier-0 oracle: deterministic invariant violations observed after this
+   * step (rendered `undefined`, broken images, same-origin 4xx/5xx, duplicate
+   * ids…). Evidence + prompt input only for now — these do NOT decide the
+   * verdict until the oracle has been dogfooded against a real passing run
+   * (A1), so enabling it cannot silently flip existing outcomes. */
+  invariants?: InvariantViolation[];
   visual?: NanoVerdict;
   screenshot?: string;
   video?: string;

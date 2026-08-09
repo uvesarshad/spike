@@ -23,6 +23,13 @@ import { matchReplayScript } from '../src/recorder/matcher.js';
 import { startFixture, stopFixture } from '../fixture/server.js';
 
 const cfg = loadConfig();
+// A1: `readOnly` defaults to TRUE (config.ts) — a safety posture for driving
+// arbitrary user sites. This suite starts and stops its OWN fixture app on
+// localhost, so the default silently no-op'd every type/click: the "healthy"
+// run could never pass, so nothing was ever recorded, so `recordedScript` was
+// undefined and the whole record→replay→heal chain this file exists to prove
+// died at the first loadScript(). Opting out is the point of a fixture.
+const liveCfg = { ...cfg, readOnly: false };
 const TASK =
   'Log in as test@test.com with password pw, add the Widget to the cart, go to the cart, check out, and place the order. The order must end on a confirmation page.';
 const URL = `http://localhost:${cfg.fixturePort}/login`;
@@ -40,7 +47,7 @@ fs.rmSync(path.join(process.cwd(), 'generated-tests'), { recursive: true, force:
 /* 1 — record */
 console.log('=== 1/6: AI run on healthy fixture (records the script) ===');
 let server = startFixture(cfg.fixturePort, false);
-const recorded = await qaRun(TASK, URL, { onProgress: log });
+const recorded = await qaRun(TASK, URL, { onProgress: log, config: liveCfg });
 await stopFixture(server);
 check('AI run passes', recorded.verdict === 'pass');
 check('script recorded', Boolean(recorded.recordedScript && fs.existsSync(recorded.recordedScript)));
@@ -51,7 +58,7 @@ check('Playwright twin emitted', fs.existsSync(recorded.recordedScript!.replace(
 /* 2 — $0 replay */
 console.log('\n=== 2/6: deterministic replay on healthy fixture ===');
 server = startFixture(cfg.fixturePort, false);
-const replay = await qaReplay(script.name, { onProgress: log });
+const replay = await qaReplay(script.name, { onProgress: log, config: liveCfg });
 await stopFixture(server);
 check('replay passes', replay.verdict === 'pass');
 check('replay used ZERO planner calls', replay.model_trace.length === 0);
@@ -60,7 +67,7 @@ check('replay is fast (<60s, vs minutes for the AI run)', replay.durationMs < 60
 /* 3 — replay catches the regression */
 console.log('\n=== 3/6: replay against the bug-on fixture ===');
 server = startFixture(cfg.fixturePort, true);
-const regression = await qaReplay(script.name, { onProgress: log });
+const regression = await qaReplay(script.name, { onProgress: log, config: liveCfg });
 await stopFixture(server);
 check('replay fails on the regression', regression.verdict === 'fail');
 check('regression evidence captured', Boolean(regression.console_error));
@@ -68,11 +75,11 @@ check('regression evidence captured', Boolean(regression.console_error));
 /* 4 — UI drift + self-heal */
 console.log('\n=== 4/6: UI drift (v2 renames the button) + self-heal ===');
 server = startFixture(cfg.fixturePort, false, 'v2');
-const healed = await qaReplay(script.name, { heal: true, onProgress: log });
+const healed = await qaReplay(script.name, { heal: true, onProgress: log, config: liveCfg });
 check('self-heal re-ran the AI and passed', healed.healed === true && healed.verdict === 'pass');
 const healedScript = loadScript(script.name);
 check('script re-emitted with lineage', Boolean(healedScript.healedFrom));
-const replayHealed = await qaReplay(script.name, { onProgress: log });
+const replayHealed = await qaReplay(script.name, { onProgress: log, config: liveCfg });
 await stopFixture(server);
 check('healed script replays at $0 on the drifted UI', replayHealed.verdict === 'pass' && replayHealed.model_trace.length === 0);
 
@@ -87,7 +94,7 @@ const nearMiss = matchReplayScript(
 check('matcher returns null for an unrelated task on an unrelated host (near-miss falls through)', nearMiss === null);
 
 server = startFixture(cfg.fixturePort, false, 'v2');
-const matchedRun = await qaRun(script.task, script.url, { onProgress: log });
+const matchedRun = await qaRun(script.task, script.url, { onProgress: log, config: liveCfg });
 await stopFixture(server);
 check('qaRun() took the matched-replay path (replayMatch set)', Boolean(matchedRun.replayMatch));
 check('matched-replay qaRun() used ZERO planner calls', matchedRun.model_trace.length === 0);
@@ -96,7 +103,7 @@ check('matched-replay qaRun() is fast (<60s, vs minutes for a fresh AI pass)', m
 /* 6 — --no-replay bypasses the matcher and forces a fresh AI run, even with a confident match available */
 console.log('\n=== 6/6: --no-replay (opts.replay=false) bypasses the matcher ===');
 server = startFixture(cfg.fixturePort, false, 'v2');
-const bypassed = await qaRun(script.task, script.url, { onProgress: log, replay: false });
+const bypassed = await qaRun(script.task, script.url, { onProgress: log, replay: false, config: liveCfg });
 await stopFixture(server);
 check('opts.replay=false skipped the matcher (no replayMatch)', bypassed.replayMatch === undefined);
 check('opts.replay=false ran a real fresh AI pass (planner/navigator calls present)', bypassed.model_trace.length > 0);

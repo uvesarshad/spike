@@ -8,7 +8,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   SettingsStore,
-  DEFAULT_SETTINGS,
   isDeadPlannerSelection,
   type DebugAgent,
   type DebugMode,
@@ -122,7 +121,7 @@ const DEFAULTS: QaConfig = {
   artifactsDir: path.resolve('artifacts'),
   actionCache: false,
   actionCacheDir: path.resolve('.spike-action-cache'),
-  maxSteps: 12,
+  maxSteps: 40,
   allowedHosts: ['localhost', '127.0.0.1'],
   // opt-in (SPIKE_RECORD_CLIP=1): GIF capture works over raw CDP (test/v14) but
   // chrome.debugger does NOT expose Page.startScreencast (extension mode), and
@@ -139,8 +138,16 @@ const DEFAULTS: QaConfig = {
   // free tier is dead (see settings.ts). (This intentionally differs from
   // DEFAULT_SETTINGS.planner, which is api because lite/BYOK has no cli rungs.)
   planner: { provider: 'claude', mode: 'cli' },
-  // NAVIGATOR default: shared with settings-data (Nano, on-device, $0).
-  navigator: DEFAULT_SETTINGS.navigator,
+  // NAVIGATOR default: Nano, on-device, $0 — explicitly its OWN value (A27), no
+  // longer a shared reference to DEFAULT_SETTINGS.navigator. The daemon drives a
+  // real CDP-controlled Chrome it owns, so it CAN confirm Nano is actually live
+  // before a run starts (unlike lite/BYOK's browser-extension bundle, which has
+  // no synchronous on-device probe at config-build time and silently fell through
+  // to an accidental cloud adapter — see settings-data.ts's DEFAULT_SETTINGS.navigator
+  // and lite-engine.ts's resolveNavigatorName). Keeping Nano as the daemon's default
+  // preserves its $0 zero-config navigator; lite/BYOK's default is now a cheap cloud
+  // model instead. (Same daemon-vs-lite split as the BRAIN default above.)
+  navigator: { provider: 'nano', mode: 'ondevice' },
   debugMode: 'prompt',
   debugAgent: 'auto',
 };

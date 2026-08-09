@@ -85,10 +85,15 @@ export interface LiteRunResult {
 }
 
 /** BYOK-only ladder (no CLI/Ollama rungs). Pins BOTH roles: navigator (plan-step)
- * and brain/planner (plan-goals). All BYOK slots are api-mode; nano (navigator
- * default) is handled separately as the rung-0 visual adapter, so a nano navigator
- * resolves to name 'nano' here — not a plan-step candidate yet, so the router
- * falls through to the next available cloud adapter. */
+ * and brain/planner (plan-goals). All BYOK slots are api-mode. The default (A27)
+ * pins navigator to a cheap cloud model (claude:api → claude-haiku-4-5) so ONE
+ * Anthropic key drives both roles out of the box: small model navigates every
+ * step, big model (the shared planner default, claude-sonnet-5) judges/plans.
+ * Nano is still selectable — Experimental, opt-in — but it's handled separately
+ * as the rung-0 visual adapter and isn't one of this function's ladder entries,
+ * so a nano navigator resolves to the literal name 'nano' here even though it
+ * isn't guaranteed to be a live plan-step candidate; see resolveNavigatorName
+ * below for the honest (fallthrough-aware) answer surfaced to the panel. */
 function buildLiteLadder(keys: LiteKeys, planner: PlannerSelection, navigator: PlannerSelection): {
   adapters: ModelAdapter[];
   plannerName?: string;
@@ -112,6 +117,44 @@ function buildLiteLadder(keys: LiteKeys, planner: PlannerSelection, navigator: P
   const navigatorName = navigator.provider === 'nano' ? 'nano' : byKey.get(navigator.provider)?.name;
   const plannerName = planner.provider === 'nano' ? 'nano' : byKey.get(planner.provider)?.name;
   return { adapters: [...byKey.values()], plannerName, navigatorName };
+}
+
+/** A27: which adapter will ACTUALLY lead plan-step, as opposed to merely echoing
+ * the user's pin — the panel must not display a model that isn't driving.
+ *
+ * A pin only leads the ladder if ModelRouter finds it among LIVE candidates:
+ * candidates() filters on supports(cap) && available() (model-router.ts:90-92)
+ * before the pin-match at :98. Two ways a pin silently fails to lead:
+ *   1. `nano` — never a plan-step candidate in the lite ladder (see
+ *      buildLiteLadder above), and its on-device availability isn't provable
+ *      synchronously here anyway (that needs the SW's live nanoDeps).
+ *   2. ANY BYOK provider with no configured key — buildLiteLadder registers all
+ *      five adapters unconditionally, so navigatorName is non-null even for a
+ *      provider the user has no key for; available() then drops it at run time.
+ * Case 2 is why this can't just special-case nano: with the claude:api default,
+ * a user holding only a Gemini key would be shown "claude" while gemini drives.
+ *
+ * In both cases the router falls through to the BYOK ladder in byKey insertion
+ * order (gemini, claude, gpt, openrouter, glm — all rung 2, so planRank keeps
+ * them stable), first-with-a-configured-key wins. Mirror that here. */
+function resolveNavigatorName(keys: LiteKeys, navigator: PlannerSelection, planner: PlannerSelection): string {
+  const { adapters, navigatorName } = buildLiteLadder(keys, planner, navigator);
+  // Key presence per provider, in buildLiteLadder's byKey insertion order.
+  const ladder: Array<{ provider: ProviderId; key: string | undefined }> = [
+    { provider: 'gemini', key: keys.gemini },
+    { provider: 'claude', key: keys.anthropic },
+    { provider: 'gpt', key: keys.openai },
+    { provider: 'openrouter', key: keys.openrouter },
+    { provider: 'glm', key: keys.glm },
+  ];
+  const pinnedHasKey =
+    navigator.provider !== 'nano' &&
+    Boolean(ladder.find((l) => l.provider === navigator.provider)?.key);
+  if (pinnedHasKey) return navigatorName ?? navigator.provider;
+  const idx = ladder.findIndex((l) => Boolean(l.key));
+  // No BYOK key configured at all → nano really is the only candidate (its real
+  // availability is only provable at run time via the live on-device probe).
+  return idx >= 0 ? adapters[idx].name : 'nano';
 }
 
 /** Build the panel's vibe.config.get payload from chrome.storage values. Same
@@ -140,6 +183,10 @@ export function buildLiteConfig(keys: LiteKeys, settings: QaSettings): Record<st
   return {
     planner: settings.planner,
     navigator: settings.navigator,
+    // A27: the honest answer — which adapter will ACTUALLY serve plan-step,
+    // accounting for the nano-pin fallthrough (see resolveNavigatorName above).
+    // Additive only; `navigator` (the raw pin) is unchanged for existing readers.
+    resolvedNavigatorName: resolveNavigatorName(keys, settings.navigator, settings.planner),
     debugMode: settings.debugMode,
     debugAgent: settings.debugAgent,
     videoAssertions: settings.videoAssertions ?? false,
@@ -182,7 +229,7 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
     progress(`run ${artifacts.runId}: "${opts.task}" on ${opts.url}`);
 
     const report = await runDriverLoop(browser, router, artifacts, opts.task, opts.url, {
-      maxSteps: opts.maxSteps ?? 12,
+      maxSteps: opts.maxSteps ?? 40,
       onStep: opts.onStep,
       allowedHosts: opts.allowedHosts,
       signal: opts.signal,

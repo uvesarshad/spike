@@ -36,6 +36,7 @@ import {
 import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
 import type { Vault } from '../vault/vault.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
+import { checkDrainInvariants, checkProbeInvariants } from '../assertions/invariants.js';
 import { validateScriptSteps, runScriptSteps } from './script-runner/index.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders, RunDataNotFoundError } from '../run-data/index.js';
 import {
@@ -330,6 +331,35 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
   }
 }
 
+/** A24 Tier-0 oracle: run the deterministic invariants over a step's freshly
+ * drained evidence and stamp any violations onto the record.
+ *
+ * Called at all three drain sites (main batch, cached-action, finish pass) so
+ * evidence is uniform regardless of how the step was produced. Deliberately
+ * NON-FATAL for now: violations are recorded and fed to the planner as
+ * evidence, but do not decide the verdict — the oracle has never been dogfooded
+ * against a real passing run (A1), and auto-failing on it before then would
+ * silently change outcomes on a codebase whose only recorded runs are failures.
+ * Flipping error-severity violations into a hard fail is the follow-up, once a
+ * green baseline exists to measure the false-positive rate against.
+ *
+ * Best-effort throughout: a port with no `probeInvariants` (extension
+ * transport) still gets the drain-derived rules, and a probe that throws is
+ * swallowed rather than failing the step. */
+async function collectInvariants(browser: BrowserPort, record: StepRecord): Promise<void> {
+  const url = await browser.url().catch(() => '');
+  const violations = checkDrainInvariants({ console: record.console, network: record.network, url });
+  if (browser.probeInvariants) {
+    try {
+      violations.push(...checkProbeInvariants(await browser.probeInvariants()));
+    } catch {
+      /* the probe is evidence, never a gate — a page that refuses evaluation
+       * (CSP, mid-navigation, detached target) must not fail the run. */
+    }
+  }
+  if (violations.length) record.invariants = violations;
+}
+
 /** True if a console/network drain shows a page-level error (abort the batch). */
 function drainHasPageError(consoleEntries: { level: string }[], networkEntries: { failed?: boolean }[]): boolean {
   return (
@@ -571,6 +601,7 @@ export async function runDriverLoop(
     await sleep(150);
     record.console = browser.drainConsole();
     record.network = browser.drainNetwork();
+    await collectInvariants(browser, record);
     await artifacts.appendAudit({
       ts: record.ts,
       runId: artifacts.runId,
@@ -716,6 +747,7 @@ export async function runDriverLoop(
         }
         record.console = browser.drainConsole();
         record.network = browser.drainNetwork();
+        await collectInvariants(browser, record);
         await artifacts.appendAudit({
           ts: record.ts,
           runId: artifacts.runId,
@@ -1134,6 +1166,7 @@ export async function runDriverLoop(
       await sleep(150); // let async fallout (fetches, navigations) land
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
+      await collectInvariants(browser, record);
 
       if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {

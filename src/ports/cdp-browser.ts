@@ -8,6 +8,7 @@ import { ensureChrome, sleep, type LaunchOptions } from '../chrome/launch.js';
 import { attachCapture, type CaptureBuffers } from '../capture/console-network.js';
 import { setLogpointByContent } from '../capture/logpoints.js';
 import { snapshotAxTree } from '../capture/axtree.js';
+import { INVARIANT_PROBE_JS } from '../assertions/invariants.js';
 import {
   assertMutationHostAllowed,
   hostOfUrl,
@@ -465,6 +466,20 @@ export class CdpBrowser implements BrowserPort {
   async screenshot(): Promise<Buffer> {
     const { data } = await this.c.Page.captureScreenshot({ format: 'png' });
     return Buffer.from(data, 'base64');
+  }
+
+  /** A24 Tier-0 oracle. Evaluates the ONE compile-time constant probe — never
+   * caller-supplied JS (see BrowserPort.probeInvariants). The probe is itself
+   * try/catch-wrapped in-page, so a hostile or half-loaded document yields a
+   * junk-but-harmless value rather than throwing; invariants.ts parses any
+   * shape defensively. */
+  async probeInvariants(): Promise<unknown> {
+    const { result } = await this.c.Runtime.evaluate({
+      expression: INVARIANT_PROBE_JS,
+      returnByValue: true,
+      awaitPromise: false,
+    });
+    return result?.value;
   }
 
   async setLogpoint(spec: LogpointSpec): Promise<void> {

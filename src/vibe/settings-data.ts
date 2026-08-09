@@ -67,10 +67,21 @@ export const DEFAULT_SETTINGS: QaSettings = {
   // (The daemon's config.ts keeps claude:cli as ITS brain default — it has CLI
   // rungs; lite/BYOK has none, so the shared default here is api.)
   planner: { provider: 'claude', mode: 'api', model: '' },
-  // NAVIGATOR default: Gemini Nano, on-device and $0. It does the frequent grunt
-  // work every step, so cheap/free is the whole point; cloud fallback applies
-  // automatically when Nano can't drive a step (or has no plan-step support yet).
-  navigator: { provider: 'nano', mode: 'ondevice' },
+  // NAVIGATOR default (A27): a cheap CLOUD model, not Nano. Lite mode is
+  // intentionally AI-powered end to end — one BYOK key (Anthropic) serves BOTH
+  // roles out of the box: a small model (claude-haiku-4-5, see NAVIGATOR_MODELS
+  // below) drives every step, the big model (claude-sonnet-5, via the shared
+  // `planner` default just above) judges/plans. Pinning Nano here used to be a
+  // silent no-op: lite mode can't prove Nano is actually live at config-build
+  // time (no synchronous on-device probe), so ModelRouter's pin match failed and
+  // a cloud adapter took over plan-step ANYWAY, picked by accidental Map-iteration
+  // order instead of a deliberate choice — while the panel kept showing "Nano".
+  // Nano remains fully available as an explicit opt-in ("Experimental" in the
+  // panel) navigator, and unconditionally as the rung-0 $0 visual-verdict adapter
+  // (assert_visual / finish screenshots) — this default only changes which model
+  // drives plan-step out of the box. See lite-engine.ts's buildLiteLadder /
+  // resolveNavigatorName for how a nano pin's real plan-step fate is resolved.
+  navigator: { provider: 'claude', mode: 'api' },
   debugMode: 'prompt',
   debugAgent: 'auto',
   videoAssertions: false,
