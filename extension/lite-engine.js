@@ -5623,6 +5623,18 @@ function describeAction(a) {
       return `${a.mode === "video" ? "video" : "visual"} check: ${a.expectation}`;
     case "assert_dom":
       return `dom check: ${a.nodeId} contains ${JSON.stringify(a.contains)}`;
+    case "assert_text":
+      return `text check: ${a.target ?? "page"} ${a.mode} ${JSON.stringify(a.value)}`;
+    case "assert_count":
+      return `count check: ${a.role}${a.name ? ` "${a.name}"` : ""} ${a.comparator} ${a.expected}`;
+    case "assert_url":
+      return `url check: ${a.mode} ${JSON.stringify(a.value)}`;
+    case "assert_state":
+      return `state check: ${a.target} is ${a.state}`;
+    case "assert_network":
+      return `network check: ${a.urlPattern}${a.status !== void 0 ? ` status=${a.status}` : a.statusClass ? ` status=${a.statusClass}` : ""}${a.absent ? " (must be absent)" : ""}`;
+    case "assert_no_console_errors":
+      return `console check: no errors${a.allow?.length ? ` (allowing ${a.allow.length} pattern(s))` : ""}`;
     case "extract":
       return `extract ${a.key} from ${a.nodeId ?? "page"}${a.prompt ? " (model)" : a.pattern ? ` matching ${JSON.stringify(a.pattern)}` : ""}`;
     case "upload_file":
@@ -9802,6 +9814,50 @@ var ActionSchema = external_exports.discriminatedUnion("type", [
   external_exports.object({ type: external_exports.literal("close_tab"), tabId: external_exports.string() }),
   external_exports.object({ type: external_exports.literal("assert_visual"), expectation: external_exports.string(), mode: external_exports.enum(["screenshot", "video"]).optional() }),
   external_exports.object({ type: external_exports.literal("assert_dom"), nodeId: external_exports.string(), contains: external_exports.string() }),
+  // A5 — precise assertion vocabulary (src/assertions/dom-assertions.ts is the
+  // pure evaluator; loop.ts wires these in). Additive: assert_dom above is
+  // UNCHANGED (recorded scripts and the action cache still reference it as
+  // the case-insensitive-substring verb) — these are new, more precise verbs
+  // alongside it, not a replacement.
+  external_exports.object({
+    type: external_exports.literal("assert_text"),
+    target: external_exports.string().optional(),
+    // nodeId; omitted = whole page text
+    mode: external_exports.enum(["exact", "contains", "regex"]),
+    value: external_exports.string()
+  }),
+  external_exports.object({
+    type: external_exports.literal("assert_count"),
+    role: external_exports.string(),
+    name: external_exports.string().optional(),
+    // omitted = match role only
+    expected: external_exports.number().int().min(0),
+    comparator: external_exports.enum(["eq", "gte", "lte"])
+  }),
+  external_exports.object({
+    type: external_exports.literal("assert_url"),
+    mode: external_exports.enum(["exact", "contains", "regex"]),
+    value: external_exports.string()
+  }),
+  external_exports.object({
+    type: external_exports.literal("assert_state"),
+    target: external_exports.string(),
+    // nodeId
+    state: external_exports.enum(["visible", "hidden", "enabled", "disabled", "checked", "focused"])
+  }),
+  external_exports.object({
+    type: external_exports.literal("assert_network"),
+    urlPattern: external_exports.string(),
+    // regex, compiled defensively
+    status: external_exports.number().int().optional(),
+    statusClass: external_exports.enum(["2xx", "3xx", "4xx", "5xx"]).optional(),
+    absent: external_exports.boolean().optional()
+  }),
+  external_exports.object({
+    type: external_exports.literal("assert_no_console_errors"),
+    allow: external_exports.array(external_exports.string()).optional()
+    // substrings that are OK to ignore
+  }),
   // Phase 15 — extract gains an optional model-assisted mode: when `prompt` is
   // present, a cheap text adapter pulls a structured value out of the page/
   // subtree text instead of the $0 DOM-text/regex path. `nodeId` becomes
@@ -9870,6 +9926,12 @@ var PLAN_JSON_SCHEMA = {
               "close_tab",
               "assert_visual",
               "assert_dom",
+              "assert_text",
+              "assert_count",
+              "assert_url",
+              "assert_state",
+              "assert_network",
+              "assert_no_console_errors",
               "extract",
               "wait",
               "script",
@@ -9880,11 +9942,22 @@ var PLAN_JSON_SCHEMA = {
           nodeId: { type: "string" },
           text: { type: "string" },
           key: { type: "string" },
-          value: { type: "string" },
+          value: { type: "string", description: "select_option value, OR assert_text/assert_url expected value" },
           expectation: { type: "string" },
-          mode: { type: "string", enum: ["screenshot", "video"] },
+          mode: { type: "string", enum: ["screenshot", "video", "exact", "contains", "regex"], description: "assert_visual: screenshot|video. assert_text/assert_url: exact|contains|regex" },
           contains: { type: "string" },
           pattern: { type: "string" },
+          target: { type: "string", description: "assert_text/assert_state: nodeId (assert_text: omit for whole-page text)" },
+          role: { type: "string", description: "assert_count: AX role to count" },
+          name: { type: "string", description: "assert_count: accessible name filter (omit to match role only)" },
+          expected: { type: "integer", description: "assert_count: expected count" },
+          comparator: { type: "string", enum: ["eq", "gte", "lte"], description: "assert_count: how expected compares to the actual count" },
+          state: { type: "string", enum: ["visible", "hidden", "enabled", "disabled", "checked", "focused"], description: "assert_state: expected state of target" },
+          urlPattern: { type: "string", description: "assert_network: regex over request URLs" },
+          status: { type: "integer", description: "assert_network: exact HTTP status to require" },
+          statusClass: { type: "string", enum: ["2xx", "3xx", "4xx", "5xx"], description: "assert_network: status class to require" },
+          absent: { type: "boolean", description: "assert_network: true = assert NO matching request occurred" },
+          allow: { type: "array", items: { type: "string" }, description: "assert_no_console_errors: substrings of errors to ignore" },
           prompt: { type: "string", description: "when set on extract, ask a cheap text model to pull the value instead of DOM-text/regex" },
           ms: { type: "integer" },
           paths: { type: "array", items: { type: "string" }, description: "upload_file: file paths to set on the input" },
@@ -10417,6 +10490,242 @@ function checkProbeInvariants(raw, config) {
   return out;
 }
 
+// src/assertions/dom-assertions.ts
+init_buffer_shim();
+function findNode(root, id) {
+  if (root.id === id) return root;
+  for (const c of root.children ?? []) {
+    const hit = findNode(c, id);
+    if (hit) return hit;
+  }
+  return void 0;
+}
+function subtreeText(node) {
+  const parts = [];
+  const walk = (n) => {
+    if (n.name) parts.push(n.name);
+    if (n.value) parts.push(n.value);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(node);
+  return parts.join(" ");
+}
+function collapseWhitespace(s) {
+  return s.trim().replace(/\s+/g, " ");
+}
+function compileRegexSafe(pattern) {
+  try {
+    return new RegExp(pattern);
+  } catch {
+    return null;
+  }
+}
+function truncate(s, max = 200) {
+  return s.length > max ? `${s.slice(0, max)}\u2026` : s;
+}
+function countByRoleName(root, role, name) {
+  let count = 0;
+  const walk = (n) => {
+    if (n.role === role && (name === void 0 || n.name === name)) count++;
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+  return count;
+}
+function compareCount(actual, expected, comparator) {
+  switch (comparator) {
+    case "eq":
+      return actual === expected;
+    case "gte":
+      return actual >= expected;
+    case "lte":
+      return actual <= expected;
+  }
+}
+function normalizeUrlForAssertion(input) {
+  try {
+    const u = new URL(input);
+    const protocol = u.protocol.toLowerCase();
+    const hostname = u.hostname.toLowerCase();
+    const host = u.port ? `${hostname}:${u.port}` : hostname;
+    const cleanPath = u.pathname.replace(/\/{2,}/g, "/");
+    const pathname = cleanPath === "" || cleanPath === "/" ? "/" : cleanPath.endsWith("/") ? cleanPath.slice(0, -1) : cleanPath;
+    const TRACKING_QUERY_RE2 = /^(utm_|fbclid$|gclid$|msclkid$)/i;
+    const params = [...u.searchParams.entries()].filter(([k]) => !TRACKING_QUERY_RE2.test(k)).sort(([a], [b]) => a.localeCompare(b));
+    const query = params.length ? `?${params.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&")}` : "";
+    return `${protocol}//${host}${pathname}${query}`;
+  } catch {
+    return input.trim().replace(/\s+/g, " ").toLowerCase();
+  }
+}
+function statusClassOf(entry) {
+  if (typeof entry.status === "number") {
+    const c = Math.floor(entry.status / 100);
+    if (c >= 2 && c <= 5) return `${c}xx`;
+    return void 0;
+  }
+  if (entry.failed) return "5xx";
+  if (entry.clientError) return "4xx";
+  return void 0;
+}
+function evalAssertText(spec, ctx) {
+  let hay;
+  if (spec.target) {
+    const node = findNode(ctx.ax.root, spec.target);
+    if (!node) return { ok: false, detail: `assert_text: target node "${spec.target}" not found in current page` };
+    hay = subtreeText(node);
+  } else {
+    hay = ctx.ax.text;
+  }
+  if (spec.mode === "exact") {
+    const a = collapseWhitespace(hay);
+    const b = collapseWhitespace(spec.value);
+    const ok2 = a === b;
+    return { ok: ok2, detail: `assert_text exact: expected ${JSON.stringify(b)}, found ${JSON.stringify(truncate(a))}`, actual: a };
+  }
+  if (spec.mode === "contains") {
+    const ok2 = hay.toLowerCase().includes(spec.value.toLowerCase());
+    return {
+      ok: ok2,
+      detail: ok2 ? `assert_text contains: found ${JSON.stringify(spec.value)}` : `assert_text contains: expected to find ${JSON.stringify(spec.value)}, found ${JSON.stringify(truncate(hay))}`,
+      actual: hay
+    };
+  }
+  const re = compileRegexSafe(spec.value);
+  if (!re) return { ok: false, detail: `assert_text regex: invalid pattern ${JSON.stringify(spec.value)}`, actual: hay };
+  const ok = re.test(hay);
+  return {
+    ok,
+    detail: ok ? `assert_text regex: ${JSON.stringify(spec.value)} matched` : `assert_text regex: ${JSON.stringify(spec.value)} did not match ${JSON.stringify(truncate(hay))}`,
+    actual: hay
+  };
+}
+function evalAssertCount(spec, ctx) {
+  const actual = countByRoleName(ctx.ax.root, spec.role, spec.name);
+  const ok = compareCount(actual, spec.expected, spec.comparator);
+  const target = spec.name ? `role "${spec.role}" name ${JSON.stringify(spec.name)}` : `role "${spec.role}"`;
+  return {
+    ok,
+    detail: `assert_count: expected count ${spec.comparator} ${spec.expected} for ${target}, found ${actual}`,
+    actual: String(actual)
+  };
+}
+function evalAssertUrl(spec, ctx) {
+  if (spec.mode === "exact") {
+    const a = normalizeUrlForAssertion(ctx.url);
+    const b = normalizeUrlForAssertion(spec.value);
+    const ok2 = a === b;
+    return { ok: ok2, detail: `assert_url exact: expected ${JSON.stringify(b)}, found ${JSON.stringify(a)}`, actual: ctx.url };
+  }
+  if (spec.mode === "contains") {
+    const ok2 = ctx.url.toLowerCase().includes(spec.value.toLowerCase());
+    return {
+      ok: ok2,
+      detail: ok2 ? `assert_url contains: found ${JSON.stringify(spec.value)} in ${JSON.stringify(ctx.url)}` : `assert_url contains: expected to find ${JSON.stringify(spec.value)} in ${JSON.stringify(ctx.url)}`,
+      actual: ctx.url
+    };
+  }
+  const re = compileRegexSafe(spec.value);
+  if (!re) return { ok: false, detail: `assert_url regex: invalid pattern ${JSON.stringify(spec.value)}`, actual: ctx.url };
+  const ok = re.test(ctx.url);
+  return {
+    ok,
+    detail: ok ? `assert_url regex: ${JSON.stringify(spec.value)} matched ${JSON.stringify(ctx.url)}` : `assert_url regex: ${JSON.stringify(spec.value)} did not match ${JSON.stringify(ctx.url)}`,
+    actual: ctx.url
+  };
+}
+function evalAssertState(spec, ctx) {
+  const node = findNode(ctx.ax.root, spec.target);
+  if (!node) {
+    if (spec.state === "hidden") return { ok: true, detail: `assert_state hidden: target "${spec.target}" is not present in the current tree (treated as hidden)` };
+    return { ok: false, detail: `assert_state ${spec.state}: target "${spec.target}" not found in current page` };
+  }
+  const states = node.states ?? [];
+  const has = (s) => states.includes(s);
+  let ok;
+  switch (spec.state) {
+    case "visible":
+      ok = !has("hidden") && !has("invisible");
+      break;
+    case "hidden":
+      ok = has("hidden") || has("invisible");
+      break;
+    case "enabled":
+      ok = !has("disabled");
+      break;
+    case "disabled":
+      ok = has("disabled");
+      break;
+    case "checked":
+      ok = has("checked");
+      break;
+    case "focused":
+      ok = has("focused");
+      break;
+  }
+  return {
+    ok,
+    detail: `assert_state: expected "${spec.target}" to be ${spec.state}, actual states: [${states.join(", ")}]`,
+    actual: states.join(", ")
+  };
+}
+function evalAssertNetwork(spec, ctx) {
+  const re = compileRegexSafe(spec.urlPattern);
+  if (!re) return { ok: false, detail: `assert_network: invalid urlPattern ${JSON.stringify(spec.urlPattern)}` };
+  const matches = ctx.network.filter((e) => {
+    if (!re.test(e.url)) return false;
+    if (spec.status !== void 0 && e.status !== spec.status) return false;
+    if (spec.statusClass !== void 0 && statusClassOf(e) !== spec.statusClass) return false;
+    return true;
+  });
+  const filterDesc = [
+    `url~${JSON.stringify(spec.urlPattern)}`,
+    spec.status !== void 0 ? `status=${spec.status}` : null,
+    spec.statusClass !== void 0 ? `statusClass=${spec.statusClass}` : null
+  ].filter(Boolean).join(", ");
+  if (spec.absent) {
+    const ok2 = matches.length === 0;
+    return {
+      ok: ok2,
+      detail: ok2 ? `assert_network absent: no request matched (${filterDesc})` : `assert_network absent: expected NO request matching (${filterDesc}), found ${matches.length}: ${matches.map((m) => m.url).slice(0, 5).join(", ")}`,
+      actual: String(matches.length)
+    };
+  }
+  const ok = matches.length > 0;
+  return {
+    ok,
+    detail: ok ? `assert_network: found ${matches.length} matching request(s) (${filterDesc})` : `assert_network: expected a request matching (${filterDesc}), found none among ${ctx.network.length} recorded`,
+    actual: String(matches.length)
+  };
+}
+function evalAssertNoConsoleErrors(spec, ctx) {
+  const allow = spec.allow ?? [];
+  const isAllowed = (text) => allow.some((a) => text.toLowerCase().includes(a.toLowerCase()));
+  const offenders = ctx.console.filter((e) => (e.level === "page-error" || e.level === "error") && !isAllowed(e.text));
+  const ok = offenders.length === 0;
+  return {
+    ok,
+    detail: ok ? "assert_no_console_errors: no unallowed error/page-error entries" : `assert_no_console_errors: ${offenders.length} unallowed error(s): ${offenders.map((o) => truncate(o.text, 100)).slice(0, 5).join(" | ")}`,
+    actual: String(offenders.length)
+  };
+}
+function evaluateAssertion(spec, ctx) {
+  switch (spec.type) {
+    case "assert_text":
+      return evalAssertText(spec, ctx);
+    case "assert_count":
+      return evalAssertCount(spec, ctx);
+    case "assert_url":
+      return evalAssertUrl(spec, ctx);
+    case "assert_state":
+      return evalAssertState(spec, ctx);
+    case "assert_network":
+      return evalAssertNetwork(spec, ctx);
+    case "assert_no_console_errors":
+      return evalAssertNoConsoleErrors(spec, ctx);
+  }
+}
+
 // src/driver/script-runner/index.ts
 init_buffer_shim();
 
@@ -10636,8 +10945,8 @@ async function runOneStep(browser, step, runData, vault) {
       return new Promise((resolve) => setTimeout(resolve, step.ms));
     case "assert_dom": {
       const ax = await browser.axTree();
-      const node = findNode(ax.root, step.nodeId);
-      const hay = node ? subtreeText(node) : "";
+      const node = findNode2(ax.root, step.nodeId);
+      const hay = node ? subtreeText2(node) : "";
       if (!hay.toLowerCase().includes(step.contains.toLowerCase())) {
         throw new Error(`expected ${JSON.stringify(step.contains)} in ${step.nodeId}, found: ${hay.slice(0, 150)}`);
       }
@@ -10645,9 +10954,9 @@ async function runOneStep(browser, step, runData, vault) {
     }
     case "extract": {
       const ax = await browser.axTree();
-      const node = findNode(ax.root, step.nodeId);
+      const node = findNode2(ax.root, step.nodeId);
       if (!node) throw new Error(`nodeId ${step.nodeId} not in current tree`);
-      const value = extractValue(subtreeText(node).trim(), step.pattern);
+      const value = extractValue(subtreeText2(node).trim(), step.pattern);
       if (!value) throw new Error(`could not extract ${step.key} from ${step.nodeId}`);
       recordExtraction(runData, { key: step.key, value, source: "dom", label: node.name });
       return;
@@ -10662,15 +10971,15 @@ async function runOneStep(browser, step, runData, vault) {
       return browser.mouse(step.kind, step.x, step.y);
   }
 }
-function findNode(root, id) {
+function findNode2(root, id) {
   if (root.id === id) return root;
   for (const c of root.children ?? []) {
-    const hit = findNode(c, id);
+    const hit = findNode2(c, id);
     if (hit) return hit;
   }
   return void 0;
 }
-function subtreeText(node) {
+function subtreeText2(node) {
   const parts = [];
   const walk = (n) => {
     if (n.name) parts.push(n.name);
@@ -10803,6 +11112,17 @@ function toCachedActionValue(action, target) {
     case "close_tab":
     case "script":
     case "assert_visual":
+    // A5's deterministic assertion verbs are READ-ONLY checks, not page
+    // mutations — there is no "effect" for verifyActionEffect to confirm, and
+    // their value shape (regex/comparator/status-class) does not fit the
+    // locator-only CachedActionValue. Re-evaluating them is cheap and exact,
+    // so caching would add risk for no saving. Rejected like assert_visual.
+    case "assert_text":
+    case "assert_count":
+    case "assert_url":
+    case "assert_state":
+    case "assert_network":
+    case "assert_no_console_errors":
     case "finish":
       throw new ActionCacheRejectedError(`${action.type} is not stored in the action cache`);
   }
@@ -10847,7 +11167,7 @@ async function actionFromCachedValue(value, ax, browser) {
 }
 async function captureActionEffectState(browser) {
   const url = await browser.url();
-  const ax = await browser.axTree();
+  const ax = browser.peekAxTree ? await browser.peekAxTree() : await browser.axTree();
   return {
     url,
     normalizedUrl: normalizeUrlForActionCache(url),
@@ -10969,7 +11289,7 @@ function verifyActionEffect(before, after, action, target) {
     return { ok: false, reason: "selected value was not observed in the target state", changes };
   }
   if (action.type === "assert_dom") {
-    const node = findNode2(after.ax.root, action.nodeId) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
+    const node = findNode3(after.ax.root, action.nodeId) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
     const hay = node ? nodeText(node) : "";
     if (hay.toLowerCase().includes(action.contains.toLowerCase())) {
       return { ok: true, reason: "DOM assertion condition is satisfied", changes };
@@ -10977,7 +11297,7 @@ function verifyActionEffect(before, after, action, target) {
     return { ok: false, reason: "DOM assertion condition is not satisfied", changes };
   }
   if (action.type === "extract") {
-    const node = (action.nodeId ? findNode2(after.ax.root, action.nodeId) : void 0) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
+    const node = (action.nodeId ? findNode3(after.ax.root, action.nodeId) : void 0) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
     const text = node ? nodeText(node) : "";
     if (!text) return { ok: false, reason: "extract target has no visible text", changes };
     if (action.pattern) {
@@ -11039,6 +11359,18 @@ function actionIntentForKey(action, target) {
       return `close_tab:${action.tabId}`;
     case "script":
       return `script:steps=${action.steps.length}`;
+    case "assert_text":
+      return `assert_text:${tgt}:${action.mode}=${textForKey(action.value)}`;
+    case "assert_count":
+      return `assert_count:role=${action.role}:name=${textForKey(action.name ?? "")}:${action.comparator}=${action.expected}`;
+    case "assert_url":
+      return `assert_url:${action.mode}=${textForKey(action.value)}`;
+    case "assert_state":
+      return `assert_state:${tgt}:${action.state}`;
+    case "assert_network":
+      return `assert_network:${textForKey(action.urlPattern)}:status=${action.status ?? ""}:class=${action.statusClass ?? ""}:absent=${action.absent ?? false}`;
+    case "assert_no_console_errors":
+      return `assert_no_console_errors:allow=${(action.allow ?? []).map(textForKey).join(",")}`;
     case "finish":
       return `finish:${action.verdict}:${textForKey(action.reason)}`;
   }
@@ -11124,10 +11456,10 @@ function findByCachedTarget(root, target) {
   walk(root);
   return matches[target.nth ?? 0];
 }
-function findNode2(root, id) {
+function findNode3(root, id) {
   if (root.id === id) return root;
   for (const child of root.children ?? []) {
-    const hit = findNode2(child, id);
+    const hit = findNode3(child, id);
     if (hit) return hit;
   }
   return void 0;
@@ -11365,6 +11697,14 @@ function stepKind(action) {
       return "finish";
     case "assert_visual":
     case "assert_dom":
+    // A5's deterministic assertion verbs report as the same onStep kind as the
+    // two that predate them — to a watching UI an assertion is an assertion.
+    case "assert_text":
+    case "assert_count":
+    case "assert_url":
+    case "assert_state":
+    case "assert_network":
+    case "assert_no_console_errors":
       return "assert";
     case "extract":
       return "extract";
@@ -11428,6 +11768,18 @@ function humanizeAction(action, target) {
       return `Visual check: ${action.expectation}`;
     case "assert_dom":
       return `Check ${tgt ?? action.nodeId} contains "${action.contains}"`;
+    case "assert_text":
+      return `Check ${tgt ?? "page"} text ${action.mode} "${action.value}"`;
+    case "assert_count":
+      return `Check ${action.comparator} ${action.expected} ${action.role}${action.name ? ` "${action.name}"` : ""}`;
+    case "assert_url":
+      return `Check URL ${action.mode} "${action.value}"`;
+    case "assert_state":
+      return `Check ${tgt ?? action.target} is ${action.state}`;
+    case "assert_network":
+      return `Check request "${action.urlPattern}" ${action.absent ? "absent" : `\u2192 ${action.status ?? action.statusClass ?? "any"}`}`;
+    case "assert_no_console_errors":
+      return "Check no console errors";
     case "extract":
       return action.prompt ? `Extract ${action.key} (model-assisted: ${action.prompt.slice(0, 60)})` : `Extract ${action.key} from ${tgt ?? action.nodeId ?? "page"}`;
     case "upload_file":
@@ -11458,6 +11810,25 @@ async function collectInvariants(browser, record) {
     }
   }
   if (violations.length) record.invariants = violations;
+}
+async function captureFailureShot(browser, artifacts, record) {
+  if (record.ok || record.screenshot) return;
+  try {
+    const png = await withTimeout(browser.screenshot(), CDP_CALL_TIMEOUT_MS, "screenshot");
+    record.screenshot = await artifacts.saveScreenshot(record.index, png);
+  } catch {
+  }
+}
+var DETERMINISTIC_ASSERTIONS = /* @__PURE__ */ new Set([
+  "assert_text",
+  "assert_count",
+  "assert_url",
+  "assert_state",
+  "assert_network",
+  "assert_no_console_errors"
+]);
+function isDeterministicAssertion(action) {
+  return DETERMINISTIC_ASSERTIONS.has(action.type);
 }
 function drainHasPageError(consoleEntries, networkEntries) {
   return consoleEntries.some((e) => e.level === "error" || e.level === "page-error") || networkEntries.some((e) => e.failed);
@@ -11971,8 +12342,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             failingStep = { index: i, action, description: record.description };
           }
         } else if (action.type === "assert_dom") {
-          const t = findNode3(ax.root, action.nodeId);
-          const hay = t ? subtreeText2(t) : "";
+          const t = findNode4(ax.root, action.nodeId);
+          const hay = t ? subtreeText3(t) : "";
           if (!t) {
             record.ok = false;
             record.error = `nodeId ${action.nodeId} not in current tree`;
@@ -11980,18 +12351,29 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             record.ok = false;
             record.error = `expected ${JSON.stringify(action.contains)} in ${action.nodeId}, found: ${hay.slice(0, 150)}`;
           }
+        } else if (isDeterministicAssertion(action)) {
+          const result = evaluateAssertion(action, {
+            ax,
+            url: batchUrl,
+            network: record.network,
+            console: record.console
+          });
+          if (!result.ok) {
+            record.ok = false;
+            record.error = result.detail;
+          }
         } else if (action.type === "type") {
           const resolvedRun = resolveRunPlaceholders(action.text, runData).text;
           const resolved = resolveSecrets2(resolvedRun, vault);
           await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
         } else if (action.type === "extract") {
           if (action.prompt) {
-            const source = action.nodeId ? findNode3(ax.root, action.nodeId) : void 0;
+            const source = action.nodeId ? findNode4(ax.root, action.nodeId) : void 0;
             if (action.nodeId && !source) {
               record.ok = false;
               record.error = `nodeId ${action.nodeId} not in current tree`;
             } else {
-              const text = source ? subtreeText2(source).trim() : ax.text;
+              const text = source ? subtreeText3(source).trim() : ax.text;
               try {
                 const raw = await withTimeout(
                   router.planJson(
@@ -12019,12 +12401,12 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             record.ok = false;
             record.error = "extract without a prompt requires nodeId";
           } else {
-            const t = findNode3(ax.root, action.nodeId);
+            const t = findNode4(ax.root, action.nodeId);
             if (!t) {
               record.ok = false;
               record.error = `nodeId ${action.nodeId} not in current tree`;
             } else {
-              const hay = subtreeText2(t).trim();
+              const hay = subtreeText3(t).trim();
               const value = extractValue2(hay, action.pattern);
               if (!value) {
                 record.ok = false;
@@ -12075,6 +12457,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
       await collectInvariants(browser, record);
+      await captureFailureShot(browser, artifacts, record);
       if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {
           const cacheAfter = await captureActionEffectState(browser);
@@ -12318,7 +12701,7 @@ async function executeWithRetry(browser, action, planTree) {
     if (action.type !== "click" && action.type !== "type" && action.type !== "hover" && action.type !== "select_option" && action.type !== "upload_file" && action.type !== "blur") {
       throw firstErr;
     }
-    const target = findNode3(planTree, action.nodeId);
+    const target = findNode4(planTree, action.nodeId);
     if (!target) throw firstErr;
     const fresh = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, "axTree");
     const match = findByRoleName(fresh.root, target.role, target.name);
@@ -12364,8 +12747,8 @@ async function executeCacheAction(browser, action, planTree, runData, vault) {
     return;
   }
   if (action.type === "assert_dom") {
-    const t = findNode3(planTree, action.nodeId);
-    const hay = t ? subtreeText2(t) : "";
+    const t = findNode4(planTree, action.nodeId);
+    const hay = t ? subtreeText3(t) : "";
     if (!t || !hay.toLowerCase().includes(action.contains.toLowerCase())) {
       throw new Error(`cached DOM assertion failed for ${action.nodeId}`);
     }
@@ -12373,9 +12756,9 @@ async function executeCacheAction(browser, action, planTree, runData, vault) {
   }
   if (action.type === "extract") {
     if (!action.nodeId) throw new Error(`cached extract for ${action.key} has no nodeId (model-assisted extraction is not cacheable)`);
-    const t = findNode3(planTree, action.nodeId);
+    const t = findNode4(planTree, action.nodeId);
     if (!t) throw new Error(`cached extract target ${action.nodeId} not in current tree`);
-    const value = extractValue2(subtreeText2(t).trim(), action.pattern);
+    const value = extractValue2(subtreeText3(t).trim(), action.pattern);
     if (!value) throw new Error(`cached extract ${action.key} produced no value`);
     recordExtraction(runData, { key: action.key, value, source: "dom", label: t.name });
     return;
@@ -12392,10 +12775,10 @@ async function startAssertionClip(cdpClient, artifacts) {
     return null;
   }
 }
-function findNode3(root, id) {
+function findNode4(root, id) {
   if (root.id === id) return root;
   for (const c of root.children ?? []) {
-    const hit = findNode3(c, id);
+    const hit = findNode4(c, id);
     if (hit) return hit;
   }
   return void 0;
@@ -12428,7 +12811,7 @@ function findByRoleName(root, role, name) {
   }
   return void 0;
 }
-function subtreeText2(node) {
+function subtreeText3(node) {
   const parts = [];
   const walk = (n) => {
     if (n.name) parts.push(n.name);
@@ -12942,7 +13325,99 @@ var STRUCTURAL = /* @__PURE__ */ new Set([
   "figure"
 ]);
 var STATE_PROPS = /* @__PURE__ */ new Set(["disabled", "focused", "required", "checked", "expanded", "invalid", "selected"]);
-async function snapshotAxTree(client) {
+function findFocusEntry(entries, focus) {
+  if (focus.id) return entries.find((e) => e.id === focus.id);
+  if (!focus.role) return void 0;
+  const exact = entries.find((e) => e.role === focus.role && (focus.name === void 0 || e.name === focus.name));
+  if (exact) return exact;
+  if (focus.name) {
+    const needle = focus.name.toLowerCase();
+    return entries.find((e) => e.role === focus.role && e.name?.toLowerCase().includes(needle));
+  }
+  return void 0;
+}
+function truncateFlat(lines, maxChars) {
+  let text = lines.join("\n");
+  let truncated = false;
+  if (text.length > maxChars) {
+    const head = lines.slice(0, Math.floor(lines.length * 0.4));
+    const keepChars = maxChars - head.join("\n").length - 64;
+    const tail = [];
+    let used = 0;
+    for (let i = lines.length - 1; i >= head.length && used < keepChars; i--) {
+      used += lines[i].length + 1;
+      tail.unshift(lines[i]);
+    }
+    text = [...head, `  \u2026 (${lines.length - head.length - tail.length} nodes truncated) \u2026`, ...tail].join("\n");
+    truncated = true;
+  }
+  return { text, truncated };
+}
+function truncateFocused(entries, focusEntry, maxChars) {
+  const full = entries.map((e) => e.text).join("\n");
+  if (full.length <= maxChars) return { text: full, truncated: false };
+  const ancestorPath = new Set(focusEntry.ancestors);
+  const protectedIds = /* @__PURE__ */ new Set();
+  for (const e of entries) {
+    if (e.id === focusEntry.id || e.ancestors.includes(focusEntry.id) || ancestorPath.has(e.id)) {
+      protectedIds.add(e.id);
+    }
+  }
+  const protectedLen = entries.filter((e) => protectedIds.has(e.id)).reduce((sum, e) => sum + e.text.length + 1, 0);
+  const budgetLeft0 = Math.max(0, maxChars - protectedLen - 64);
+  const out = [];
+  let truncated = false;
+  let budgetLeft = budgetLeft0;
+  let i = 0;
+  while (i < entries.length) {
+    const e = entries[i];
+    if (protectedIds.has(e.id)) {
+      out.push(e.text);
+      i++;
+      continue;
+    }
+    let j = i;
+    const run = [];
+    while (j < entries.length && !protectedIds.has(entries[j].id)) {
+      run.push(entries[j].text);
+      j++;
+    }
+    const runText = run.join("\n");
+    if (runText.length + 1 <= budgetLeft) {
+      out.push(runText);
+      budgetLeft -= runText.length + 1;
+    } else {
+      truncated = true;
+      out.push(`  \u2026 (${run.length} nodes truncated) \u2026`);
+    }
+    i = j;
+  }
+  return { text: out.join("\n"), truncated };
+}
+function serializeAxTree(root, opts = {}) {
+  const maxChars = opts.maxChars ?? MAX_CHARS;
+  const entries = [];
+  const walk = (n, depth, ancestors) => {
+    const parts = [n.id, n.role];
+    if (n.name) parts.push(JSON.stringify(n.name));
+    if (n.value) parts.push(`value=${JSON.stringify(n.value)}`);
+    if (n.states?.length) parts.push(`(${n.states.join(", ")})`);
+    entries.push({
+      id: n.id,
+      role: n.role,
+      name: n.name,
+      text: "  ".repeat(depth) + parts.join(" "),
+      ancestors
+    });
+    if (depth >= MAX_DEPTH) return;
+    for (const c of n.children ?? []) walk(c, depth + 1, [...ancestors, n.id]);
+  };
+  walk(root, 0, []);
+  const focusEntry = opts.focus ? findFocusEntry(entries, opts.focus) : void 0;
+  if (!focusEntry) return truncateFlat(entries.map((e) => e.text), maxChars);
+  return truncateFocused(entries, focusEntry, maxChars);
+}
+async function snapshotAxTree(client, opts = {}) {
   const { nodes } = await client.Accessibility.getFullAXTree({});
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
   const root = nodes.find((n) => !n.parentId && !n.ignored) ?? nodes[0];
@@ -12972,36 +13447,8 @@ async function snapshotAxTree(client) {
   };
   const roots = build(root, "");
   const rootNode = roots.length === 1 ? roots[0] : { id: `n${seq++}`, role: "RootWebArea", children: roots };
-  let { text, truncated } = serialize(rootNode);
+  const { text, truncated } = serializeAxTree(rootNode, opts);
   return { snapshot: { root: rootNode, text, truncated }, nodeMap };
-}
-function serialize(root) {
-  const lines = [];
-  const walk = (n, depth) => {
-    const parts = [n.id, n.role];
-    if (n.name) parts.push(JSON.stringify(n.name));
-    if (n.value) parts.push(`value=${JSON.stringify(n.value)}`);
-    if (n.states?.length) parts.push(`(${n.states.join(", ")})`);
-    lines.push("  ".repeat(depth) + parts.join(" "));
-    if (depth >= MAX_DEPTH) return;
-    for (const c of n.children ?? []) walk(c, depth + 1);
-  };
-  walk(root, 0);
-  let text = lines.join("\n");
-  let truncated = false;
-  if (text.length > MAX_CHARS) {
-    const head = lines.slice(0, Math.floor(lines.length * 0.4));
-    const keepChars = MAX_CHARS - head.join("\n").length - 64;
-    const tail = [];
-    let used = 0;
-    for (let i = lines.length - 1; i >= head.length && used < keepChars; i--) {
-      used += lines[i].length + 1;
-      tail.unshift(lines[i]);
-    }
-    text = [...head, `  \u2026 (${lines.length - head.length - tail.length} nodes truncated) \u2026`, ...tail].join("\n");
-    truncated = true;
-  }
-  return { text, truncated };
 }
 
 // src/bridge/cdp-shim.ts
@@ -13633,6 +14080,18 @@ function humanizeStep(step) {
       return `checked the page looked right: ${a.expectation}`;
     case "assert_dom":
       return `checked ${targetPhrase ?? "the page"} contained ${JSON.stringify(a.contains)}`;
+    case "assert_text":
+      return `checked ${targetPhrase ?? "the page"} text ${a.mode} ${JSON.stringify(a.value)}`;
+    case "assert_count":
+      return `checked there were ${a.comparator} ${a.expected} ${a.role}${a.name ? ` ${JSON.stringify(a.name)}` : ""}`;
+    case "assert_url":
+      return `checked the URL ${a.mode} ${JSON.stringify(a.value)}`;
+    case "assert_state":
+      return `checked ${targetPhrase ?? "the element"} was ${a.state}`;
+    case "assert_network":
+      return a.absent ? `checked no request matched ${JSON.stringify(a.urlPattern)}` : `checked a request to ${JSON.stringify(a.urlPattern)} returned ${a.status ?? a.statusClass ?? "a response"}`;
+    case "assert_no_console_errors":
+      return "checked the console had no errors";
     case "extract":
       return `extracted ${a.key} from ${targetPhrase ?? "the page"}`;
     case "upload_file":

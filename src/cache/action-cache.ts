@@ -202,6 +202,17 @@ export function toCachedActionValue(action: Action, target?: StepTarget): Cached
     case 'close_tab':
     case 'script':
     case 'assert_visual':
+    // A5's deterministic assertion verbs are READ-ONLY checks, not page
+    // mutations — there is no "effect" for verifyActionEffect to confirm, and
+    // their value shape (regex/comparator/status-class) does not fit the
+    // locator-only CachedActionValue. Re-evaluating them is cheap and exact,
+    // so caching would add risk for no saving. Rejected like assert_visual.
+    case 'assert_text':
+    case 'assert_count':
+    case 'assert_url':
+    case 'assert_state':
+    case 'assert_network':
+    case 'assert_no_console_errors':
     case 'finish':
       throw new ActionCacheRejectedError(`${action.type} is not stored in the action cache`);
   }
@@ -252,7 +263,12 @@ export async function actionFromCachedValue(
 
 export async function captureActionEffectState(browser: BrowserPort): Promise<ActionEffectState> {
   const url = await browser.url();
-  const ax = await browser.axTree();
+  // peekAxTree, NOT axTree: this is an OBSERVER. axTree() rebinds the planner's
+  // n-ids, and the driver captures before-state mid-batch — so re-snapshotting
+  // here used to repoint the batch's remaining ids at a newer tree (a click
+  // planned as `n8` landed on whatever `n8` meant afterwards). Falls back for
+  // ports that don't implement peek.
+  const ax = browser.peekAxTree ? await browser.peekAxTree() : await browser.axTree();
   return {
     url,
     normalizedUrl: normalizeUrlForActionCache(url),
@@ -592,6 +608,18 @@ function actionIntentForKey(action: Action, target?: StepTarget): string {
       return `close_tab:${action.tabId}`;
     case 'script':
       return `script:steps=${action.steps.length}`;
+    case 'assert_text':
+      return `assert_text:${tgt}:${action.mode}=${textForKey(action.value)}`;
+    case 'assert_count':
+      return `assert_count:role=${action.role}:name=${textForKey(action.name ?? '')}:${action.comparator}=${action.expected}`;
+    case 'assert_url':
+      return `assert_url:${action.mode}=${textForKey(action.value)}`;
+    case 'assert_state':
+      return `assert_state:${tgt}:${action.state}`;
+    case 'assert_network':
+      return `assert_network:${textForKey(action.urlPattern)}:status=${action.status ?? ''}:class=${action.statusClass ?? ''}:absent=${action.absent ?? false}`;
+    case 'assert_no_console_errors':
+      return `assert_no_console_errors:allow=${(action.allow ?? []).map(textForKey).join(',')}`;
     case 'finish':
       return `finish:${action.verdict}:${textForKey(action.reason)}`;
   }

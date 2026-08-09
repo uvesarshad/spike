@@ -170,6 +170,13 @@ export class CdpBrowser implements BrowserPort {
     return snapshot;
   }
 
+  /** See BrowserPort.peekAxTree — same snapshot, `nodeMap` deliberately left
+   * bound to whatever the planner is currently reasoning about. */
+  async peekAxTree(): Promise<AxSnapshot> {
+    const { snapshot } = await snapshotAxTree(this.c);
+    return snapshot;
+  }
+
   private backendNodeId(nodeId: string): number {
     const backendId = this.nodeMap.get(nodeId);
     if (backendId === undefined) {

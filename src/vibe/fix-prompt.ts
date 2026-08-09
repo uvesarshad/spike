@@ -39,6 +39,20 @@ export function humanizeStep(step: StepRecord): string {
       return `checked the page looked right: ${a.expectation}`;
     case 'assert_dom':
       return `checked ${targetPhrase ?? 'the page'} contained ${JSON.stringify(a.contains)}`;
+    case 'assert_text':
+      return `checked ${targetPhrase ?? 'the page'} text ${a.mode} ${JSON.stringify(a.value)}`;
+    case 'assert_count':
+      return `checked there were ${a.comparator} ${a.expected} ${a.role}${a.name ? ` ${JSON.stringify(a.name)}` : ''}`;
+    case 'assert_url':
+      return `checked the URL ${a.mode} ${JSON.stringify(a.value)}`;
+    case 'assert_state':
+      return `checked ${targetPhrase ?? 'the element'} was ${a.state}`;
+    case 'assert_network':
+      return a.absent
+        ? `checked no request matched ${JSON.stringify(a.urlPattern)}`
+        : `checked a request to ${JSON.stringify(a.urlPattern)} returned ${a.status ?? a.statusClass ?? 'a response'}`;
+    case 'assert_no_console_errors':
+      return 'checked the console had no errors';
     case 'extract':
       return `extracted ${a.key} from ${targetPhrase ?? 'the page'}`;
     case 'upload_file':

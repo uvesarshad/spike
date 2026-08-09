@@ -37,6 +37,7 @@ import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.j
 import type { Vault } from '../vault/vault.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
 import { checkDrainInvariants, checkProbeInvariants } from '../assertions/invariants.js';
+import { evaluateAssertion, type AssertionSpec } from '../assertions/dom-assertions.js';
 import { validateScriptSteps, runScriptSteps } from './script-runner/index.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders, RunDataNotFoundError } from '../run-data/index.js';
 import {
@@ -235,6 +236,14 @@ function stepKind(action: Action): StepKind {
       return 'finish';
     case 'assert_visual':
     case 'assert_dom':
+    // A5's deterministic assertion verbs report as the same onStep kind as the
+    // two that predate them — to a watching UI an assertion is an assertion.
+    case 'assert_text':
+    case 'assert_count':
+    case 'assert_url':
+    case 'assert_state':
+    case 'assert_network':
+    case 'assert_no_console_errors':
       return 'assert';
     case 'extract':
       return 'extract';
@@ -308,6 +317,18 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
       return `Visual check: ${action.expectation}`;
     case 'assert_dom':
       return `Check ${tgt ?? action.nodeId} contains "${action.contains}"`;
+    case 'assert_text':
+      return `Check ${tgt ?? 'page'} text ${action.mode} "${action.value}"`;
+    case 'assert_count':
+      return `Check ${action.comparator} ${action.expected} ${action.role}${action.name ? ` "${action.name}"` : ''}`;
+    case 'assert_url':
+      return `Check URL ${action.mode} "${action.value}"`;
+    case 'assert_state':
+      return `Check ${tgt ?? action.target} is ${action.state}`;
+    case 'assert_network':
+      return `Check request "${action.urlPattern}" ${action.absent ? 'absent' : `→ ${action.status ?? action.statusClass ?? 'any'}`}`;
+    case 'assert_no_console_errors':
+      return 'Check no console errors';
     case 'extract':
       return action.prompt
         ? `Extract ${action.key} (model-assisted: ${action.prompt.slice(0, 60)})`
@@ -358,6 +379,50 @@ async function collectInvariants(browser: BrowserPort, record: StepRecord): Prom
     }
   }
   if (violations.length) record.invariants = violations;
+}
+
+/** A22 (P2): a step that FAILED gets a screenshot, immediately.
+ *
+ * Screenshots were previously taken at only three moments — the finish
+ * confirmation, an explicit `assert_visual`, and a final fallback on the last
+ * step. Correct for speed (a shot per step is expensive and most steps are
+ * uninteresting), but it means a step that failed MID-flow leaves no visual
+ * evidence at all: on a 200-flow suite the only way to see what a red run
+ * looked like is to run it again and hope it reproduces. One shot on the
+ * failure path costs nothing on the happy path.
+ *
+ * Best-effort by construction: capture failures are swallowed (the page may be
+ * mid-navigation or gone), and an existing screenshot is never overwritten. */
+async function captureFailureShot(
+  browser: BrowserPort,
+  artifacts: ArtifactStore,
+  record: StepRecord,
+): Promise<void> {
+  if (record.ok || record.screenshot) return;
+  try {
+    const png = await withTimeout(browser.screenshot(), CDP_CALL_TIMEOUT_MS, 'screenshot');
+    record.screenshot = await artifacts.saveScreenshot(record.index, png);
+  } catch {
+    /* evidence is a nice-to-have — never let it turn a step failure into a crash */
+  }
+}
+
+/** A5: the deterministic assertion verbs — evaluated by the pure evaluator
+ * rather than by a model, and read-only (never mutating, so the Tier-4 guard
+ * and read-only mode leave them alone). `assert_dom` is deliberately NOT in
+ * this set: its substring semantics are load-bearing for already-recorded
+ * scripts and for the action cache, so it keeps its original inline path. */
+const DETERMINISTIC_ASSERTIONS = new Set([
+  'assert_text',
+  'assert_count',
+  'assert_url',
+  'assert_state',
+  'assert_network',
+  'assert_no_console_errors',
+]);
+
+function isDeterministicAssertion(action: Action): action is Extract<Action, AssertionSpec> {
+  return DETERMINISTIC_ASSERTIONS.has(action.type);
 }
 
 /** True if a console/network drain shows a page-level error (abort the batch). */
@@ -1050,6 +1115,23 @@ export async function runDriverLoop(
             record.ok = false;
             record.error = `expected ${JSON.stringify(action.contains)} in ${action.nodeId}, found: ${hay.slice(0, 150)}`;
           }
+        } else if (isDeterministicAssertion(action)) {
+          // A5: the precise assertion verbs. Unlike assert_dom's substring
+          // check above (kept byte-identical — recorded scripts and the action
+          // cache reference it), these are evaluated by the pure evaluator in
+          // assertions/dom-assertions.ts against the snapshot + url + this
+          // step's drains. No model call, no I/O: the whole point is that an
+          // expectation can be stated exactly rather than judged.
+          const result = evaluateAssertion(action, {
+            ax,
+            url: batchUrl,
+            network: record.network,
+            console: record.console,
+          });
+          if (!result.ok) {
+            record.ok = false;
+            record.error = result.detail;
+          }
         } else if (action.type === 'type') {
           // resolve {{secret:NAME}} AT EXECUTE TIME ONLY — the record keeps the
           // PLACEHOLDER (action is unchanged), so history/report/recorder/audit
@@ -1167,6 +1249,7 @@ export async function runDriverLoop(
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
       await collectInvariants(browser, record);
+      await captureFailureShot(browser, artifacts, record);
 
       if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {

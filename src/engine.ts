@@ -37,7 +37,8 @@ import { ArtifactStore } from './report/artifacts.js';
 import { runDriverLoop, type StepInfo } from './driver/loop.js';
 import { Vault } from './vault/vault.js';
 import type { Report, RunVerdict } from './report/report.js';
-import { diffScripts, loadScript, saveScript, scriptFromReport, type QaScript } from './recorder/script.js';
+import { diffScripts, loadScript, saveScript, scriptFromReport, scriptsDir, type QaScript } from './recorder/script.js';
+import { classifyHeal, type HealTier } from './recorder/heal-policy.js';
 import { replayScript } from './recorder/replay.js';
 import { matchReplayScriptDetailed, NEAR_MISS_MARGIN, type ReplayMatch } from './recorder/matcher.js';
 import { startClipRecorder, type ClipRecorder } from './clip/screencast.js';
@@ -624,11 +625,122 @@ export interface QaReplayOptions {
   onProgress?: (line: string) => void;
   /** Caller-owned bridge (extension mode) — see QaRunOptions.bridge. */
   bridge?: BridgeServer;
+  /** A11 (P1): on a FAILED replay attempt, retry up to this many additional
+   * times (each a fresh navigate-and-replay over the SAME session/script)
+   * before giving up / engaging `heal`. Default 0 — opt-in, no behaviour
+   * change unless a caller asks for it. A flow that fails at least once but
+   * eventually passes is reported via `QaReplayResult.flaky` rather than as
+   * a clean first-try pass, so a real flake rate stays visible instead of
+   * being silently absorbed into "green". */
+  retries?: number;
+}
+
+/** A11 (P1): recorded when `retries` masked at least one failed attempt.
+ * Deliberately NOT a new `RunVerdict` value: `report.verdict` stays 'pass'
+ * (the flow DID end in a pass; that's what an exit-code consumer should act
+ * on), and `flaky` is purely additive detail for anything that wants to
+ * surface "this passed, but wobbled" instead of a silent clean pass.
+ *
+ * Why not add 'flaky' to RunVerdict itself: `RunVerdict` is read by
+ * pass/fail/other exit-code ternaries in cli.ts (`report.verdict === 'pass'
+ * ? 0 : report.verdict === 'fail' ? 1 : 2`) and mcp-server.ts
+ * (`report.verdict === 'fail' ? false : undefined`) — neither is an
+ * exhaustive `switch`, so a new literal wouldn't fail to compile, but both
+ * treat "anything that isn't 'pass' or 'fail'" as the SAME bucket as
+ * 'uncertain' (exit 2 / non-error). A flow that failed once and then passed
+ * is not "uncertain" — it has a confirmed, reproduced-clean final state —
+ * so folding it into that bucket would make an eventually-GREEN flow exit
+ * non-zero, exactly backwards from what a retry policy is for. Keeping
+ * `verdict: 'pass'` and adding this field is the least invasive shape: every
+ * existing pass/fail consumer keeps working unchanged, and only a caller
+ * that explicitly checks `.flaky` sees the extra signal. */
+export interface FlakyInfo {
+  /** Total attempts made (1 + however many retries were actually consumed). */
+  attempts: number;
+  /** One entry per attempt BEFORE the final (passing) one. */
+  failedAttempts: Array<{ runId: string; verdict: RunVerdict; reason: string }>;
 }
 
 export interface QaReplayResult extends Report {
   healed?: boolean;
   recordedScript?: string;
+  /** A11 (P1): present only when at least one retry attempt failed before
+   * the flow eventually passed. Absent on a clean first-try pass/fail. */
+  flaky?: FlakyInfo;
+}
+
+/** A11 (P1): given the sequence of attempt reports a retry loop already
+ * produced (attempt 1 first, in order), decides the final report to return
+ * and stamps `.flaky` onto it when applicable. Pulled out of qaReplay's
+ * retry loop specifically so it's unit-testable with a list of STUBBED
+ * attempt-shaped objects — no browser, no real replay — per A11's test
+ * brief. `attempts` must be non-empty.
+ *
+ * The rule: the LAST attempt is always the reported outcome (a retry loop
+ * only keeps retrying while an attempt is 'fail', so the last one is either
+ * the eventual pass/uncertain, or 'fail' because attempts ran out). Flaky
+ * means at least one earlier attempt failed AND the final one is not
+ * 'fail' — a flow that fails on every single attempt is just a fail, not
+ * flaky (there is no "eventually passed" to flag). */
+export function resolveRetryOutcome<T extends Report>(attempts: T[]): T & { flaky?: FlakyInfo } {
+  if (attempts.length === 0) throw new Error('resolveRetryOutcome: attempts must be non-empty');
+  const final = attempts[attempts.length - 1];
+  const before = attempts.slice(0, -1);
+  if (before.length > 0 && final.verdict !== 'fail') {
+    return {
+      ...final,
+      flaky: {
+        attempts: attempts.length,
+        failedAttempts: before.map((a) => ({ runId: a.runId, verdict: a.verdict, reason: a.reason })),
+      },
+    };
+  }
+  return final;
+}
+
+/** A21: write a quarantined heal candidate ALONGSIDE (never over) the script
+ * it would have replaced, so a human can inspect/diff/promote it later
+ * without the original ever having been touched. Same directory and naming
+ * convention as `saveScript()`, distinguished by the `.candidate.json`
+ * suffix — `listScripts()` globs only `*.json` filenames as a whole and
+ * doesn't attempt to load candidates as scripts, so nothing replays this
+ * automatically, which is the point. */
+function saveHealCandidate(script: QaScript, root = process.cwd()): string {
+  const dir = scriptsDir(root);
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, `${script.name}.candidate.json`);
+  fs.writeFileSync(p, JSON.stringify(script, null, 2));
+  return p;
+}
+
+export interface HealDecision {
+  tier: HealTier;
+  reasons: string[];
+  /** Set when tier !== 'quarantine': the (over)written script's path. */
+  jsonPath?: string;
+  /** Set only when tier === 'quarantine': the candidate's path (original untouched). */
+  candidatePath?: string;
+}
+
+/**
+ * A21: classify a heal candidate against the script it would replace, then
+ * perform (or withhold) the disk write accordingly:
+ *  - 'auto'/'notice'  → `newScript` is saved over `oldScript.name` as today.
+ *  - 'quarantine'      → `oldScript` is left COMPLETELY untouched on disk;
+ *                        `newScript` is written alongside as `<name>.candidate.json`.
+ *
+ * Pulled out of `qaReplay()`'s heal branch specifically so it's unit-testable
+ * without a live browser/session — a test can build two `QaScript` objects in
+ * memory (no AI run, no replay) and assert on the tier, the reasons, and the
+ * files actually left on disk in a temp `root`. */
+export function applyHealDecision(oldScript: QaScript, newScript: QaScript, root = process.cwd()): HealDecision {
+  const { tier, reasons } = classifyHeal(oldScript, newScript);
+  if (tier === 'quarantine') {
+    const candidatePath = saveHealCandidate(newScript, root);
+    return { tier, reasons, candidatePath };
+  }
+  const { jsonPath } = saveScript(newScript, root);
+  return { tier, reasons, jsonPath };
 }
 
 export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): Promise<QaReplayResult> {
@@ -644,11 +756,30 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   const preCfg = loadConfig(opts.config ?? {});
   const allowedHosts = [...preCfg.allowedHosts, ...targetHostCandidates(script.url)];
   const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, allowedHosts });
-  const artifacts = new ArtifactStore(session.cfg.artifactsDir);
 
+  const maxAttempts = 1 + Math.max(0, opts.retries ?? 0);
+  const attemptReports: QaReplayResult[] = [];
   let report: QaReplayResult;
   try {
-    report = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress });
+    let artifacts = new ArtifactStore(session.cfg.artifactsDir);
+    let current: QaReplayResult = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress });
+    attemptReports.push(current);
+    // A11 (P1): opt-in retry loop — only engages when the caller asked for
+    // retries AND the attempt actually failed. Each retry gets its own fresh
+    // ArtifactStore (its own runId/screenshots) so a failed attempt's
+    // evidence survives on disk even after a later attempt passes.
+    while (current.verdict === 'fail' && attemptReports.length < maxAttempts) {
+      progress(`replay attempt ${attemptReports.length}/${maxAttempts} failed — retrying (${maxAttempts - attemptReports.length} attempt(s) left)`);
+      replaySpan.addEvent('replay.retry', { attempt: attemptReports.length, runId: current.runId });
+      artifacts = new ArtifactStore(session.cfg.artifactsDir);
+      current = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress });
+      attemptReports.push(current);
+    }
+    report = resolveRetryOutcome(attemptReports);
+    if (report.flaky) {
+      progress(`flaky: failed ${report.flaky.failedAttempts.length} time(s) before passing on attempt ${report.flaky.attempts} of ${maxAttempts} — reported as flaky, not a clean pass`);
+      replaySpan.addEvent('replay.flaky', { attempts: report.flaky.attempts });
+    }
     progress(`replay verdict: ${report.verdict} (${Math.round(report.durationMs / 1000)}s)`);
     replaySpan.setAttribute('runId', report.runId);
   } catch (e) {
@@ -676,10 +807,32 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
         healedAt: new Date().toISOString(),
       };
       progress(`what changed: ${diffScripts(script, newScript)}`);
-      const { jsonPath } = saveScript(newScript);
-      progress(`self-heal succeeded — script re-emitted: ${jsonPath}`);
-      replaySpan.end({ verdict: report.verdict, healed: true, runId: report.runId });
-      return { ...healed, healed: true, recordedScript: jsonPath };
+
+      // A21: classify + persist (or don't) — pulled into its own testable
+      // function, see applyHealDecision below.
+      const decision = applyHealDecision(script, newScript);
+
+      if (decision.tier === 'quarantine') {
+        // The whole safety property: the OLD script stays active untouched,
+        // the candidate is written ALONGSIDE it, and the run is reported as
+        // 'uncertain' (never 'pass') so an unreviewed heal can never
+        // silently become the suite's truth. If nobody ever reviews it, the
+        // flow degrades to "unverified" (a visible loss of coverage) — never
+        // to a false-confidence green.
+        progress(`self-heal QUARANTINED for review: ${decision.reasons.join('; ')} — original script left untouched; candidate saved at ${decision.candidatePath}`);
+        replaySpan.end({ verdict: 'uncertain', healed: false, healTier: decision.tier, runId: report.runId });
+        return {
+          ...healed,
+          verdict: 'uncertain',
+          reason: `heal candidate quarantined for review (${decision.reasons.join('; ')}) — original script kept active pending review`,
+          healed: false,
+          healReview: { tier: decision.tier, reasons: decision.reasons, candidatePath: decision.candidatePath },
+        };
+      }
+
+      progress(`self-heal succeeded (${decision.tier}) — script re-emitted: ${decision.jsonPath}${decision.reasons.length ? ` [${decision.reasons.join('; ')}]` : ''}`);
+      replaySpan.end({ verdict: report.verdict, healed: true, healTier: decision.tier, runId: report.runId });
+      return { ...healed, healed: true, recordedScript: decision.jsonPath, healReview: { tier: decision.tier, reasons: decision.reasons } };
     }
     progress('self-heal failed too — the app is genuinely broken, reporting the AI run verdict');
     replaySpan.end({ verdict: report.verdict, healed: false, runId: report.runId });
@@ -688,4 +841,77 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
 
   replaySpan.end({ verdict: report.verdict, runId: report.runId });
   return report;
+}
+
+/* ---------- A11 (P1): flake quarantine list ---------- */
+
+export interface QuarantineEntry {
+  name: string;
+  reason?: string;
+  addedAt: string;
+}
+
+/** `.spike-quarantine.json` at `root` (default cwd, same convention as
+ * `generated-tests/`) — a small, hand-editable list of script names that are
+ * KNOWN-flaky: still replayed and still reported every run (never silently
+ * skipped), but excluded from the AGGREGATE exit code (see `suiteExitCode`)
+ * so one known-flaky flow can't hard-fail an otherwise-green suite. */
+export function quarantineListPath(root = process.cwd()): string {
+  return path.join(root, '.spike-quarantine.json');
+}
+
+/** Never throws: a missing or malformed quarantine file means "nothing is
+ * quarantined", not a crashed run — the file is a convenience, not a
+ * dependency. */
+export function loadQuarantineList(root = process.cwd()): QuarantineEntry[] {
+  const p = quarantineListPath(root);
+  if (!fs.existsSync(p)) return [];
+  try {
+    const raw: unknown = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((e): e is QuarantineEntry => Boolean(e) && typeof e === 'object' && typeof (e as QuarantineEntry).name === 'string');
+  } catch {
+    return [];
+  }
+}
+
+export function isQuarantined(name: string, root = process.cwd()): boolean {
+  return loadQuarantineList(root).some((e) => e.name === name);
+}
+
+export function addToQuarantine(name: string, reason?: string, root = process.cwd()): QuarantineEntry[] {
+  const list = loadQuarantineList(root).filter((e) => e.name !== name);
+  list.push({ name, reason, addedAt: new Date().toISOString() });
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(quarantineListPath(root), JSON.stringify(list, null, 2));
+  return list;
+}
+
+export function removeFromQuarantine(name: string, root = process.cwd()): QuarantineEntry[] {
+  const list = loadQuarantineList(root).filter((e) => e.name !== name);
+  fs.writeFileSync(quarantineListPath(root), JSON.stringify(list, null, 2));
+  return list;
+}
+
+/** Pure aggregate-exit-code computation for a `spike replay --all`-style
+ * batch — the same pass/fail/uncertain → 0/1/2 mapping `cli.ts` already uses
+ * per-flow, except a result whose script `name` is in the quarantine list
+ * never contributes to `worst`: it is still present in `results` for
+ * reporting, just excluded from deciding the process exit code (A11:
+ * "excluded from the aggregate exit code but still run and still report").
+ * Exported so a batch-runner caller can adopt the exclusion rule without
+ * re-deriving it. */
+export interface SuiteResultEntry {
+  name: string;
+  verdict: RunVerdict;
+}
+
+export function suiteExitCode(results: SuiteResultEntry[], root = process.cwd()): number {
+  const quarantined = new Set(loadQuarantineList(root).map((e) => e.name));
+  let worst = 0;
+  for (const r of results) {
+    if (quarantined.has(r.name)) continue;
+    worst = Math.max(worst, r.verdict === 'pass' ? 0 : r.verdict === 'fail' ? 1 : 2);
+  }
+  return worst;
 }

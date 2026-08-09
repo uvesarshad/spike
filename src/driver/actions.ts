@@ -34,6 +34,45 @@ export const ActionSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('close_tab'), tabId: z.string() }),
   z.object({ type: z.literal('assert_visual'), expectation: z.string(), mode: z.enum(['screenshot', 'video']).optional() }),
   z.object({ type: z.literal('assert_dom'), nodeId: z.string(), contains: z.string() }),
+  // A5 — precise assertion vocabulary (src/assertions/dom-assertions.ts is the
+  // pure evaluator; loop.ts wires these in). Additive: assert_dom above is
+  // UNCHANGED (recorded scripts and the action cache still reference it as
+  // the case-insensitive-substring verb) — these are new, more precise verbs
+  // alongside it, not a replacement.
+  z.object({
+    type: z.literal('assert_text'),
+    target: z.string().optional(), // nodeId; omitted = whole page text
+    mode: z.enum(['exact', 'contains', 'regex']),
+    value: z.string(),
+  }),
+  z.object({
+    type: z.literal('assert_count'),
+    role: z.string(),
+    name: z.string().optional(), // omitted = match role only
+    expected: z.number().int().min(0),
+    comparator: z.enum(['eq', 'gte', 'lte']),
+  }),
+  z.object({
+    type: z.literal('assert_url'),
+    mode: z.enum(['exact', 'contains', 'regex']),
+    value: z.string(),
+  }),
+  z.object({
+    type: z.literal('assert_state'),
+    target: z.string(), // nodeId
+    state: z.enum(['visible', 'hidden', 'enabled', 'disabled', 'checked', 'focused']),
+  }),
+  z.object({
+    type: z.literal('assert_network'),
+    urlPattern: z.string(), // regex, compiled defensively
+    status: z.number().int().optional(),
+    statusClass: z.enum(['2xx', '3xx', '4xx', '5xx']).optional(),
+    absent: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal('assert_no_console_errors'),
+    allow: z.array(z.string()).optional(), // substrings that are OK to ignore
+  }),
   // Phase 15 — extract gains an optional model-assisted mode: when `prompt` is
   // present, a cheap text adapter pulls a structured value out of the page/
   // subtree text instead of the $0 DOM-text/regex path. `nodeId` becomes
@@ -117,6 +156,12 @@ export const PLAN_JSON_SCHEMA = {
               'close_tab',
               'assert_visual',
               'assert_dom',
+              'assert_text',
+              'assert_count',
+              'assert_url',
+              'assert_state',
+              'assert_network',
+              'assert_no_console_errors',
               'extract',
               'wait',
               'script',
@@ -127,11 +172,22 @@ export const PLAN_JSON_SCHEMA = {
           nodeId: { type: 'string' },
           text: { type: 'string' },
           key: { type: 'string' },
-          value: { type: 'string' },
+          value: { type: 'string', description: 'select_option value, OR assert_text/assert_url expected value' },
           expectation: { type: 'string' },
-          mode: { type: 'string', enum: ['screenshot', 'video'] },
+          mode: { type: 'string', enum: ['screenshot', 'video', 'exact', 'contains', 'regex'], description: 'assert_visual: screenshot|video. assert_text/assert_url: exact|contains|regex' },
           contains: { type: 'string' },
           pattern: { type: 'string' },
+          target: { type: 'string', description: 'assert_text/assert_state: nodeId (assert_text: omit for whole-page text)' },
+          role: { type: 'string', description: 'assert_count: AX role to count' },
+          name: { type: 'string', description: 'assert_count: accessible name filter (omit to match role only)' },
+          expected: { type: 'integer', description: 'assert_count: expected count' },
+          comparator: { type: 'string', enum: ['eq', 'gte', 'lte'], description: 'assert_count: how expected compares to the actual count' },
+          state: { type: 'string', enum: ['visible', 'hidden', 'enabled', 'disabled', 'checked', 'focused'], description: 'assert_state: expected state of target' },
+          urlPattern: { type: 'string', description: 'assert_network: regex over request URLs' },
+          status: { type: 'integer', description: 'assert_network: exact HTTP status to require' },
+          statusClass: { type: 'string', enum: ['2xx', '3xx', '4xx', '5xx'], description: 'assert_network: status class to require' },
+          absent: { type: 'boolean', description: 'assert_network: true = assert NO matching request occurred' },
+          allow: { type: 'array', items: { type: 'string' }, description: 'assert_no_console_errors: substrings of errors to ignore' },
           prompt: { type: 'string', description: 'when set on extract, ask a cheap text model to pull the value instead of DOM-text/regex' },
           ms: { type: 'integer' },
           paths: { type: 'array', items: { type: 'string' }, description: 'upload_file: file paths to set on the input' },

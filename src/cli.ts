@@ -8,9 +8,11 @@ import http from 'node:http';
 import { Command } from 'commander';
 import { loadConfig, type QaConfig } from './config.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
-import { qaReplay, qaRun } from './engine.js';
+import { isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
 import { slimReport, type Report } from './report/report.js';
-import { listScripts } from './recorder/script.js';
+import { resolveSuite } from './suite/config.js';
+import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
+import { buildJUnitXml } from './suite/reporters.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
 import { installService, uninstallService } from './service/install-service.js';
@@ -59,8 +61,8 @@ function printSettings(s: QaSettings): void {
 const program = new Command();
 program.name('spike').description('Spike — a cheap-model ladder tests your app in a real Chrome and reports a verdict');
 
-/** Commander collector for the repeatable --allow-host flag. */
-function collectHost(value: string, previous: string[]): string[] {
+/** Commander collector for a repeatable string flag (--allow-host, --tag). */
+function collectRepeatable(value: string, previous: string[]): string[] {
   return previous.concat(value);
 }
 
@@ -89,7 +91,7 @@ program
   .requiredOption('--url <url>', 'page to start on')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
   .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
-  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically', collectHost, [])
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically', collectRepeatable, [])
   .option('--action-cache', 'enable the verified file-backed action cache for this run')
   .option('--no-action-cache', 'bypass the verified action cache for this run')
   .option('--no-record', 'do not record a passing run to generated-tests/')
@@ -199,34 +201,127 @@ program
   .command('replay')
   .description('replay recorded scripts deterministically — no planner, $0; exit 0 pass / 1 fail / 2 uncertain')
   .argument('[name]', 'script name (or path to a generated-tests/*.json)')
-  .option('--all', 'replay every script in generated-tests/ (the regression suite)', false)
+  .option('--all', 'replay the suite (spike.suite.json if present, else every script in generated-tests/, sorted)', false)
   .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
   .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
-  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically', collectHost, [])
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically', collectRepeatable, [])
   .option('--json', 'print slim JSON verdicts only', false)
-  .action(async (name: string | undefined, opts: { all: boolean; heal: boolean; via?: 'cdp' | 'extension'; allowHost: string[]; json: boolean }) => {
-    const targets = opts.all ? listScripts() : name ? [name] : [];
-    if (targets.length === 0) {
-      console.error(opts.all ? 'no recorded scripts in generated-tests/' : 'give a script name or --all');
-      process.exit(2);
-    }
-    const config = mergeConfig(opts.via, opts.allowHost);
-    let worst = 0;
-    const jsonResults: unknown[] = [];
-    for (const t of targets) {
-      const report = await qaReplay(t, {
-        heal: opts.heal,
-        ...(config && { config }),
-        onProgress: opts.json ? undefined : (l) => console.log(l),
+  .option('--workers <n>', 'with --all: concurrent scripts in flight (default 1 — today\'s serial behaviour)', (v) => parseInt(v, 10))
+  .option('--tag <tag>', 'with --all + spike.suite.json: run only entries tagged with this (repeatable, OR match)', collectRepeatable, [])
+  .option('--filter <substr>', 'with --all: run only scripts whose name/path contains this substring')
+  .option('--shard <i/N>', 'with --all: run only shard i of N, deterministically partitioned by sorted script name (1-based i)')
+  .option('--reporter <type>', 'with --all: also emit a report in this format — currently "junit" (requires --out)')
+  .option('--out <path>', 'with --reporter: file path to write the report to')
+  .action(
+    async (
+      name: string | undefined,
+      opts: {
+        all: boolean;
+        heal: boolean;
+        via?: 'cdp' | 'extension';
+        allowHost: string[];
+        json: boolean;
+        workers?: number;
+        tag: string[];
+        filter?: string;
+        shard?: string;
+        reporter?: string;
+        out?: string;
+      },
+    ) => {
+      const config = mergeConfig(opts.via, opts.allowHost);
+
+      if (!opts.all) {
+        // Single-script path — unchanged from before the suite runner existed.
+        if (!name) {
+          console.error('give a script name or --all');
+          process.exit(2);
+        }
+        const report = await qaReplay(name, {
+          heal: opts.heal,
+          ...(config && { config }),
+          onProgress: opts.json ? undefined : (l) => console.log(l),
+        });
+        const out = { script: name, healed: report.healed, ...slimReport(report) };
+        console.log(JSON.stringify(out, null, 2));
+        process.exit(report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
+      }
+
+      // --all: the suite runner (A12/A15) — ordering (config or sorted
+      // default), tag/filter/shard selection, --workers concurrency, and an
+      // optional JUnit/JSON report on top of the existing --json stdout
+      // contract, which is preserved byte-for-byte below.
+      let suiteConfig;
+      try {
+        suiteConfig = resolveSuite();
+      } catch (e) {
+        console.error(e instanceof Error ? e.message : String(e));
+        process.exit(2);
+      }
+      if (suiteConfig.entries.length === 0) {
+        console.error('no recorded scripts in generated-tests/');
+        process.exit(2);
+      }
+      let entries = suiteConfig.entries;
+      entries = filterByTags(entries, opts.tag);
+      entries = filterByString(entries, opts.filter);
+      if (opts.shard) {
+        let shard;
+        try {
+          shard = parseShard(opts.shard);
+        } catch (e) {
+          console.error(e instanceof Error ? e.message : String(e));
+          process.exit(2);
+        }
+        entries = shardEntries(entries, shard);
+      }
+
+      const jsonResults: unknown[] = [];
+      const runOne = async (scriptId: string): Promise<RunOneResult> => {
+        const report = await qaReplay(scriptId, {
+          heal: opts.heal,
+          ...(config && { config }),
+          onProgress: opts.json ? undefined : (l) => console.log(l),
+        });
+        return { verdict: report.verdict, report };
+      };
+      const onResult = (r: SuiteScriptResult) => {
+        const report = (r.result?.report as QaReplayResult | undefined) ?? undefined;
+        const out = report ? { script: r.script, healed: report.healed, ...slimReport(report) } : { script: r.script, verdict: r.verdict, error: r.error };
+        if (opts.json) jsonResults.push(out);
+        else console.log(JSON.stringify(out, null, 2));
+      };
+
+      if (suiteConfig.setup) console.error(`setup: ${suiteConfig.setup}`);
+      const outcome = await runSuite(entries, runOne, {
+        workers: opts.workers,
+        setup: suiteConfig.setup,
+        teardown: suiteConfig.teardown,
+        onResult,
+        // A11: quarantined flows still run and still report — they are only
+        // excluded from the aggregate exit code, so a known-flaky flow cannot
+        // redden CI while remaining visible in the output and reporters.
+        isQuarantined: (script) => isQuarantined(script),
       });
-      const out = { script: t, healed: report.healed, ...slimReport(report) };
-      if (opts.json && opts.all) jsonResults.push(out);
-      else console.log(JSON.stringify(out, null, 2));
-      worst = Math.max(worst, report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
-    }
-    if (opts.json && opts.all) console.log(JSON.stringify(jsonResults, null, 2));
-    process.exit(worst);
-  });
+      if (outcome.setup) console.error(`setup ${outcome.setup.verdict === 'pass' ? 'passed' : `${outcome.setup.verdict} — skipping ${entries.length} suite entr${entries.length === 1 ? 'y' : 'ies'}`}`);
+      if (suiteConfig.teardown && outcome.teardown) console.error(`teardown: ${suiteConfig.teardown} — ${outcome.teardown.verdict}`);
+
+      if (opts.json) console.log(JSON.stringify(jsonResults, null, 2));
+
+      if (opts.reporter === 'junit') {
+        if (!opts.out) {
+          console.error('--reporter junit requires --out <path>');
+          process.exit(2);
+        }
+        fs.writeFileSync(opts.out, buildJUnitXml(outcome));
+      } else if (opts.reporter && opts.reporter !== 'json') {
+        console.error(`unknown --reporter "${opts.reporter}" — expected "junit"`);
+        process.exit(2);
+      }
+
+      process.exit(outcome.worst);
+    },
+  );
 
 program
   .command('daemon')

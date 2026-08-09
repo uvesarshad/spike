@@ -12,7 +12,7 @@ import type { AxNode, AxSnapshot } from '../ports/browser-port.js';
 const MAX_CHARS = 6000;
 
 /** Hard cap on recursion depth for both the raw-tree walk (`build`) and the
- * serialized-tree walk (`serialize`'s `walk`) — a pathologically deep DOM
+ * serialized-tree walk (`serializeAxTree`'s `walk`) — a pathologically deep DOM
  * (some SPA component trees nest hundreds of levels) should stop descending
  * here rather than relying solely on the post-walk MAX_CHARS truncation.
  * Generous enough that real pages never hit it. */
@@ -50,7 +50,161 @@ export interface AxTreeResult {
   nodeMap: Map<string, number>;
 }
 
-export async function snapshotAxTree(client: CDP.Client): Promise<AxTreeResult> {
+/** A19: focus a serialization on one subtree instead of blind global
+ * truncation. Matched against the ALREADY-PRUNED `AxNode` tree (the same one
+ * whose ids the planner already speaks in), not the raw CDP nodes.
+ *
+ * `id` (a stable `n7`-style id from a prior snapshot) takes priority and is an
+ * exact match. Otherwise `role` (a landmark role, e.g. `navigation`/`main`)
+ * is required and `name` narrows it further — exact match first, falling
+ * back to a case-insensitive substring match (AX names are often longer than
+ * what a caller can quote verbatim, e.g. a `main` region named after the page
+ * title). No match found (unknown id, absent landmark) → silently degrades to
+ * the default global-truncation path; a focus hint can never make output
+ * worse than not supplying one. */
+export interface AxFocusHint {
+  id?: string;
+  role?: string;
+  name?: string;
+}
+
+export interface SerializeAxTreeOptions {
+  /** Caller-supplied character budget. Defaults to `MAX_CHARS` (6000). */
+  maxChars?: number;
+  focus?: AxFocusHint;
+}
+
+interface AxLineEntry {
+  id: string;
+  role: string;
+  name?: string;
+  text: string;
+  /** Ids of every ancestor from the root down to (not including) this node. */
+  ancestors: string[];
+}
+
+function findFocusEntry(entries: AxLineEntry[], focus: AxFocusHint): AxLineEntry | undefined {
+  if (focus.id) return entries.find((e) => e.id === focus.id);
+  if (!focus.role) return undefined;
+  const exact = entries.find((e) => e.role === focus.role && (focus.name === undefined || e.name === focus.name));
+  if (exact) return exact;
+  if (focus.name) {
+    const needle = focus.name.toLowerCase();
+    return entries.find((e) => e.role === focus.role && e.name?.toLowerCase().includes(needle));
+  }
+  return undefined;
+}
+
+/** The ORIGINAL (pre-A19) elision algorithm, untouched: keep the first 40% of
+ * lines (landmarks/nav arrive early) plus as much of the tail as fits the
+ * remaining budget (recent content, alerts). This is the exact byte-for-byte
+ * behaviour every caller without a focus hint must keep seeing. */
+function truncateFlat(lines: string[], maxChars: number): { text: string; truncated: boolean } {
+  let text = lines.join('\n');
+  let truncated = false;
+  if (text.length > maxChars) {
+    const head = lines.slice(0, Math.floor(lines.length * 0.4));
+    const keepChars = maxChars - head.join('\n').length - 64;
+    const tail: string[] = [];
+    let used = 0;
+    for (let i = lines.length - 1; i >= head.length && used < keepChars; i--) {
+      used += lines[i].length + 1;
+      tail.unshift(lines[i]);
+    }
+    text = [...head, `  … (${lines.length - head.length - tail.length} nodes truncated) …`, ...tail].join('\n');
+    truncated = true;
+  }
+  return { text, truncated };
+}
+
+/** Region-focused elision: the focus node, all of its descendants, and its
+ * ancestor spine (context for where the region sits) are kept at full
+ * fidelity regardless of budget. Everything else is filled in, in original
+ * document order, until the remaining budget runs out — a contiguous run of
+ * skipped non-focus lines collapses to one summary line, same style as
+ * `truncateFlat`'s elision marker. */
+function truncateFocused(
+  entries: AxLineEntry[],
+  focusEntry: AxLineEntry,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  const full = entries.map((e) => e.text).join('\n');
+  if (full.length <= maxChars) return { text: full, truncated: false };
+
+  const ancestorPath = new Set(focusEntry.ancestors);
+  const protectedIds = new Set<string>();
+  for (const e of entries) {
+    if (e.id === focusEntry.id || e.ancestors.includes(focusEntry.id) || ancestorPath.has(e.id)) {
+      protectedIds.add(e.id);
+    }
+  }
+  const protectedLen = entries
+    .filter((e) => protectedIds.has(e.id))
+    .reduce((sum, e) => sum + e.text.length + 1, 0);
+  const budgetLeft0 = Math.max(0, maxChars - protectedLen - 64);
+
+  const out: string[] = [];
+  let truncated = false;
+  let budgetLeft = budgetLeft0;
+  let i = 0;
+  while (i < entries.length) {
+    const e = entries[i];
+    if (protectedIds.has(e.id)) {
+      out.push(e.text);
+      i++;
+      continue;
+    }
+    let j = i;
+    const run: string[] = [];
+    while (j < entries.length && !protectedIds.has(entries[j].id)) {
+      run.push(entries[j].text);
+      j++;
+    }
+    const runText = run.join('\n');
+    if (runText.length + 1 <= budgetLeft) {
+      out.push(runText);
+      budgetLeft -= runText.length + 1;
+    } else {
+      truncated = true;
+      out.push(`  … (${run.length} nodes truncated) …`);
+    }
+    i = j;
+  }
+  return { text: out.join('\n'), truncated };
+}
+
+/** Serialize an already-pruned `AxNode` tree to the planner's compact
+ * indented text. Purely additive over the pre-A19 shape: called with no
+ * `opts` (or an unmatched focus hint), this is byte-identical to the original
+ * `serialize()` — same ids, same text, same truncation algorithm. A focus
+ * hint only changes what gets kept when a truncation decision has to be
+ * made at all. */
+export function serializeAxTree(root: AxNode, opts: SerializeAxTreeOptions = {}): { text: string; truncated: boolean } {
+  const maxChars = opts.maxChars ?? MAX_CHARS;
+  const entries: AxLineEntry[] = [];
+  const walk = (n: AxNode, depth: number, ancestors: string[]) => {
+    const parts: (string | undefined)[] = [n.id, n.role];
+    if (n.name) parts.push(JSON.stringify(n.name));
+    if (n.value) parts.push(`value=${JSON.stringify(n.value)}`);
+    if (n.states?.length) parts.push(`(${n.states.join(', ')})`);
+    entries.push({
+      id: n.id,
+      role: n.role,
+      name: n.name,
+      text: '  '.repeat(depth) + parts.join(' '),
+      ancestors,
+    });
+    if (depth >= MAX_DEPTH) return; // pathologically deep DOM — stop descending, let truncation handle the rest
+    for (const c of n.children ?? []) walk(c, depth + 1, [...ancestors, n.id]);
+  };
+  walk(root, 0, []);
+
+  const focusEntry = opts.focus ? findFocusEntry(entries, opts.focus) : undefined;
+  if (!focusEntry) return truncateFlat(entries.map((e) => e.text), maxChars);
+  return truncateFocused(entries, focusEntry, maxChars);
+}
+
+export async function snapshotAxTree(client: CDP.Client, opts: SerializeAxTreeOptions = {}): Promise<AxTreeResult> {
   const { nodes } = (await client.Accessibility.getFullAXTree({})) as { nodes: RawAxNode[] };
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
   const root = nodes.find((n) => !n.parentId && !n.ignored) ?? nodes[0];
@@ -95,37 +249,6 @@ export async function snapshotAxTree(client: CDP.Client): Promise<AxTreeResult> 
   const roots = build(root, '');
   const rootNode: AxNode = roots.length === 1 ? roots[0] : { id: `n${seq++}`, role: 'RootWebArea', children: roots };
 
-  let { text, truncated } = serialize(rootNode);
+  const { text, truncated } = serializeAxTree(rootNode, opts);
   return { snapshot: { root: rootNode, text, truncated }, nodeMap };
-}
-
-function serialize(root: AxNode): { text: string; truncated: boolean } {
-  const lines: string[] = [];
-  const walk = (n: AxNode, depth: number) => {
-    const parts = [n.id, n.role];
-    if (n.name) parts.push(JSON.stringify(n.name));
-    if (n.value) parts.push(`value=${JSON.stringify(n.value)}`);
-    if (n.states?.length) parts.push(`(${n.states.join(', ')})`);
-    lines.push('  '.repeat(depth) + parts.join(' '));
-    if (depth >= MAX_DEPTH) return; // pathologically deep DOM — stop descending, let MAX_CHARS truncation handle the rest
-    for (const c of n.children ?? []) walk(c, depth + 1);
-  };
-  walk(root, 0);
-
-  let text = lines.join('\n');
-  let truncated = false;
-  if (text.length > MAX_CHARS) {
-    // keep head (landmarks/nav arrive early) + tail (recent content, alerts)
-    const head = lines.slice(0, Math.floor(lines.length * 0.4));
-    const keepChars = MAX_CHARS - head.join('\n').length - 64;
-    const tail: string[] = [];
-    let used = 0;
-    for (let i = lines.length - 1; i >= head.length && used < keepChars; i--) {
-      used += lines[i].length + 1;
-      tail.unshift(lines[i]);
-    }
-    text = [...head, `  … (${lines.length - head.length - tail.length} nodes truncated) …`, ...tail].join('\n');
-    truncated = true;
-  }
-  return { text, truncated };
 }

@@ -106,6 +106,31 @@ export interface ActionCacheStats {
   stored: number;
 }
 
+/** A21 (P2, reframed for autonomy): the outcome of classifying a `--heal`
+ * candidate against the script it would replace (see
+ * `src/recorder/heal-policy.ts`'s `classifyHeal`). Present only on a
+ * `qaReplay` result that went through the heal path.
+ *
+ *  - 'auto'       the heal was accepted and saved exactly as before this
+ *                 feature existed (locator-only drift; intent unchanged).
+ *  - 'notice'     the heal was accepted and saved, but it added
+ *                 navigation/wait-only steps — recorded here for audit-trail
+ *                 visibility, not because anything needs reviewing.
+ *  - 'quarantine' the heal was REJECTED: the OLD script stays active
+ *                 untouched, the healed candidate is written alongside as
+ *                 `candidatePath` (never overwriting the original), and the
+ *                 run's `verdict` is reported as 'uncertain' rather than
+ *                 'pass' — an unreviewed heal must never silently become the
+ *                 suite's truth. See CLAUDE.md / the A21 design doc for why
+ *                 this degrades to "unverified", never to green. */
+export interface HealReview {
+  tier: 'auto' | 'notice' | 'quarantine';
+  reasons: string[];
+  /** Set only when tier === 'quarantine': path of the healed-but-unaccepted
+   * candidate script, saved next to (never over) the original. */
+  candidatePath?: string;
+}
+
 export interface Report {
   // ---- slim contract: what the calling agent reads ----
   verdict: RunVerdict;
@@ -132,6 +157,9 @@ export interface Report {
   /** A5a (P1) safety: compact spend summary (always set by the AI driver loop;
    * absent on bare replay reports, same convention as `tokens`). */
   spendSummary?: SpendSummary;
+  /** A21: set only on a `qaReplay` result that went through `--heal`'s
+   * classification step. See `HealReview` for what each tier means. */
+  healReview?: HealReview;
 }
 
 /** The verdict an MCP/CLI caller pays for, plus (A5a) a compact spend summary
@@ -169,6 +197,18 @@ export function describeAction(a: Action): string {
       return `${a.mode === 'video' ? 'video' : 'visual'} check: ${a.expectation}`;
     case 'assert_dom':
       return `dom check: ${a.nodeId} contains ${JSON.stringify(a.contains)}`;
+    case 'assert_text':
+      return `text check: ${a.target ?? 'page'} ${a.mode} ${JSON.stringify(a.value)}`;
+    case 'assert_count':
+      return `count check: ${a.role}${a.name ? ` "${a.name}"` : ''} ${a.comparator} ${a.expected}`;
+    case 'assert_url':
+      return `url check: ${a.mode} ${JSON.stringify(a.value)}`;
+    case 'assert_state':
+      return `state check: ${a.target} is ${a.state}`;
+    case 'assert_network':
+      return `network check: ${a.urlPattern}${a.status !== undefined ? ` status=${a.status}` : a.statusClass ? ` status=${a.statusClass}` : ''}${a.absent ? ' (must be absent)' : ''}`;
+    case 'assert_no_console_errors':
+      return `console check: no errors${a.allow?.length ? ` (allowing ${a.allow.length} pattern(s))` : ''}`;
     case 'extract':
       return `extract ${a.key} from ${a.nodeId ?? 'page'}${a.prompt ? ' (model)' : a.pattern ? ` matching ${JSON.stringify(a.pattern)}` : ''}`;
     case 'upload_file':

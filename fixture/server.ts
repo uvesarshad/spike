@@ -1,14 +1,14 @@
-﻿/* Dogfood fixture â€” a small interactive shop with an intentional, toggleable bug.
+﻿/* Dogfood fixture — a small interactive shop with an intentional, toggleable bug.
  *
- * Flow: /login (test@test.com / pw) â†’ /products (add to cart, sessionStorage)
- *       â†’ /cart (spike B's discount logic) â†’ /checkout â†’ /success
+ * Flow: /login (test@test.com / pw) → /products (add to cart, sessionStorage)
+ *       → /cart (spike B's discount logic) → /checkout → /success
  *
  * Bug mode (FIXTURE_BUG=on or startFixture(port, true)):
- *   - buildOrder() omits `total` â†’ "Place order" throws reading order.total
+ *   - buildOrder() omits `total` → "Place order" throws reading order.total
  *     (the page's error listener renders the classic red "Application error"
  *     banner, echoing spike A's bad.html)
  *   - POST /api/order returns 500
- *   â†’ one click yields [PAGE-ERROR] + failed network + a visibly broken page:
+ *   → one click yields [PAGE-ERROR] + failed network + a visibly broken page:
  *     exercises console, network and Nano-vision evidence paths at once.
  * Healthy mode reaches /success with a confirmation message. */
 
@@ -36,18 +36,18 @@ window.addEventListener('error', () => {
 </script>`;
 
 function page(title: string, body: string): string {
-  return `<!DOCTYPE html><html><head><title>${title}</title>${STYLE}</head><body>
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>${STYLE}</head><body>
 <div id="crash-banner" class="error-banner">Application error: a client-side exception has occurred (see the browser console for more information).</div>
 ${NAV}<div class="wrap">${body}</div>${ERROR_LISTENER}</body></html>`;
 }
 
 function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, string> {
   // v2 simulates UI drift for self-heal testing: same flow, the checkout
-  // button is renamed â€” recorded scripts that click "Place order" must break
+  // button is renamed — recorded scripts that click "Place order" must break
   const placeOrderLabel = variant === 'v2' ? 'Confirm purchase' : 'Place order';
   return {
     '/login': page(
-      'Sign in â€” Acme Shop',
+      'Sign in — Acme Shop',
       `<div class="card"><h2>Sign in</h2>
       <label>Email <input id="email" type="email" autocomplete="off"></label>
       <label>Password <input id="password" type="password"></label>
@@ -64,10 +64,10 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     ),
 
     '/products': page(
-      'Products â€” Acme Shop',
+      'Products — Acme Shop',
       `<h2>Products</h2>
-      <div class="card"><b>Widget</b> â€” $49.99 <button class="add" data-name="Widget" data-price="49.99">Add Widget to cart</button></div>
-      <div class="card"><b>Gadget</b> â€” $25.00 <button class="add" data-name="Gadget" data-price="25.00">Add Gadget to cart</button></div>
+      <div class="card"><b>Widget</b> — $49.99 <button class="add" data-name="Widget" data-price="49.99">Add Widget to cart</button></div>
+      <div class="card"><b>Gadget</b> — $25.00 <button class="add" data-name="Gadget" data-price="25.00">Add Gadget to cart</button></div>
       <p id="cart-status">Cart: 0 items</p>
       <button id="goto-cart">Go to cart</button>
       <div class="card">
@@ -121,12 +121,12 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     ),
 
     '/support': page(
-      'Support â€” Acme Shop',
+      'Support — Acme Shop',
       `<h2>Support</h2><div class="card"><p id="support-message">Need help? This is a second tab opened from Products.</p></div>`,
     ),
 
     '/cart': page(
-      'Cart â€” Acme Shop',
+      'Cart — Acme Shop',
       `<h2>Your cart</h2>
       <div class="card"><ul id="items"></ul><p id="cart-total">Total: $0.00</p></div>
       <button id="checkout">Checkout</button>
@@ -137,7 +137,7 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
       for (const item of cart) {
         total += item.price;
         const li = document.createElement('li');
-        li.textContent = item.name + ' â€” $' + item.price.toFixed(2);
+        li.textContent = item.name + ' — $' + item.price.toFixed(2);
         ul.appendChild(li);
       }
       // spike B's silent-discount logic: 10% off at $100+
@@ -149,18 +149,18 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     ),
 
     '/checkout': page(
-      'Checkout â€” Acme Shop',
+      'Checkout — Acme Shop',
       `<h2>Checkout</h2>
-      <div class="card"><p id="summary">Loading orderâ€¦</p><p id="charged"></p></div>
+      <div class="card"><p id="summary">Loading order…</p><p id="charged"></p></div>
       <p id="api-error" class="inline-error"></p>
       <button id="place-order">${placeOrderLabel}</button>
       <script>
       const cart = JSON.parse(sessionStorage.getItem('cart') || '[]');
       const total = Number(sessionStorage.getItem('total') || '0');
-      document.getElementById('summary').textContent = cart.length + ' item(s) â€” total $' + total.toFixed(2);
+      document.getElementById('summary').textContent = cart.length + ' item(s) — total $' + total.toFixed(2);
       function buildOrder() {
         ${bug
-          ? `return { items: cart }; // BUG: total missing â†’ order.total is undefined`
+          ? `return { items: cart }; // BUG: total missing → order.total is undefined`
           : `return { items: cart, total: total };`}
       }
       document.getElementById('place-order').addEventListener('click', () => {
@@ -180,7 +180,7 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     ),
 
     '/success': page(
-      'Order confirmed â€” Acme Shop',
+      'Order confirmed — Acme Shop',
       `<h2>Order confirmed ðŸŽ‰</h2>
       <div class="card"><p id="confirmation">Thank you! Your order has been placed successfully.</p></div>`,
     ),
@@ -190,21 +190,21 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
     // button stays DISABLED until email==='test@test.com' && password==='pw'.
     // If the driver's type() doesn't reach React's state (React tracks input
     // value via its own descriptor-level bookkeeping, not the raw DOM .value),
-    // onChange never fires, state never updates, and the button never enables â€”
+    // onChange never fires, state never updates, and the button never enables —
     // so this route empirically settles whether Input.insertText satisfies React.
-    '/react': `<!DOCTYPE html><html><head><title>React login â€” Acme Shop</title>${STYLE}</head><body>
-${NAV}<div class="wrap"><div id="root"><p id="react-fallback">Loading Reactâ€¦</p></div></div>
+    '/react': `<!DOCTYPE html><html><head><meta charset="utf-8"><title>React login — Acme Shop</title>${STYLE}</head><body>
+${NAV}<div class="wrap"><div id="root"><p id="react-fallback">Loading React…</p></div></div>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
 <script>
 // Inline fallback note: if the unpkg CDN is unreachable, React/ReactDOM are
-// undefined and the page stays on "Loading Reactâ€¦" â€” the test will then fail
+// undefined and the page stays on "Loading React…" — the test will then fail
 // fast at the axTree step (no email textbox), signalling a network problem
 // rather than a typing bug. (This machine has internet per CLAUDE.md.)
 window.addEventListener('load', () => {
   if (!window.React || !window.ReactDOM) {
     document.getElementById('react-fallback').textContent =
-      'React CDN unavailable (unpkg unreachable) â€” controlled-input test cannot run.';
+      'React CDN unavailable (unpkg unreachable) — controlled-input test cannot run.';
     return;
   }
   const { useState, createElement: h } = React;

@@ -259,6 +259,18 @@ export interface BrowserPort {
   url(): Promise<string>;
   /** Snapshot the accessibility tree; refreshes the nodeId map used by click/type. */
   axTree(): Promise<AxSnapshot>;
+  /** Snapshot WITHOUT rebinding the planner's `n7`-style ids.
+   *
+   * `axTree()` deliberately remaps ids on every call, because the planner
+   * always reasons about the snapshot it was just handed. But an observer that
+   * only wants to LOOK at the page — the action cache capturing before/after
+   * effect state — must not remap: the driver plans a batch of up to 3 actions
+   * against ONE snapshot, so a remap between them silently repoints the
+   * remaining ids at a newer tree. That is a real bug this guards against, not
+   * a hypothetical: with the cache enabled, `[type n5, type n7, click n8]`
+   * re-snapshotted before the click and `n8` no longer meant the button the
+   * navigator had chosen. Optional — callers fall back to `axTree()`. */
+  peekAxTree?(): Promise<AxSnapshot>;
   click(nodeId: string): Promise<void>;
   type(nodeId: string, text: string): Promise<void>;
   hover(nodeId: string): Promise<void>;
