@@ -3,6 +3,8 @@
  * ExtensionBrowser (MV3 chrome.debugger) implements the same contract in the
  * vibe-mode milestone. The engine must only ever import this interface. */
 
+import type CDP from 'chrome-remote-interface';
+
 export interface AxNode {
   /** Per-snapshot stable id the planner references in actions (e.g. "n7"). */
   id: string;
@@ -106,6 +108,151 @@ export function assertMutationHostAllowed(host: string, allowedHosts: string[] |
   }
 }
 
+/** A4 (P0): options for BrowserPort.waitForIdle. */
+export interface WaitForIdleOptions {
+  /** How long the network must have had ZERO in-flight requests before we call
+   * it idle. Default 350ms — enough to catch a same-tick chained request (a
+   * click handler that fires two sequential fetches) without paying a full
+   * extra round-trip's worth of waiting on every step. */
+  networkQuietMs?: number;
+  /** Hard cap — waitForIdle NEVER waits unboundedly. A page with a legitimate
+   * background poller/SSE stream/websocket keepalive would otherwise never go
+   * quiet, turning one missing settle into a hung run. Default 5000ms. */
+  timeoutMs?: number;
+}
+
+/** A4 (P0): options for BrowserPort.waitForActionable. */
+export interface WaitForActionableOptions {
+  /** Hard cap — default 5000ms, deliberately matching recorder/replay.ts's
+   * existing FIND_TIMEOUT_MS so "found in the AX tree but never actionable"
+   * and "never found at all" fail on the same budget. */
+  timeoutMs?: number;
+}
+
+/** Minimal shape createNetworkIdleTracker needs off a CDP-shaped client — both
+ * CdpBrowser's real `chrome-remote-interface` client and ExtensionBrowser's
+ * bridge/cdp-shim.ts Proxy satisfy this (both are typed `CDP.Client`). */
+type NetworkEventClient = Pick<CDP.Client['Network'], 'requestWillBeSent' | 'loadingFinished' | 'loadingFailed'>;
+
+/** A4 (P0) — the missing primitive the audit calls out by name: "no
+ * non-destructive in-flight/idle check to poll" (the exact acknowledgement
+ * that used to sit at recorder/replay.ts:212-214). This tracks in-flight
+ * Network requests over a CDP-shaped client so `waitForIdle()` can resolve on
+ * an actual network-quiet CONDITION instead of a fixed sleep — the sleep was
+ * simultaneously too slow (burning ~1.15s per 3-action batch, see the audit)
+ * and too fast (not enough on a slow page, which is where flake comes from).
+ *
+ * Shared by CdpBrowser AND ExtensionBrowser: both expose the identical
+ * `CDP.Client` shape (the latter via bridge/cdp-shim.ts's Proxy over
+ * chrome.debugger — `buildCdpClient()` there literally types its return value
+ * as `CDP.Client`), and chrome-remote-interface's event registration is a
+ * plain Set of handlers per method name (confirmed by reading cdp-shim.ts's
+ * `eventHandlers` map: `.add()`, never a single-slot assignment) — so wiring a
+ * SECOND set of Network.* listeners here does NOT displace the ones
+ * capture/console-network.ts's `attachCapture()` already registered on the
+ * same client; both fire independently on every event. This tracker never
+ * calls drainConsole()/drainNetwork() and keeps its own independent
+ * bookkeeping, so it stays non-destructive to the step-record evidence those
+ * buffers still feed — that non-destructiveness is exactly why the audit
+ * flagged this as a real gap rather than "just drain the network buffer".
+ *
+ * Deliberately a Set of active requestIds rather than a bare +1/-1 counter: a
+ * `loadingFinished`/`loadingFailed` for a requestId we never saw
+ * `requestWillBeSent` for (a request that was already in flight before this
+ * tracker attached, or a duplicate/out-of-order CDP event) must be a harmless
+ * no-op — never allowed to drive a bare counter negative and wedge future
+ * idle checks. */
+export function createNetworkIdleTracker(client: { Network: NetworkEventClient }): {
+  /** Current in-flight request count — exposed for tests/diagnostics. */
+  inFlightCount(): number;
+  /** Resolves once the network has been quiet for `networkQuietMs`, or after
+   * `timeoutMs` elapses — whichever comes first. NEVER rejects: timing out
+   * just means "proceed anyway", which is no worse than the fixed sleep this
+   * replaces (that had no idea whether the page was actually settled either). */
+  waitForIdle(opts?: WaitForIdleOptions): Promise<void>;
+} {
+  const active = new Set<string>();
+  let lastActivityTs = Date.now();
+
+  client.Network.requestWillBeSent((p) => {
+    const requestId = (p as { requestId?: string }).requestId;
+    if (!requestId) return;
+    active.add(requestId);
+    lastActivityTs = Date.now();
+  });
+  const settle = (p: unknown): void => {
+    const requestId = (p as { requestId?: string }).requestId;
+    // .delete() returns false for an unmatched id — exactly the "no-op" case
+    // documented above; only a request we were actually tracking resets the
+    // clock (an unmatched settle event is not evidence the PAGE just did
+    // anything).
+    if (requestId && active.delete(requestId)) lastActivityTs = Date.now();
+  };
+  client.Network.loadingFinished(settle);
+  client.Network.loadingFailed(settle);
+
+  // Small unconditional floor before the FIRST idle check: several call sites
+  // this backs (blur, pressKey, mouse) are pure synchronous DOM work with no
+  // network at all — for those, an immediate idle check would return on the
+  // same tick and skip the one thing the OLD fixed sleep actually bought:
+  // giving a synchronous event handler (a React state update, a bound
+  // listener) one microtask/task turn to run before the caller reads the page.
+  const FLOOR_MS = 50;
+  const POLL_MS = 50;
+
+  async function waitForIdle(opts: WaitForIdleOptions = {}): Promise<void> {
+    const quietMs = opts.networkQuietMs ?? 350;
+    const timeoutMs = opts.timeoutMs ?? 5000;
+    const startTs = Date.now();
+    const deadline = startTs + timeoutMs;
+    await new Promise<void>((r) => setTimeout(r, Math.min(FLOOR_MS, timeoutMs)));
+    for (;;) {
+      const now = Date.now();
+      // Quiet is measured from the later of "last network activity" and "when
+      // we STARTED waiting" — not from lastActivityTs alone.
+      //
+      // Measuring from lastActivityTs alone made this return after only
+      // FLOOR_MS on any page that had been network-quiet for a while: the
+      // condition `now - lastActivityTs >= quietMs` was ALREADY satisfied on
+      // entry by seconds of prior idleness. That is the wrong question. The
+      // caller has just dispatched a click/keypress and wants to know whether
+      // it triggered network work — but an XHR takes longer than 50ms merely to
+      // be ISSUED, so we returned before the request existed, saw a stale page,
+      // and the navigator clicked "Sign in" a second time (recorded into a
+      // script that then failed on replay, since a logged-in page has no
+      // "Sign in" button). Anchoring on startTs gives any handler a full
+      // quiet-window to kick off work; if it does, `lastActivityTs` moves and
+      // the window restarts, so a slow page still gets the full timeout.
+      const quietSince = Math.max(lastActivityTs, startTs);
+      if (active.size === 0 && now - quietSince >= quietMs) return;
+      if (now >= deadline) return; // hard cap — never an unbounded wait
+      await new Promise<void>((r) => setTimeout(r, Math.min(POLL_MS, deadline - now)));
+    }
+  }
+
+  return { inFlightCount: () => active.size, waitForIdle };
+}
+
+/** A4 (P0) safety net for waitForActionable: races a single CDP call against a
+ * short local timeout so ONE wedged call can never block a poll loop's own
+ * deadline check indefinitely. This was added after a real hang: the first
+ * cut of the actionability probe used in-page `requestAnimationFrame` inside
+ * a `Runtime.callFunctionOn({ awaitPromise: true })` call — rAF callbacks are
+ * throttled/paused by Chromium for a tab that isn't the OS-foreground tab
+ * (e.g. another `Page.bringToFront()` call, from a concurrent run driving a
+ * different tab in the same shared browser, stole focus), so the CDP call
+ * itself never returned and NOTHING in the loop ever got to check
+ * `Date.now() > deadline` — it was stuck inside one unresolvable `await`.
+ * The probe itself no longer depends on rAF (see cdp-browser.ts's
+ * ACTIONABLE_PROBE_JS), but every CDP round-trip in a poll loop is still
+ * wrapped in this as defense in depth against a wedged call from any cause.
+ * Returns `fallback` instead of hanging; does NOT swallow a rejection that
+ * arrives before the timeout — only a call that neither resolves nor rejects
+ * in time is affected. */
+export function raceTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
+}
+
 export interface BrowserPort {
   launch(): Promise<void>;
   navigate(url: string): Promise<void>;
@@ -174,5 +321,29 @@ export interface BrowserPort {
    * the attribute was lost across a reload). Implementations register the match
    * into their own nodeMap so the returned id resolves. Optional. */
   findByQaId?(qaId: string): Promise<string | null>;
+  /** A4 (P0): resolves once the network has gone quiet (no in-flight requests
+   * for `networkQuietMs`) or `timeoutMs` elapses, whichever first — the
+   * condition-based replacement for the ~20 fixed sleeps this finding names.
+   * MUST be non-destructive: implementations must NOT consume drainConsole()/
+   * drainNetwork()'s buffers (the step record still needs everything in them)
+   * — see createNetworkIdleTracker's doc comment for how CdpBrowser/
+   * ExtensionBrowser satisfy that with an independent listener, not a second
+   * drain. NEVER rejects on timeout — see WaitForIdleOptions. Optional: a
+   * transport with no Network-domain visibility can't implement this
+   * meaningfully and should leave it unset rather than fake it; callers must
+   * guard the call (`browser.waitForIdle?.(...)`). */
+  waitForIdle?(opts?: WaitForIdleOptions): Promise<void>;
+  /** A4 (P0): Playwright-style actionability wait for the node behind
+   * `nodeId` — resolves once it is attached, visible (non-zero box, not
+   * `visibility:hidden`/`display:none`), enabled (not `disabled`/
+   * `aria-disabled="true"`), AND stable (bounding box unchanged across two
+   * consecutive animation frames). Unlike waitForIdle, this DOES fail loudly
+   * (throws) once `timeoutMs` elapses without ever being actionable — an
+   * element the AX tree resolved by role+name but that is hidden/disabled/
+   * still animating is a real, worth-surfacing distinction from "not found at
+   * all", not something to silently paper over. Optional: a transport with no
+   * node-scoped JS evaluation can't implement this and should leave it unset;
+   * callers must guard the call. */
+  waitForActionable?(nodeId: string, opts?: WaitForActionableOptions): Promise<void>;
   close(): Promise<void>;
 }

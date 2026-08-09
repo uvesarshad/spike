@@ -23,6 +23,173 @@ export interface ModelTraceEntry {
   /** Token counts for this call, when the adapter reported any (rung 0/local
    * adapters leave it undefined). Copied from adapter.lastUsage post-call. */
   usage?: AdapterUsage;
+  /** Total attempts made against THIS adapter before it either succeeded or gave
+   * up and fell to the next rung (A20). Omitted when there was exactly one
+   * attempt (the common case) so existing consumers/snapshots see no field churn;
+   * present and >1 whenever the retry-with-backoff helper below kicked in. */
+  attempts?: number;
+  /** True iff attempts > 1 — a quick "was this rung retried" flag for report/
+   * dashboard code that would rather not do the >1 check itself. */
+  retried?: boolean;
+}
+
+/* ---------------------------------------------------------------------------
+ * A20 — retry-with-backoff for transient adapter failures (429 / 502-504 /
+ * network hiccups), tried BEFORE the ladder falls to the next rung. See
+ * docs/plan/26-08-08-audit-deterministic-speed.md finding A20.
+ *
+ * None of today's adapters (openai-compatible.ts, byok-gemini.ts, anthropic.ts,
+ * ollama.ts) throw a typed error — they all do
+ * `throw new Error(\`<label>[ api][ (video)] <status>: <body>\`)`. So
+ * classification below is defensive: it prefers a typed `.status`/`.code`/
+ * `.retryAfterMs` property (for when an adapter is upgraded later) and falls
+ * back to parsing the status code and any rate-limit hint out of the message
+ * text. Gemini's real 429 body includes a RetryInfo `"retryDelay":"31s"` field,
+ * which the text-based Retry-After parser below picks up even without a typed
+ * property — see report for which adapters would benefit from a typed
+ * RateLimitError instead of this string-sniffing.
+ * ------------------------------------------------------------------------- */
+
+export interface FailureClassification {
+  /** Worth retrying the SAME adapter again (429, 502/503/504, or a connection-
+   * level network error). Everything else — bad API key, other 4xx, a schema/
+   * JSON-parse error, an aborted/timed-out call — fails fast to the next rung. */
+  transient: boolean;
+  /** Milliseconds to wait, when the error carried an explicit Retry-After-style
+   * hint (typed property or a `retryDelay`/`retry-after` mention in the message).
+   * Undefined means "use the policy's exponential backoff instead". */
+  retryAfterMs?: number;
+  /** Short tag for trace/log messages: the status code, 'network', 'retry-after-hint', or 'non-transient'. */
+  reason: string;
+}
+
+const TRANSIENT_STATUS = new Set([429, 502, 503, 504]);
+const NETWORK_ERROR_RE =
+  /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|EPIPE|ENOTFOUND|socket hang up|network error|fetch failed/i;
+const STATUS_IN_MESSAGE_RE = /\b(\d{3})\s*:/;
+const RETRY_AFTER_IN_MESSAGE_RE = /retry[-_ ]?(?:after|delay)["\s:]*"?(\d+(?:\.\d+)?)\s*s?/i;
+
+/** Classify a thrown adapter error as transient (worth retrying) or not. Never
+ * throws itself — worst case it returns `{ transient: false, reason: 'non-transient' }`,
+ * which is the safe default (fail fast to the next rung). */
+export function classifyFailure(err: unknown): FailureClassification {
+  const e = err as
+    | {
+        status?: number;
+        code?: string;
+        cause?: { code?: string };
+        retryAfterMs?: number;
+        retryAfter?: number | string;
+        message?: string;
+      }
+    | null
+    | undefined;
+  const message = e && typeof e.message === 'string' ? e.message : String(err);
+
+  // 1. Explicit typed hint — no adapter sets this today, but a future typed
+  // RateLimitError could, and it should win over any text sniffing.
+  if (typeof e?.retryAfterMs === 'number' && Number.isFinite(e.retryAfterMs)) {
+    return { transient: true, retryAfterMs: Math.max(0, e.retryAfterMs), reason: 'retry-after-hint' };
+  }
+  if (e?.retryAfter !== undefined) {
+    const seconds = typeof e.retryAfter === 'number' ? e.retryAfter : Number(e.retryAfter);
+    if (Number.isFinite(seconds)) {
+      return { transient: true, retryAfterMs: Math.max(0, seconds * 1000), reason: 'retry-after-hint' };
+    }
+  }
+
+  // 2. HTTP status — typed property first, else best-effort parse of the
+  // "<label>[ api] <status>: <body>" convention every adapter uses today.
+  const statusMatch = message.match(STATUS_IN_MESSAGE_RE);
+  const status = typeof e?.status === 'number' ? e.status : statusMatch ? Number(statusMatch[1]) : undefined;
+  if (status !== undefined) {
+    if (TRANSIENT_STATUS.has(status)) {
+      return { transient: true, retryAfterMs: extractRetryAfterFromText(message), reason: String(status) };
+    }
+    // Any other explicit status (401/403/400/404/500/...) fails fast — a bad
+    // key or a genuine client error must not stall the run waiting on retries.
+    return { transient: false, reason: String(status) };
+  }
+
+  // 3. No HTTP status at all — a connection-level failure (DNS, reset, refused,
+  // fetch's own "fetch failed" wrapper). AbortError/timeouts are deliberately
+  // NOT matched here: a timed-out call already burned most of its budget
+  // (adapters default to 120s), so retrying it risks blowing the run's clock
+  // rather than saving it — let it fall straight to the next rung.
+  const code = e?.code ?? e?.cause?.code;
+  if ((typeof code === 'string' && NETWORK_ERROR_RE.test(code)) || NETWORK_ERROR_RE.test(message)) {
+    return { transient: true, reason: 'network' };
+  }
+
+  return { transient: false, reason: 'non-transient' };
+}
+
+function extractRetryAfterFromText(message: string): number | undefined {
+  const m = message.match(RETRY_AFTER_IN_MESSAGE_RE);
+  if (!m) return undefined;
+  const seconds = Number(m[1]);
+  return Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
+}
+
+export interface RetryPolicy {
+  /** Total attempts against one adapter before giving up on it (first try + retries). */
+  maxAttempts: number;
+  /** Base backoff delay (ms) per retry index, before jitter; the last entry is
+   * reused if maxAttempts - 1 exceeds this list's length. */
+  baseDelaysMs: number[];
+  /** Hard ceiling on total time spent backing off ONE adapter, across all its
+   * retries — keeps a stuck/slow-to-recover provider from eating the run's
+   * budget. Well under the adapters' 120s call timeout and loop.ts's
+   * LLM_CALL_TIMEOUT_MS (130s): this is backoff-between-calls, not the calls
+   * themselves. */
+  maxTotalDelayMs: number;
+}
+
+/** ~250ms, ~750ms, ~2s (+/-25% jitter), capped at 3 attempts and 4s of total
+ * added latency per adapter — a few seconds, not minutes. */
+export const DEFAULT_RETRY_POLICY: RetryPolicy = {
+  maxAttempts: 3,
+  baseDelaysMs: [250, 750, 2000],
+  maxTotalDelayMs: 4000,
+};
+
+function jitter(ms: number): number {
+  return Math.round(ms * (0.75 + Math.random() * 0.5));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Run `fn`, retrying in place on a transient failure per `policy`, before
+ * giving up (the caller then falls to the next rung). `attempts.count` is
+ * updated live so the caller can read it even when this throws. Non-transient
+ * failures (bad key, schema error, any non-429 4xx) throw on the FIRST try —
+ * zero added latency, matching the "fail fast to the next rung" requirement. */
+async function callWithRetry<T>(
+  fn: () => Promise<T>,
+  policy: RetryPolicy,
+  attempts: { count: number },
+): Promise<T> {
+  attempts.count = 0;
+  let totalDelay = 0;
+  for (;;) {
+    attempts.count++;
+    try {
+      return await fn();
+    } catch (e) {
+      const classification = classifyFailure(e);
+      if (!classification.transient || attempts.count >= policy.maxAttempts) throw e;
+      const remaining = policy.maxTotalDelayMs - totalDelay;
+      if (remaining <= 25) throw e; // no backoff budget left — fall to next rung now
+      const base =
+        classification.retryAfterMs ??
+        policy.baseDelaysMs[Math.min(attempts.count - 1, policy.baseDelaysMs.length - 1)];
+      const delay = Math.min(classification.retryAfterMs !== undefined ? base : jitter(base), remaining);
+      totalDelay += delay;
+      await sleep(delay);
+    }
+  }
 }
 
 export interface ModelRouterOptions {
@@ -43,6 +210,11 @@ export interface ModelRouterOptions {
   /** BRAIN pin — the adapter NAME leading the ladder for plan-goals (the rare
    * smart planning/re-plan call). Falls back to pinnedAdapter when unset. */
   plannerAdapter?: string;
+  /** Override the default retry-with-backoff policy (A20). Partial — any field
+   * left out keeps DEFAULT_RETRY_POLICY's value. Mainly a test seam (tiny
+   * delays for fast, deterministic retry tests); production code should rely
+   * on the default. */
+  retryPolicy?: Partial<RetryPolicy>;
 }
 
 export class ModelRouter {
@@ -56,6 +228,7 @@ export class ModelRouter {
   private readonly pinnedAdapter?: string;
   private readonly navigatorAdapter?: string;
   private readonly plannerAdapter?: string;
+  private readonly retryPolicy: RetryPolicy;
 
   constructor(private readonly adapters: ModelAdapter[], opts?: ModelRouterOptions) {
     this.adapters = [...adapters].sort((a, b) => a.rung - b.rung);
@@ -63,6 +236,7 @@ export class ModelRouter {
     this.pinnedAdapter = opts?.pinnedAdapter;
     this.navigatorAdapter = opts?.navigatorAdapter;
     this.plannerAdapter = opts?.plannerAdapter;
+    this.retryPolicy = { ...DEFAULT_RETRY_POLICY, ...opts?.retryPolicy };
   }
 
   /** True when at least one adapter can serve `cap` right now (availability-probed
@@ -133,12 +307,18 @@ export class ModelRouter {
 
     for (const adapter of ladder) {
       const t0 = Date.now();
+      const attempts = { count: 0 };
       try {
         // rung 0 takes the bare expectation (runner builds its own prompt);
         // higher rungs get the full QA prompt
         const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
-        const raw = (await this.traceCall('visual-verdict', adapter, step, () =>
-          adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png }),
+        const raw = (await callWithRetry(
+          () =>
+            this.traceCall('visual-verdict', adapter, step, () =>
+              adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png }),
+            ),
+          this.retryPolicy,
+          attempts,
         )) as Partial<NanoVerdict>;
         const verdict: NanoVerdict = {
           verdict: raw.verdict === 'pass' || raw.verdict === 'fail' ? raw.verdict : 'uncertain',
@@ -154,6 +334,8 @@ export class ModelRouter {
           escalatedFrom,
           note: verdict.verdict === 'uncertain' ? 'uncertain → escalate' : undefined,
           usage: adapter.lastUsage,
+          attempts: attempts.count > 1 ? attempts.count : undefined,
+          retried: attempts.count > 1 ? true : undefined,
         });
         if (verdict.verdict !== 'uncertain') return verdict;
         lastUncertain = verdict;
@@ -168,6 +350,8 @@ export class ModelRouter {
           ms: Date.now() - t0,
           escalatedFrom,
           note: `error → escalate: ${lastError.message.slice(0, 120)}`,
+          attempts: attempts.count > 1 ? attempts.count : undefined,
+          retried: attempts.count > 1 ? true : undefined,
         });
         escalatedFrom = adapter.name;
       }
@@ -202,9 +386,12 @@ export class ModelRouter {
       throw new Error('no video-capable visual-verdict adapter available');
     }
     const t0 = Date.now();
+    const attempts = { count: 0 };
     try {
-      const raw = (await this.traceCall('visual-verdict', adapter, step, () =>
-        adapter.videoVerdict!(videoPath, expectation),
+      const raw = (await callWithRetry(
+        () => this.traceCall('visual-verdict', adapter, step, () => adapter.videoVerdict!(videoPath, expectation)),
+        this.retryPolicy,
+        attempts,
       )) as Partial<NanoVerdict>;
       const verdict: NanoVerdict = {
         verdict: raw.verdict === 'pass' || raw.verdict === 'fail' ? raw.verdict : 'uncertain',
@@ -219,6 +406,8 @@ export class ModelRouter {
         ms: Date.now() - t0,
         note: 'video',
         usage: adapter.lastUsage,
+        attempts: attempts.count > 1 ? attempts.count : undefined,
+        retried: attempts.count > 1 ? true : undefined,
       });
       return verdict;
     } catch (e) {
@@ -230,6 +419,8 @@ export class ModelRouter {
         adapter: adapter.name,
         ms: Date.now() - t0,
         note: `video error: ${err.message.slice(0, 120)}`,
+        attempts: attempts.count > 1 ? attempts.count : undefined,
+        retried: attempts.count > 1 ? true : undefined,
       });
       throw err;
     }
@@ -248,10 +439,16 @@ export class ModelRouter {
     const adapter = ladder.find((a) => a.name === candidate.name && a.rung === candidate.rung);
     if (!adapter) throw new Error(`visual-verdict adapter unavailable: ${candidate.name}`);
     const t0 = Date.now();
+    const attempts = { count: 0 };
     try {
       const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
-      const raw = (await this.traceCall('visual-verdict', adapter, step, () =>
-        adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png }),
+      const raw = (await callWithRetry(
+        () =>
+          this.traceCall('visual-verdict', adapter, step, () =>
+            adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png }),
+          ),
+        this.retryPolicy,
+        attempts,
       )) as Partial<NanoVerdict>;
       const verdict: NanoVerdict = {
         verdict: raw.verdict === 'pass' || raw.verdict === 'fail' ? raw.verdict : 'uncertain',
@@ -266,6 +463,8 @@ export class ModelRouter {
         ms: Date.now() - t0,
         note: traceNote,
         usage: adapter.lastUsage,
+        attempts: attempts.count > 1 ? attempts.count : undefined,
+        retried: attempts.count > 1 ? true : undefined,
       });
       return { verdict, candidate };
     } catch (e) {
@@ -277,6 +476,8 @@ export class ModelRouter {
         adapter: adapter.name,
         ms: Date.now() - t0,
         note: `${traceNote ? `${traceNote}: ` : ''}error: ${err.message.slice(0, 120)}`,
+        attempts: attempts.count > 1 ? attempts.count : undefined,
+        retried: attempts.count > 1 ? true : undefined,
       });
       throw err;
     }
@@ -312,8 +513,13 @@ export class ModelRouter {
     let escalatedFrom: string | undefined;
     for (const adapter of ladder) {
       const t0 = Date.now();
+      const attempts = { count: 0 };
       try {
-        const result = await this.traceCall(cap, adapter, step, () => adapter.generateJson({ prompt, schema }));
+        const result = await callWithRetry(
+          () => this.traceCall(cap, adapter, step, () => adapter.generateJson({ prompt, schema })),
+          this.retryPolicy,
+          attempts,
+        );
         this.trace.push({
           step,
           capability: cap,
@@ -322,6 +528,8 @@ export class ModelRouter {
           ms: Date.now() - t0,
           escalatedFrom,
           usage: adapter.lastUsage,
+          attempts: attempts.count > 1 ? attempts.count : undefined,
+          retried: attempts.count > 1 ? true : undefined,
         });
         return result;
       } catch (e) {
@@ -334,6 +542,8 @@ export class ModelRouter {
           ms: Date.now() - t0,
           escalatedFrom,
           note: `error → escalate: ${lastError.message.slice(0, 120)}`,
+          attempts: attempts.count > 1 ? attempts.count : undefined,
+          retried: attempts.count > 1 ? true : undefined,
         });
         escalatedFrom = adapter.name;
       }

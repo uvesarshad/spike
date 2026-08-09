@@ -280,29 +280,129 @@ export function verifyActionEffect(
     return { ok: false, reason: `wait expected ${action.ms}ms, observed ${elapsed}ms`, changes };
   }
 
+  // navigate/reload/go_back/press_key keep their pre-A9 semantics: a URL or
+  // page-signature diff is sufficient evidence for these (they have no
+  // "target" to land on the wrong element, unlike click/hover/type/
+  // select_option, so the false-positive risk A9 flags does not apply here).
   if (action.type === 'navigate') {
     const expected = normalizeUrlForActionCache(action.url);
     if (after.normalizedUrl === expected) {
+      const errorSignal = detectErrorPageSignal(after.ax.root);
+      if (errorSignal) {
+        return {
+          ok: false,
+          reason: `navigation reached the expected URL but the destination looks like an error page ("${errorSignal}")`,
+          changes,
+        };
+      }
       return { ok: true, reason: 'navigation reached the expected URL', changes };
     }
+    if (changes.length) return { ok: true, reason: `observed ${changes.join(' and ')} change after navigate`, changes };
+    return { ok: false, reason: 'navigate did not reach the expected URL and nothing else observably changed', changes };
   }
 
-  if (action.type === 'reload' && after.normalizedUrl === before.normalizedUrl) {
-    return { ok: true, reason: 'reload settled on the same URL', changes };
+  if (action.type === 'reload') {
+    if (after.normalizedUrl === before.normalizedUrl) {
+      return { ok: true, reason: 'reload settled on the same URL', changes };
+    }
+    if (changes.length) return { ok: true, reason: `observed ${changes.join(' and ')} change after reload`, changes };
+    return { ok: false, reason: 'reload produced no observable URL or page change', changes };
+  }
+
+  if (action.type === 'go_back') {
+    if (changes.length) return { ok: true, reason: `observed ${changes.join(' and ')} change after go_back`, changes };
+    return { ok: false, reason: 'go_back produced no observable URL or page change', changes };
+  }
+
+  if (action.type === 'press_key') {
+    if (changes.length) return { ok: true, reason: `observed ${changes.join(' and ')} change after press_key`, changes };
+    return { ok: false, reason: 'press_key produced no observable URL or page change', changes };
+  }
+
+  // click/hover: A9's core fix. A cached target re-resolves by role+name+nth
+  // against the live page, so a hit cannot land on an arbitrary node — but it
+  // CAN land on a node that still matches role+name+nth while no longer being
+  // the same element semantically (a reordered list, a redesign recycling a
+  // label). A bare page-signature diff (a toast, an ad refresh, an unrelated
+  // ticker) is therefore no longer sufficient on its own: we require the
+  // change to be *targeted* — the click/hover's own target changed or
+  // disappeared, the URL changed, or a live-region-ish (alert/status/dialog/
+  // tooltip) node appeared/changed/disappeared.
+  if (action.type === 'click') {
+    if (target) {
+      const beforeNode = findByCachedTarget(before.ax.root, target);
+      const afterNode = findByCachedTarget(after.ax.root, target);
+      if (beforeNode && !afterNode) {
+        return { ok: true, reason: 'click target was removed or navigated away, a legitimate outcome', changes };
+      }
+      if (beforeNode && afterNode && targetOwnChangeDetected(beforeNode, afterNode)) {
+        return { ok: true, reason: 'click target state/name/value changed', changes };
+      }
+    }
+    if (changes.includes('url')) {
+      return { ok: true, reason: 'click navigated to a new URL', changes };
+    }
+    const regionSignal = regionChangeDetected(before.ax.root, after.ax.root);
+    if (regionSignal) {
+      return { ok: true, reason: `click produced a targeted effect: ${regionSignal}`, changes };
+    }
+    return {
+      ok: false,
+      reason: 'click produced no targeted effect on its own target, the URL, or an alert/status/dialog region (only unrelated page changes, if any)',
+      changes,
+    };
+  }
+
+  if (action.type === 'hover') {
+    if (!target) {
+      return { ok: false, reason: 'hover cannot be verified without a target descriptor', changes };
+    }
+    const afterNode = findByCachedTarget(after.ax.root, target);
+    if (!afterNode) {
+      return { ok: false, reason: 'hover target no longer resolves on the page', changes };
+    }
+    const beforeNode = findByCachedTarget(before.ax.root, target);
+    const ownChanged = beforeNode ? targetOwnChangeDetected(beforeNode, afterNode) : false;
+    const regionSignal = regionChangeDetected(before.ax.root, after.ax.root);
+    if (ownChanged) {
+      return { ok: true, reason: 'hover target state changed', changes };
+    }
+    if (regionSignal) {
+      return { ok: true, reason: `hover revealed a targeted effect: ${regionSignal}`, changes };
+    }
+    // A signature diff alone is weak evidence for a hover by nature (hover is
+    // usually a probe for a tooltip, not a mutation) — reject and let the
+    // caller fall back to a fresh navigator call, the safe direction.
+    return { ok: false, reason: 'hover produced no observable target state change or tooltip/dialog region', changes };
   }
 
   if (action.type === 'type' && target) {
-    const node = findByCachedTarget(after.ax.root, target);
-    if (node && actionTextVerifies(action.text, node)) {
+    const beforeNode = findByCachedTarget(before.ax.root, target);
+    const afterNode = findByCachedTarget(after.ax.root, target);
+    if (afterNode && actionTextVerifies(action.text, afterNode, beforeNode)) {
       return { ok: true, reason: 'typed value is visible in the target state', changes };
     }
+    return { ok: false, reason: 'typed value was not observed as a change in the target state', changes };
   }
 
   if (action.type === 'select_option' && target) {
     const node = findByCachedTarget(after.ax.root, target);
-    if (node && nodeText(node).toLowerCase().includes(action.value.toLowerCase())) {
-      return { ok: true, reason: 'selected value is visible in the target state', changes };
+    if (node) {
+      const wanted = action.value.trim().toLowerCase();
+      const exactValue = node.value !== undefined && node.value.trim().toLowerCase() === wanted;
+      const exactName = node.name !== undefined && node.name.trim().toLowerCase() === wanted;
+      if (exactValue || exactName) {
+        return { ok: true, reason: 'selected value exactly matches the target state', changes };
+      }
+      if (nodeText(node).toLowerCase().includes(wanted)) {
+        return {
+          ok: true,
+          reason: 'selected value substring-matches the target state (no exact value/name match was available)',
+          changes,
+        };
+      }
     }
+    return { ok: false, reason: 'selected value was not observed in the target state', changes };
   }
 
   if (action.type === 'assert_dom') {
@@ -332,7 +432,6 @@ export function verifyActionEffect(
     return { ok: true, reason: 'extract target text is available', changes };
   }
 
-  if (changes.length) return { ok: true, reason: `observed ${changes.join(' and ')} change`, changes };
   return { ok: false, reason: 'no observable URL, DOM, value, wait, or assertion effect', changes };
 }
 
@@ -638,11 +737,96 @@ function nodeText(node: AxNode): string {
   return parts.join(' ');
 }
 
-function actionTextVerifies(text: string, node: AxNode): boolean {
+function actionTextVerifies(text: string, node: AxNode, beforeNode?: AxNode): boolean {
   if (hasSecretPlaceholder(text)) {
-    return Boolean(node.value || node.states?.includes('focused'));
+    if (!(node.value || node.states?.includes('focused'))) return false;
+    // A9: "non-empty or focused" alone lets an already-focused, already-
+    // populated field pass with no actual value change. Require the field to
+    // have been previously empty or to differ from its prior value; when
+    // there is no prior node to compare against, keep the permissive read
+    // (we cannot prove staleness either way).
+    if (!beforeNode) return true;
+    const beforeValue = beforeNode.value ?? '';
+    const afterValue = node.value ?? '';
+    return beforeValue.length === 0 || beforeValue !== afterValue;
   }
   return nodeText(node).toLowerCase().includes(text.toLowerCase());
+}
+
+/** role+name/value/states diff on the SAME resolved target — the strongest
+ * A9 evidence: proves the click/hover landed on and affected its own node,
+ * independent of anything else on the page. */
+function targetOwnChangeDetected(beforeNode: AxNode, afterNode: AxNode): boolean {
+  if ((beforeNode.name ?? '') !== (afterNode.name ?? '')) return true;
+  if ((beforeNode.value ?? '') !== (afterNode.value ?? '')) return true;
+  const beforeStates = (beforeNode.states ?? []).slice().sort().join(',');
+  const afterStates = (afterNode.states ?? []).slice().sort().join(',');
+  return beforeStates !== afterStates;
+}
+
+/** Roles a click/hover can legitimately surface as a targeted side-effect
+ * (a toast, a validation message, a newly-revealed tooltip, a dialog opening)
+ * — distinct from the general page-signature diff, which also fires for
+ * wholly unrelated mutations (an ad refresh, a live ticker) that A9 says must
+ * NOT be accepted as proof an action worked. */
+const SIGNAL_REGION_ROLES = new Set(['alert', 'alertdialog', 'dialog', 'status', 'log', 'tooltip']);
+
+function collectSignalRegions(root: AxNode): Map<string, string> {
+  const map = new Map<string, string>();
+  const walk = (node: AxNode) => {
+    if (SIGNAL_REGION_ROLES.has(node.role)) {
+      map.set(`${node.role}|${node.name ?? ''}`, nodeText(node));
+    }
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(root);
+  return map;
+}
+
+function regionChangeDetected(beforeRoot: AxNode, afterRoot: AxNode): string | null {
+  const beforeMap = collectSignalRegions(beforeRoot);
+  const afterMap = collectSignalRegions(afterRoot);
+  for (const [key, text] of afterMap) {
+    const role = key.split('|', 1)[0];
+    const prior = beforeMap.get(key);
+    if (prior === undefined) return `a new ${role} region appeared`;
+    if (prior !== text) return `the ${role} region's content changed`;
+  }
+  for (const key of beforeMap.keys()) {
+    if (!afterMap.has(key)) return `a ${key.split('|', 1)[0]} region disappeared`;
+  }
+  return null;
+}
+
+const ERROR_PAGE_PATTERNS = [
+  /\b(404|500|502|503|504)\b/,
+  /page not found/i,
+  /something went wrong/i,
+  /internal server error/i,
+  /application error/i,
+  /an unexpected error occurred/i,
+  /service unavailable/i,
+];
+
+/** Cheap, AX-snapshot-only heuristic for A9's "500 page at the right URL"
+ * gap: navigate only verified the destination URL, so an error page served
+ * at the expected route still counted as verified. No new I/O — reuses the
+ * `after` snapshot already captured for the URL/signature diff. */
+function detectErrorPageSignal(root: AxNode): string | null {
+  let found: string | null = null;
+  const walk = (node: AxNode) => {
+    if (found) return;
+    if (node.role === 'heading' || node.role === 'alert' || node.role === 'alertdialog' || node.role === 'status') {
+      const text = nodeText(node);
+      if (ERROR_PAGE_PATTERNS.some((re) => re.test(text))) {
+        found = text.slice(0, 80);
+        return;
+      }
+    }
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(root);
+  return found;
 }
 
 function hasSecretPlaceholder(text: string): boolean {

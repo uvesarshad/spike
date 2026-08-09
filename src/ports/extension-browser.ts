@@ -21,14 +21,47 @@ import { BridgeServer, DEFAULT_BRIDGE_PORT } from '../bridge/bridge-server.js';
 import { createCdpShim, type CdpShim } from '../bridge/cdp-shim.js';
 import {
   assertMutationHostAllowed,
+  createNetworkIdleTracker,
   hostOfUrl,
+  raceTimeout,
   type AxNode,
   type AxSnapshot,
   type BrowserPort,
   type ConsoleEntry,
   type LogpointSpec,
   type NetworkEntry,
+  type WaitForActionableOptions,
+  type WaitForIdleOptions,
 } from './browser-port.js';
+
+/** A4 (P0): same in-page actionability probe as CdpBrowser (see its doc
+ * comment there for the real hang — a double-`requestAnimationFrame` version
+ * of this stalled for 9 minutes on a tab that lost OS foreground focus —
+ * that this synchronous, no-`awaitPromise` version replaced). Identical
+ * because both transports run it through the SAME `CDP.Client`-shaped
+ * surface (this.c here is bridge/cdp-shim.ts's Proxy over chrome.debugger,
+ * not a distinct API). */
+const ACTIONABLE_PROBE_JS = `function () {
+  const cs = getComputedStyle(this);
+  const rect = this.getBoundingClientRect();
+  return {
+    visible: cs.visibility !== 'hidden' && cs.display !== 'none' && rect.width > 0 && rect.height > 0,
+    enabled: !this.disabled && this.getAttribute('aria-disabled') !== 'true',
+    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+  };
+}`;
+
+interface ActionableProbeResult {
+  visible: boolean;
+  enabled: boolean;
+  rect: { x: number; y: number; width: number; height: number };
+}
+
+/** Mirrors CdpBrowser's sameRect exactly. */
+function sameRect(a: ActionableProbeResult['rect'], b: ActionableProbeResult['rect']): boolean {
+  const EPS = 0.5;
+  return Math.abs(a.x - b.x) < EPS && Math.abs(a.y - b.y) < EPS && Math.abs(a.width - b.width) < EPS && Math.abs(a.height - b.height) < EPS;
+}
 
 export interface ExtensionBrowserOptions {
   /** A running BridgeServer, or a port to stand one up on (default 9410). */
@@ -65,6 +98,10 @@ export class ExtensionBrowser implements BrowserPort {
    * leaves that tab open and only detaches the debugger. */
   private attachedExisting = false;
   private capture: CaptureBuffers | null = null;
+  /** A4 (P0): network-idle tracker backing waitForIdle() — attached once in
+   * launch() alongside `capture` (no multi-tab complexity here: openTab/
+   * switchTab/closeTab are unimplemented on this transport, see below). */
+  private idle: ReturnType<typeof createNetworkIdleTracker> | null = null;
   /** planner nodeId ("n7") → backendDOMNodeId; refreshed by every axTree(). */
   private nodeMap = new Map<string, number>();
   /** Last a11y snapshot — read by nodeLabel() for ghost-cursor captions. */
@@ -152,13 +189,28 @@ export class ExtensionBrowser implements BrowserPort {
     ]);
     // capture must attach before the first navigation so nothing is missed
     this.capture = await attachCapture(this.c);
+    // A4 (P0): the SAME tracker CdpBrowser uses — this.c is bridge/cdp-shim.ts's
+    // Proxy over chrome.debugger, typed identically as CDP.Client, and its
+    // event registration is the same Set-per-method-name discipline (see
+    // createNetworkIdleTracker's doc comment) — so this coexists with the
+    // Network.* listeners attachCapture() just registered on the same client.
+    this.idle = createNetworkIdleTracker(this.c);
+  }
+
+  /** A4 (P0): resolves once Network has been quiet for `networkQuietMs` (or
+   * `timeoutMs` elapses). Mirrors CdpBrowser.waitForIdle exactly. */
+  async waitForIdle(opts?: WaitForIdleOptions): Promise<void> {
+    if (!this.idle) return;
+    await this.idle.waitForIdle(opts);
   }
 
   async navigate(url: string): Promise<void> {
     this.emitCursor({ kind: 'caption', caption: 'Opening ' + url });
     // The SW resolves on chrome.tabs.onUpdated status 'complete' for this tab.
     await this.b.call('ext.navigate', { tabId: this.tab, url }, 30_000, this.target);
-    await sleep(300); // let first paint + late console output settle
+    // A4 (P0): was a flat sleep(300) — now waits for the network to actually
+    // go quiet (bounded). Mirrors CdpBrowser.navigate.
+    await this.waitForIdle();
   }
 
   async url(): Promise<string> {
@@ -219,19 +271,75 @@ export class ExtensionBrowser implements BrowserPort {
     };
   }
 
+  /** One synchronous read of ACTIONABLE_PROBE_JS, or null when the node can't
+   * be resolved right now. Mirrors CdpBrowser.probeActionable exactly,
+   * including the raceTimeout safety net (see its doc comment for the real
+   * hang this guards against). */
+  private async probeActionable(backendNodeId: number): Promise<ActionableProbeResult | null> {
+    return raceTimeout(
+      (async () => {
+        let objectId: string | undefined;
+        try {
+          const { object } = await this.c.DOM.resolveNode({ backendNodeId }).catch(() => ({ object: undefined }) as { object?: { objectId?: string } });
+          objectId = object?.objectId;
+          if (!objectId) return null;
+          const { result } = await this.c.Runtime.callFunctionOn({
+            objectId,
+            functionDeclaration: ACTIONABLE_PROBE_JS,
+            returnByValue: true,
+          });
+          return (result?.value as ActionableProbeResult | undefined) ?? null;
+        } catch {
+          return null;
+        } finally {
+          if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {});
+        }
+      })(),
+      1000,
+      null,
+    );
+  }
+
+  /** A4 (P0): Playwright-style actionability wait — mirrors CdpBrowser.
+   * waitForActionable exactly (byte-for-byte logic; this.c is the same
+   * CDP.Client-shaped surface over chrome.debugger via the bridge shim). */
+  async waitForActionable(nodeId: string, opts?: WaitForActionableOptions): Promise<void> {
+    const timeoutMs = opts?.timeoutMs ?? 5000;
+    const deadline = Date.now() + timeoutMs;
+    const backendNodeId = this.backendNodeId(nodeId);
+    let lastRect: ActionableProbeResult['rect'] | null = null;
+    for (;;) {
+      const probe = await this.probeActionable(backendNodeId);
+      if (probe?.visible && probe.enabled) {
+        if (lastRect && sameRect(lastRect, probe.rect)) return;
+        lastRect = probe.rect;
+      } else {
+        lastRect = null;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`waitForActionable(${nodeId}): not actionable (attached/visible/enabled/stable) after ${timeoutMs}ms`);
+      }
+      await sleep(32);
+    }
+  }
+
   async click(nodeId: string): Promise<void> {
     await this.assertMutationAllowed('click');
     const backendNodeId = this.backendNodeId(nodeId);
     const { x, y } = await this.centerOf(backendNodeId);
     // Ghost cursor: glide to the target + caption BEFORE dispatching, so the
     // viewer sees the cursor arrive; the sleep gives the CSS transition time.
+    // A4 (P0): this sleep is DELIBERATELY KEPT — it's UI-overlay pacing (the
+    // vibe panel's cursor glide animation), not a page-settle wait, so
+    // waitForIdle has nothing to condition on here.
     this.emitCursor({ kind: 'move', x, y, caption: 'Clicking ' + this.nodeLabel(nodeId) });
     await sleep(350);
     for (const type of ['mousePressed', 'mouseReleased'] as const) {
       await this.c.Input.dispatchMouseEvent({ type, x, y, button: 'left', clickCount: 1 });
     }
     this.emitCursor({ kind: 'click', x, y }); // ripple at the click point
-    await sleep(400); // allow handlers/navigation to kick off
+    // A4 (P0): was a flat sleep(400) — mirrors CdpBrowser.click.
+    await this.waitForIdle({ networkQuietMs: 200, timeoutMs: 3000 });
   }
 
   async type(nodeId: string, text: string): Promise<void> {
@@ -262,7 +370,8 @@ export class ExtensionBrowser implements BrowserPort {
       type: 'keyUp', modifiers: 2, key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65,
     });
     await this.c.Input.insertText({ text });
-    await sleep(150);
+    // A4 (P0): was a flat sleep(150) — mirrors CdpBrowser.type.
+    await this.waitForIdle({ networkQuietMs: 150, timeoutMs: 1500 });
 
     // ALWAYS verify the value landed — mirrors CdpBrowser.verifyTyped exactly so
     // both transports behave identically (the v3 contract run is the parent's
@@ -277,10 +386,12 @@ export class ExtensionBrowser implements BrowserPort {
   async hover(nodeId: string): Promise<void> {
     const backendNodeId = this.backendNodeId(nodeId);
     const { x, y } = await this.centerOf(backendNodeId);
+    // Ghost cursor glide — cosmetic, KEPT (see click()'s note).
     this.emitCursor({ kind: 'move', x, y, caption: 'Hovering over ' + this.nodeLabel(nodeId) });
     await sleep(350);
     await this.c.Input.dispatchMouseEvent({ type: 'mouseMoved', x, y });
-    await sleep(250);
+    // A4 (P0): was a flat sleep(250) — mirrors CdpBrowser.hover.
+    await this.waitForIdle({ networkQuietMs: 150, timeoutMs: 1000 });
   }
 
   async pressKey(key: string): Promise<void> {
@@ -289,7 +400,8 @@ export class ExtensionBrowser implements BrowserPort {
     this.emitCursor({ kind: 'caption', caption: `Pressing ${key}` });
     await this.c.Input.dispatchKeyEvent({ type: 'keyDown', key });
     await this.c.Input.dispatchKeyEvent({ type: 'keyUp', key });
-    await sleep(150);
+    // A4 (P0): was a flat sleep(150) — mirrors CdpBrowser.pressKey.
+    await this.waitForIdle({ networkQuietMs: 150, timeoutMs: 1500 });
   }
 
   async selectOption(nodeId: string, value: string): Promise<void> {
@@ -322,7 +434,8 @@ export class ExtensionBrowser implements BrowserPort {
     } finally {
       if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {});
     }
-    await sleep(200);
+    // A4 (P0): was a flat sleep(200) — mirrors CdpBrowser.selectOption.
+    await this.waitForIdle({ networkQuietMs: 200, timeoutMs: 2000 });
   }
 
   async reload(): Promise<void> {
@@ -330,7 +443,8 @@ export class ExtensionBrowser implements BrowserPort {
     const loaded = this.c.Page.loadEventFired();
     await this.c.Page.reload({ ignoreCache: false });
     await Promise.race([loaded, sleep(15_000)]);
-    await sleep(300);
+    // A4 (P0): was a flat sleep(300) — mirrors CdpBrowser.reload.
+    await this.waitForIdle();
   }
 
   async goBack(): Promise<void> {
@@ -340,7 +454,8 @@ export class ExtensionBrowser implements BrowserPort {
     const loaded = this.c.Page.loadEventFired();
     await this.c.Page.navigateToHistoryEntry({ entryId: entries[currentIndex - 1].id });
     await Promise.race([loaded, sleep(15_000)]);
-    await sleep(300);
+    // A4 (P0): was a flat sleep(300) — mirrors CdpBrowser.goBack.
+    await this.waitForIdle();
   }
 
   async uploadFile(nodeId: string, paths: string[]): Promise<void> {
@@ -348,7 +463,8 @@ export class ExtensionBrowser implements BrowserPort {
     const backendNodeId = this.backendNodeId(nodeId);
     this.emitCursor({ kind: 'caption', caption: 'Uploading file(s) to ' + this.nodeLabel(nodeId) });
     await this.c.DOM.setFileInputFiles({ files: paths, backendNodeId });
-    await sleep(150);
+    // A4 (P0): was a flat sleep(150) — mirrors CdpBrowser.uploadFile.
+    await this.waitForIdle({ networkQuietMs: 200, timeoutMs: 2000 });
   }
 
   async dragAndDrop(sourceId: string, targetId: string): Promise<void> {
@@ -358,6 +474,9 @@ export class ExtensionBrowser implements BrowserPort {
     this.emitCursor({ kind: 'move', x: src.x, y: src.y, caption: 'Dragging ' + this.nodeLabel(sourceId) + ' to ' + this.nodeLabel(targetId) });
     await this.c.Input.dispatchMouseEvent({ type: 'mouseMoved', x: src.x, y: src.y });
     await this.c.Input.dispatchMouseEvent({ type: 'mousePressed', x: src.x, y: src.y, button: 'left', clickCount: 1 });
+    // A4 (P0): the 30ms-per-step gesture pacing is DELIBERATELY KEPT — same
+    // reasoning as CdpBrowser.dragAndDrop (it simulates a real mousemove
+    // cadence for sortable/drop-zone libraries, not a page-settle wait).
     const STEPS = 6;
     for (let i = 1; i <= STEPS; i++) {
       const x = src.x + ((dst.x - src.x) * i) / STEPS;
@@ -367,7 +486,8 @@ export class ExtensionBrowser implements BrowserPort {
     }
     await this.c.Input.dispatchMouseEvent({ type: 'mouseReleased', x: dst.x, y: dst.y, button: 'left', clickCount: 1 });
     this.emitCursor({ kind: 'click', x: dst.x, y: dst.y });
-    await sleep(200);
+    // A4 (P0): the TRAILING sleep(200) converts — mirrors CdpBrowser.dragAndDrop.
+    await this.waitForIdle({ networkQuietMs: 200, timeoutMs: 2000 });
   }
 
   async blur(nodeId: string): Promise<void> {
@@ -386,7 +506,8 @@ export class ExtensionBrowser implements BrowserPort {
     } finally {
       if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {});
     }
-    await sleep(100);
+    // A4 (P0): was a flat sleep(100) — mirrors CdpBrowser.blur.
+    await this.waitForIdle({ networkQuietMs: 100, timeoutMs: 800 });
   }
 
   async mouse(kind: 'move' | 'down' | 'up', x: number, y: number): Promise<void> {
@@ -396,7 +517,8 @@ export class ExtensionBrowser implements BrowserPort {
     await this.c.Page.bringToFront().catch(() => {});
     const type = kind === 'move' ? 'mouseMoved' : kind === 'down' ? 'mousePressed' : 'mouseReleased';
     await this.c.Input.dispatchMouseEvent({ type, x, y, button: 'left', clickCount: 1 });
-    await sleep(kind === 'move' ? 50 : 150);
+    // A4 (P0): was a flat sleep(50/150) — mirrors CdpBrowser.mouse.
+    await this.waitForIdle({ networkQuietMs: 100, timeoutMs: kind === 'move' ? 500 : 1000 });
   }
 
   /** Tab primitives are NOT implemented for the daemon extension transport:
@@ -462,7 +584,8 @@ export class ExtensionBrowser implements BrowserPort {
       await this.c.Input.dispatchKeyEvent({ type: 'char', text: ch, unmodifiedText: ch, key: ch });
       await this.c.Input.dispatchKeyEvent({ type: 'keyUp', key: ch });
     }
-    await sleep(100);
+    // A4 (P0): was a flat sleep(100) — mirrors CdpBrowser.typeByKeyEvents.
+    await this.waitForIdle({ networkQuietMs: 150, timeoutMs: 1500 });
   }
 
   async screenshot(): Promise<Buffer> {
@@ -538,6 +661,7 @@ export class ExtensionBrowser implements BrowserPort {
     this.tabId = null;
     this.attachedExisting = false;
     this.capture = null;
+    this.idle = null;
     this.nodeMap.clear();
     if (this.ownsBridge && this.bridge) {
       try { await this.bridge.close(); } catch { /* already closed */ }

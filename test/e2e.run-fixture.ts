@@ -32,6 +32,13 @@ async function runAgainstFixture(bug: boolean) {
       // captured error" were both unreachable and this suite had been failing
       // silently. Opting out here is the whole point of the fixture.
       config: { ...cfg, readOnly: false },
+      // This gate exists to exercise the FULL AI stack (brain → navigator →
+      // ports → verdict) against both fixture modes. Once A1 landed a recorded
+      // script in generated-tests/, the pre-run matcher started recognising
+      // this exact task+url and short-circuiting into a $0 replay — so the
+      // suite silently stopped testing the thing it is named for. The recorder
+      // path has its own dedicated gate (test/e2e.recorder.ts).
+      replay: false,
     });
   } finally {
     await stopFixture(server);

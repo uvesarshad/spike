@@ -95,6 +95,34 @@ export function scriptFromReport(report: Report): QaScript {
   if (report.verdict !== 'pass') {
     throw new Error(`only passed runs are recorded (verdict: ${report.verdict})`);
   }
+  /* A navigator that mis-targets a node, notices, and re-clicks the right one
+   * is NORMAL recovery — the run still passes and that is the whole point of
+   * the loop. But the recorder used to write BOTH clicks into the script, and
+   * a replayed no-op click is not harmless: the second one runs against the
+   * page the first one produced. Observed on the dogfood fixture (run
+   * 2026-08-09_12-19-05-xgx6): the navigator clicked the password StaticText,
+   * self-corrected onto the real "Sign in" button, and the emitted script
+   * carried `click button "Sign in"` twice — so replay logged in on step 3 and
+   * then failed on step 4 with `UI drift: no button "Sign in"`, because a
+   * logged-in page has no Sign-in button. A transient mis-click became a
+   * permanently broken regression test.
+   *
+   * Collapsing CONSECUTIVE clicks on the same target is safe: genuine
+   * double-click semantics are expressed by the `mouse` verb, never by two
+   * independent click steps, and a target that legitimately needs clicking
+   * twice in a row (a toggle returning to its prior state) leaves the run in
+   * the same place either way. Non-consecutive repeats are untouched — those
+   * are real revisits (paginate, add-to-cart twice). */
+  const isDuplicateClick = (acc: ScriptStep[], target: StepTarget): boolean => {
+    const prev = acc[acc.length - 1];
+    return (
+      prev?.type === 'click' &&
+      prev.target.role === target.role &&
+      prev.target.name === target.name &&
+      (prev.target.nth ?? 0) === (target.nth ?? 0)
+    );
+  };
+
   const steps: ScriptStep[] = [];
   for (const s of report.steps) {
     if (!s.ok) continue; // a passed run can contain a recovered miss — don't replay it
@@ -104,7 +132,7 @@ export function scriptFromReport(report: Report): QaScript {
         steps.push({ type: 'navigate', url: a.url });
         break;
       case 'click':
-        if (s.target) steps.push({ type: 'click', target: s.target });
+        if (s.target && !isDuplicateClick(steps, s.target)) steps.push({ type: 'click', target: s.target });
         break;
       case 'type':
         if (s.target) steps.push({ type: 'type', target: s.target, text: a.text });

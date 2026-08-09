@@ -80,16 +80,23 @@ export async function replayScript(
           break;
         case 'click': {
           const node = await findByTarget(browser, s.target);
+          // A4 (P0): Playwright-style actionability before acting — findByTarget
+          // only proved the role+name resolves in the AX tree, not that the
+          // node is visible/enabled/settled yet (a fade-in, a disabled-until-
+          // validated submit button). Guarded: optional on BrowserPort.
+          await browser.waitForActionable?.(node.id);
           await browser.click(node.id);
           break;
         }
         case 'type': {
           const node = await findByTarget(browser, s.target);
+          await browser.waitForActionable?.(node.id);
           await browser.type(node.id, resolveRunPlaceholders(s.text, runData).text);
           break;
         }
         case 'hover': {
           const node = await findByTarget(browser, s.target);
+          await browser.waitForActionable?.(node.id);
           await browser.hover(node.id);
           break;
         }
@@ -98,6 +105,7 @@ export async function replayScript(
           break;
         case 'select_option': {
           const node = await findByTarget(browser, s.target);
+          await browser.waitForActionable?.(node.id);
           await browser.selectOption(node.id, s.value);
           break;
         }
@@ -138,6 +146,7 @@ export async function replayScript(
         }
         case 'upload_file': {
           const node = await findByTarget(browser, s.target);
+          await browser.waitForActionable?.(node.id);
           await browser.uploadFile(node.id, s.paths);
           break;
         }
@@ -145,11 +154,14 @@ export async function replayScript(
           const source = await findByTarget(browser, s.source);
           if (!s.target) throw new Error(`drag_and_drop ${s.source.role} "${s.source.name ?? ''}" has no recorded drop target`);
           const target = await findByTarget(browser, s.target);
+          await browser.waitForActionable?.(source.id);
+          await browser.waitForActionable?.(target.id);
           await browser.dragAndDrop(source.id, target.id);
           break;
         }
         case 'blur': {
           const node = await findByTarget(browser, s.target);
+          await browser.waitForActionable?.(node.id);
           await browser.blur(node.id);
           break;
         }
@@ -209,10 +221,17 @@ export async function replayScript(
       failingStep = { index: i, action: record.action, description: record.description };
     }
 
-    // A13 (P1, best-effort — skipped): see loop.ts's identical note — BrowserPort
-    // has no non-destructive in-flight/idle check to poll here without extending
-    // the port interface, which is out of scope for this pass.
-    await sleep(250);
+    // A4 (P0): waitForIdle() now exists (browser-port.ts) — a real
+    // network-quiet condition replaces the flat sleep(250) this used to be.
+    // Ports that don't implement it (the optional method is guarded) fall
+    // back to the old fixed sleep so nothing regresses on a partial
+    // transport. Runs BEFORE the drain below either way, same ordering as
+    // before.
+    if (browser.waitForIdle) {
+      await browser.waitForIdle();
+    } else {
+      await sleep(250);
+    }
     record.console = browser.drainConsole();
     record.network = browser.drainNetwork();
 

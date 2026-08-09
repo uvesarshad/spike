@@ -5132,6 +5132,72 @@ function buildTracerFromEnv() {
 }
 
 // src/router/model-router.ts
+var TRANSIENT_STATUS = /* @__PURE__ */ new Set([429, 502, 503, 504]);
+var NETWORK_ERROR_RE = /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|EPIPE|ENOTFOUND|socket hang up|network error|fetch failed/i;
+var STATUS_IN_MESSAGE_RE = /\b(\d{3})\s*:/;
+var RETRY_AFTER_IN_MESSAGE_RE = /retry[-_ ]?(?:after|delay)["\s:]*"?(\d+(?:\.\d+)?)\s*s?/i;
+function classifyFailure(err) {
+  const e = err;
+  const message = e && typeof e.message === "string" ? e.message : String(err);
+  if (typeof e?.retryAfterMs === "number" && Number.isFinite(e.retryAfterMs)) {
+    return { transient: true, retryAfterMs: Math.max(0, e.retryAfterMs), reason: "retry-after-hint" };
+  }
+  if (e?.retryAfter !== void 0) {
+    const seconds = typeof e.retryAfter === "number" ? e.retryAfter : Number(e.retryAfter);
+    if (Number.isFinite(seconds)) {
+      return { transient: true, retryAfterMs: Math.max(0, seconds * 1e3), reason: "retry-after-hint" };
+    }
+  }
+  const statusMatch = message.match(STATUS_IN_MESSAGE_RE);
+  const status = typeof e?.status === "number" ? e.status : statusMatch ? Number(statusMatch[1]) : void 0;
+  if (status !== void 0) {
+    if (TRANSIENT_STATUS.has(status)) {
+      return { transient: true, retryAfterMs: extractRetryAfterFromText(message), reason: String(status) };
+    }
+    return { transient: false, reason: String(status) };
+  }
+  const code = e?.code ?? e?.cause?.code;
+  if (typeof code === "string" && NETWORK_ERROR_RE.test(code) || NETWORK_ERROR_RE.test(message)) {
+    return { transient: true, reason: "network" };
+  }
+  return { transient: false, reason: "non-transient" };
+}
+function extractRetryAfterFromText(message) {
+  const m = message.match(RETRY_AFTER_IN_MESSAGE_RE);
+  if (!m) return void 0;
+  const seconds = Number(m[1]);
+  return Number.isFinite(seconds) ? Math.round(seconds * 1e3) : void 0;
+}
+var DEFAULT_RETRY_POLICY = {
+  maxAttempts: 3,
+  baseDelaysMs: [250, 750, 2e3],
+  maxTotalDelayMs: 4e3
+};
+function jitter(ms) {
+  return Math.round(ms * (0.75 + Math.random() * 0.5));
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function callWithRetry(fn, policy, attempts) {
+  attempts.count = 0;
+  let totalDelay = 0;
+  for (; ; ) {
+    attempts.count++;
+    try {
+      return await fn();
+    } catch (e) {
+      const classification = classifyFailure(e);
+      if (!classification.transient || attempts.count >= policy.maxAttempts) throw e;
+      const remaining = policy.maxTotalDelayMs - totalDelay;
+      if (remaining <= 25) throw e;
+      const base = classification.retryAfterMs ?? policy.baseDelaysMs[Math.min(attempts.count - 1, policy.baseDelaysMs.length - 1)];
+      const delay = Math.min(classification.retryAfterMs !== void 0 ? base : jitter(base), remaining);
+      totalDelay += delay;
+      await sleep(delay);
+    }
+  }
+}
 var ModelRouter = class {
   constructor(adapters, opts) {
     this.adapters = adapters;
@@ -5140,6 +5206,7 @@ var ModelRouter = class {
     this.pinnedAdapter = opts?.pinnedAdapter;
     this.navigatorAdapter = opts?.navigatorAdapter;
     this.plannerAdapter = opts?.plannerAdapter;
+    this.retryPolicy = { ...DEFAULT_RETRY_POLICY, ...opts?.retryPolicy };
   }
   adapters;
   trace = [];
@@ -5152,6 +5219,7 @@ var ModelRouter = class {
   pinnedAdapter;
   navigatorAdapter;
   plannerAdapter;
+  retryPolicy;
   /** True when at least one adapter can serve `cap` right now (availability-probed
    * in parallel). The driver uses this to detect whether a BRAIN (plan-goals) is
    * configured at all — if not, it runs navigator-only with a single implicit goal
@@ -5197,13 +5265,18 @@ var ModelRouter = class {
     let lastUncertain = null;
     for (const adapter of ladder) {
       const t0 = Date.now();
+      const attempts = { count: 0 };
       try {
         const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
-        const raw = await this.traceCall(
-          "visual-verdict",
-          adapter,
-          step,
-          () => adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png })
+        const raw = await callWithRetry(
+          () => this.traceCall(
+            "visual-verdict",
+            adapter,
+            step,
+            () => adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png })
+          ),
+          this.retryPolicy,
+          attempts
         );
         const verdict = {
           verdict: raw.verdict === "pass" || raw.verdict === "fail" ? raw.verdict : "uncertain",
@@ -5218,7 +5291,9 @@ var ModelRouter = class {
           ms: Date.now() - t0,
           escalatedFrom,
           note: verdict.verdict === "uncertain" ? "uncertain \u2192 escalate" : void 0,
-          usage: adapter.lastUsage
+          usage: adapter.lastUsage,
+          attempts: attempts.count > 1 ? attempts.count : void 0,
+          retried: attempts.count > 1 ? true : void 0
         });
         if (verdict.verdict !== "uncertain") return verdict;
         lastUncertain = verdict;
@@ -5232,7 +5307,9 @@ var ModelRouter = class {
           adapter: adapter.name,
           ms: Date.now() - t0,
           escalatedFrom,
-          note: `error \u2192 escalate: ${lastError.message.slice(0, 120)}`
+          note: `error \u2192 escalate: ${lastError.message.slice(0, 120)}`,
+          attempts: attempts.count > 1 ? attempts.count : void 0,
+          retried: attempts.count > 1 ? true : void 0
         });
         escalatedFrom = adapter.name;
       }
@@ -5264,12 +5341,12 @@ var ModelRouter = class {
       throw new Error("no video-capable visual-verdict adapter available");
     }
     const t0 = Date.now();
+    const attempts = { count: 0 };
     try {
-      const raw = await this.traceCall(
-        "visual-verdict",
-        adapter,
-        step,
-        () => adapter.videoVerdict(videoPath, expectation)
+      const raw = await callWithRetry(
+        () => this.traceCall("visual-verdict", adapter, step, () => adapter.videoVerdict(videoPath, expectation)),
+        this.retryPolicy,
+        attempts
       );
       const verdict = {
         verdict: raw.verdict === "pass" || raw.verdict === "fail" ? raw.verdict : "uncertain",
@@ -5283,7 +5360,9 @@ var ModelRouter = class {
         adapter: adapter.name,
         ms: Date.now() - t0,
         note: "video",
-        usage: adapter.lastUsage
+        usage: adapter.lastUsage,
+        attempts: attempts.count > 1 ? attempts.count : void 0,
+        retried: attempts.count > 1 ? true : void 0
       });
       return verdict;
     } catch (e) {
@@ -5294,7 +5373,9 @@ var ModelRouter = class {
         rung: adapter.rung,
         adapter: adapter.name,
         ms: Date.now() - t0,
-        note: `video error: ${err.message.slice(0, 120)}`
+        note: `video error: ${err.message.slice(0, 120)}`,
+        attempts: attempts.count > 1 ? attempts.count : void 0,
+        retried: attempts.count > 1 ? true : void 0
       });
       throw err;
     }
@@ -5306,13 +5387,18 @@ var ModelRouter = class {
     const adapter = ladder.find((a) => a.name === candidate.name && a.rung === candidate.rung);
     if (!adapter) throw new Error(`visual-verdict adapter unavailable: ${candidate.name}`);
     const t0 = Date.now();
+    const attempts = { count: 0 };
     try {
       const prompt = adapter.rung === 0 ? expectation : verdictPrompt(expectation);
-      const raw = await this.traceCall(
-        "visual-verdict",
-        adapter,
-        step,
-        () => adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png })
+      const raw = await callWithRetry(
+        () => this.traceCall(
+          "visual-verdict",
+          adapter,
+          step,
+          () => adapter.generateJson({ prompt, schema: VERDICT_JSON_SCHEMA, imagePng: png })
+        ),
+        this.retryPolicy,
+        attempts
       );
       const verdict = {
         verdict: raw.verdict === "pass" || raw.verdict === "fail" ? raw.verdict : "uncertain",
@@ -5326,7 +5412,9 @@ var ModelRouter = class {
         adapter: adapter.name,
         ms: Date.now() - t0,
         note: traceNote,
-        usage: adapter.lastUsage
+        usage: adapter.lastUsage,
+        attempts: attempts.count > 1 ? attempts.count : void 0,
+        retried: attempts.count > 1 ? true : void 0
       });
       return { verdict, candidate };
     } catch (e) {
@@ -5337,7 +5425,9 @@ var ModelRouter = class {
         rung: adapter.rung,
         adapter: adapter.name,
         ms: Date.now() - t0,
-        note: `${traceNote ? `${traceNote}: ` : ""}error: ${err.message.slice(0, 120)}`
+        note: `${traceNote ? `${traceNote}: ` : ""}error: ${err.message.slice(0, 120)}`,
+        attempts: attempts.count > 1 ? attempts.count : void 0,
+        retried: attempts.count > 1 ? true : void 0
       });
       throw err;
     }
@@ -5365,8 +5455,13 @@ var ModelRouter = class {
     let escalatedFrom;
     for (const adapter of ladder) {
       const t0 = Date.now();
+      const attempts = { count: 0 };
       try {
-        const result = await this.traceCall(cap, adapter, step, () => adapter.generateJson({ prompt, schema }));
+        const result = await callWithRetry(
+          () => this.traceCall(cap, adapter, step, () => adapter.generateJson({ prompt, schema })),
+          this.retryPolicy,
+          attempts
+        );
         this.trace.push({
           step,
           capability: cap,
@@ -5374,7 +5469,9 @@ var ModelRouter = class {
           adapter: adapter.name,
           ms: Date.now() - t0,
           escalatedFrom,
-          usage: adapter.lastUsage
+          usage: adapter.lastUsage,
+          attempts: attempts.count > 1 ? attempts.count : void 0,
+          retried: attempts.count > 1 ? true : void 0
         });
         return result;
       } catch (e) {
@@ -5386,7 +5483,9 @@ var ModelRouter = class {
           adapter: adapter.name,
           ms: Date.now() - t0,
           escalatedFrom,
-          note: `error \u2192 escalate: ${lastError.message.slice(0, 120)}`
+          note: `error \u2192 escalate: ${lastError.message.slice(0, 120)}`,
+          attempts: attempts.count > 1 ? attempts.count : void 0,
+          retried: attempts.count > 1 ? true : void 0
         });
         escalatedFrom = adapter.name;
       }
@@ -10277,7 +10376,7 @@ function checkProbeInvariants(raw, config) {
     if (!hasMain) {
       cap.push(out, {
         rule: "empty-required-region",
-        severity: "error",
+        severity: "warn",
         detail: 'No <main> (or role="main") landmark found on the page.'
       });
     } else if (mainTextLength === 0) {
@@ -10290,7 +10389,7 @@ function checkProbeInvariants(raw, config) {
     if (!hasH1) {
       cap.push(out, {
         rule: "empty-required-region",
-        severity: "error",
+        severity: "warn",
         detail: "No <h1> found on the page."
       });
     }
@@ -10771,23 +10870,103 @@ function verifyActionEffect(before, after, action, target) {
   if (action.type === "navigate") {
     const expected = normalizeUrlForActionCache(action.url);
     if (after.normalizedUrl === expected) {
+      const errorSignal = detectErrorPageSignal(after.ax.root);
+      if (errorSignal) {
+        return {
+          ok: false,
+          reason: `navigation reached the expected URL but the destination looks like an error page ("${errorSignal}")`,
+          changes
+        };
+      }
       return { ok: true, reason: "navigation reached the expected URL", changes };
     }
+    if (changes.length) return { ok: true, reason: `observed ${changes.join(" and ")} change after navigate`, changes };
+    return { ok: false, reason: "navigate did not reach the expected URL and nothing else observably changed", changes };
   }
-  if (action.type === "reload" && after.normalizedUrl === before.normalizedUrl) {
-    return { ok: true, reason: "reload settled on the same URL", changes };
+  if (action.type === "reload") {
+    if (after.normalizedUrl === before.normalizedUrl) {
+      return { ok: true, reason: "reload settled on the same URL", changes };
+    }
+    if (changes.length) return { ok: true, reason: `observed ${changes.join(" and ")} change after reload`, changes };
+    return { ok: false, reason: "reload produced no observable URL or page change", changes };
+  }
+  if (action.type === "go_back") {
+    if (changes.length) return { ok: true, reason: `observed ${changes.join(" and ")} change after go_back`, changes };
+    return { ok: false, reason: "go_back produced no observable URL or page change", changes };
+  }
+  if (action.type === "press_key") {
+    if (changes.length) return { ok: true, reason: `observed ${changes.join(" and ")} change after press_key`, changes };
+    return { ok: false, reason: "press_key produced no observable URL or page change", changes };
+  }
+  if (action.type === "click") {
+    if (target) {
+      const beforeNode = findByCachedTarget(before.ax.root, target);
+      const afterNode = findByCachedTarget(after.ax.root, target);
+      if (beforeNode && !afterNode) {
+        return { ok: true, reason: "click target was removed or navigated away, a legitimate outcome", changes };
+      }
+      if (beforeNode && afterNode && targetOwnChangeDetected(beforeNode, afterNode)) {
+        return { ok: true, reason: "click target state/name/value changed", changes };
+      }
+    }
+    if (changes.includes("url")) {
+      return { ok: true, reason: "click navigated to a new URL", changes };
+    }
+    const regionSignal = regionChangeDetected(before.ax.root, after.ax.root);
+    if (regionSignal) {
+      return { ok: true, reason: `click produced a targeted effect: ${regionSignal}`, changes };
+    }
+    return {
+      ok: false,
+      reason: "click produced no targeted effect on its own target, the URL, or an alert/status/dialog region (only unrelated page changes, if any)",
+      changes
+    };
+  }
+  if (action.type === "hover") {
+    if (!target) {
+      return { ok: false, reason: "hover cannot be verified without a target descriptor", changes };
+    }
+    const afterNode = findByCachedTarget(after.ax.root, target);
+    if (!afterNode) {
+      return { ok: false, reason: "hover target no longer resolves on the page", changes };
+    }
+    const beforeNode = findByCachedTarget(before.ax.root, target);
+    const ownChanged = beforeNode ? targetOwnChangeDetected(beforeNode, afterNode) : false;
+    const regionSignal = regionChangeDetected(before.ax.root, after.ax.root);
+    if (ownChanged) {
+      return { ok: true, reason: "hover target state changed", changes };
+    }
+    if (regionSignal) {
+      return { ok: true, reason: `hover revealed a targeted effect: ${regionSignal}`, changes };
+    }
+    return { ok: false, reason: "hover produced no observable target state change or tooltip/dialog region", changes };
   }
   if (action.type === "type" && target) {
-    const node = findByCachedTarget(after.ax.root, target);
-    if (node && actionTextVerifies(action.text, node)) {
+    const beforeNode = findByCachedTarget(before.ax.root, target);
+    const afterNode = findByCachedTarget(after.ax.root, target);
+    if (afterNode && actionTextVerifies(action.text, afterNode, beforeNode)) {
       return { ok: true, reason: "typed value is visible in the target state", changes };
     }
+    return { ok: false, reason: "typed value was not observed as a change in the target state", changes };
   }
   if (action.type === "select_option" && target) {
     const node = findByCachedTarget(after.ax.root, target);
-    if (node && nodeText(node).toLowerCase().includes(action.value.toLowerCase())) {
-      return { ok: true, reason: "selected value is visible in the target state", changes };
+    if (node) {
+      const wanted = action.value.trim().toLowerCase();
+      const exactValue = node.value !== void 0 && node.value.trim().toLowerCase() === wanted;
+      const exactName = node.name !== void 0 && node.name.trim().toLowerCase() === wanted;
+      if (exactValue || exactName) {
+        return { ok: true, reason: "selected value exactly matches the target state", changes };
+      }
+      if (nodeText(node).toLowerCase().includes(wanted)) {
+        return {
+          ok: true,
+          reason: "selected value substring-matches the target state (no exact value/name match was available)",
+          changes
+        };
+      }
     }
+    return { ok: false, reason: "selected value was not observed in the target state", changes };
   }
   if (action.type === "assert_dom") {
     const node = findNode2(after.ax.root, action.nodeId) ?? (target ? findByCachedTarget(after.ax.root, target) : void 0);
@@ -10812,7 +10991,6 @@ function verifyActionEffect(before, after, action, target) {
     }
     return { ok: true, reason: "extract target text is available", changes };
   }
-  if (changes.length) return { ok: true, reason: `observed ${changes.join(" and ")} change`, changes };
   return { ok: false, reason: "no observable URL, DOM, value, wait, or assertion effect", changes };
 }
 function normalizePathname(pathname) {
@@ -10964,11 +11142,73 @@ function nodeText(node) {
   walk(node);
   return parts.join(" ");
 }
-function actionTextVerifies(text, node) {
+function actionTextVerifies(text, node, beforeNode) {
   if (hasSecretPlaceholder(text)) {
-    return Boolean(node.value || node.states?.includes("focused"));
+    if (!(node.value || node.states?.includes("focused"))) return false;
+    if (!beforeNode) return true;
+    const beforeValue = beforeNode.value ?? "";
+    const afterValue = node.value ?? "";
+    return beforeValue.length === 0 || beforeValue !== afterValue;
   }
   return nodeText(node).toLowerCase().includes(text.toLowerCase());
+}
+function targetOwnChangeDetected(beforeNode, afterNode) {
+  if ((beforeNode.name ?? "") !== (afterNode.name ?? "")) return true;
+  if ((beforeNode.value ?? "") !== (afterNode.value ?? "")) return true;
+  const beforeStates = (beforeNode.states ?? []).slice().sort().join(",");
+  const afterStates = (afterNode.states ?? []).slice().sort().join(",");
+  return beforeStates !== afterStates;
+}
+var SIGNAL_REGION_ROLES = /* @__PURE__ */ new Set(["alert", "alertdialog", "dialog", "status", "log", "tooltip"]);
+function collectSignalRegions(root) {
+  const map = /* @__PURE__ */ new Map();
+  const walk = (node) => {
+    if (SIGNAL_REGION_ROLES.has(node.role)) {
+      map.set(`${node.role}|${node.name ?? ""}`, nodeText(node));
+    }
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(root);
+  return map;
+}
+function regionChangeDetected(beforeRoot, afterRoot) {
+  const beforeMap = collectSignalRegions(beforeRoot);
+  const afterMap = collectSignalRegions(afterRoot);
+  for (const [key, text] of afterMap) {
+    const role = key.split("|", 1)[0];
+    const prior = beforeMap.get(key);
+    if (prior === void 0) return `a new ${role} region appeared`;
+    if (prior !== text) return `the ${role} region's content changed`;
+  }
+  for (const key of beforeMap.keys()) {
+    if (!afterMap.has(key)) return `a ${key.split("|", 1)[0]} region disappeared`;
+  }
+  return null;
+}
+var ERROR_PAGE_PATTERNS = [
+  /\b(404|500|502|503|504)\b/,
+  /page not found/i,
+  /something went wrong/i,
+  /internal server error/i,
+  /application error/i,
+  /an unexpected error occurred/i,
+  /service unavailable/i
+];
+function detectErrorPageSignal(root) {
+  let found = null;
+  const walk = (node) => {
+    if (found) return;
+    if (node.role === "heading" || node.role === "alert" || node.role === "alertdialog" || node.role === "status") {
+      const text = nodeText(node);
+      if (ERROR_PAGE_PATTERNS.some((re) => re.test(text))) {
+        found = text.slice(0, 80);
+        return;
+      }
+    }
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(root);
+  return found;
 }
 function hasSecretPlaceholder(text) {
   SECRET_PLACEHOLDER_RE2.lastIndex = 0;
@@ -11053,7 +11293,7 @@ function clamp(n, lo, hi) {
 }
 
 // src/driver/loop.ts
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
 function withTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
@@ -11390,7 +11630,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       reason = `could not confirm success: ${record.error}`;
       outcome = "end";
     }
-    await sleep(150);
+    await sleep2(150);
     record.console = browser.drainConsole();
     record.network = browser.drainNetwork();
     await collectInvariants(browser, record);
@@ -11496,7 +11736,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         try {
           const before = await captureActionEffectState(browser);
           await executeCacheAction(browser, cachedAction, ax.root, runData, vault);
-          await sleep(150);
+          await sleep2(150);
           const after = await captureActionEffectState(browser);
           const effect = verifyActionEffect(before, after, cachedAction, target);
           if (!effect.ok) {
@@ -11692,7 +11932,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         } else if (action.type === "assert_visual") {
           const wantsVideo = action.mode === "video";
           const videoRecorder = wantsVideo && browser.cdpClient ? await startAssertionClip(browser.cdpClient(), artifacts) : null;
-          if (videoRecorder) await sleep(500);
+          if (videoRecorder) await sleep2(500);
           const png = await withTimeout(browser.screenshot(), CDP_CALL_TIMEOUT_MS, "screenshot");
           record.screenshot = await artifacts.saveScreenshot(i, png);
           const videoPath = videoRecorder ? await videoRecorder.stop().catch(() => null) : null;
@@ -11831,7 +12071,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       }
       if (record.ok === false) actionSpan.fail(record.error ?? "action failed");
       else actionSpan.end();
-      await sleep(150);
+      await sleep2(150);
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
       await collectInvariants(browser, record);
@@ -12111,7 +12351,7 @@ async function executeOnce(browser, action) {
     case "mouse":
       return browser.mouse(action.kind, action.x, action.y);
     case "wait":
-      return sleep(action.ms);
+      return sleep2(action.ms);
     default:
       throw new Error(`executeOnce: unexpected action ${action.type}`);
   }
@@ -12832,7 +13072,7 @@ function buildCdpClient(transport) {
 }
 
 // src/extension/lite-extension-browser.ts
-var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
+var sleep3 = (ms) => new Promise((r) => setTimeout(r, ms));
 var LiteExtensionBrowser = class {
   constructor(deps) {
     this.deps = deps;
@@ -12866,7 +13106,7 @@ var LiteExtensionBrowser = class {
   async navigate(url) {
     this.emitCursor({ kind: "caption", caption: "Opening " + url });
     await this.deps.navigate(url);
-    await sleep2(300);
+    await sleep3(300);
   }
   async url() {
     return this.deps.getUrl();
@@ -12924,12 +13164,12 @@ var LiteExtensionBrowser = class {
     const backendNodeId = this.backendNodeId(nodeId);
     const { x, y } = await this.centerOf(backendNodeId);
     this.emitCursor({ kind: "move", x, y, caption: "Clicking " + this.nodeLabel(nodeId) });
-    await sleep2(350);
+    await sleep3(350);
     for (const type of ["mousePressed", "mouseReleased"]) {
       await this.c.Input.dispatchMouseEvent({ type, x, y, button: "left", clickCount: 1 });
     }
     this.emitCursor({ kind: "click", x, y });
-    await sleep2(400);
+    await sleep3(400);
   }
   async type(nodeId, text) {
     const backendNodeId = this.backendNodeId(nodeId);
@@ -12943,7 +13183,7 @@ var LiteExtensionBrowser = class {
       const x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
       const y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
       this.emitCursor({ kind: "type", x, y, caption: "Typing into " + this.nodeLabel(nodeId) });
-      await sleep2(350);
+      await sleep3(350);
     } catch {
       this.emitCursor({ kind: "caption", caption: "Typing into " + this.nodeLabel(nodeId) });
     }
@@ -12963,16 +13203,16 @@ var LiteExtensionBrowser = class {
       windowsVirtualKeyCode: 65
     });
     await this.c.Input.insertText({ text });
-    await sleep2(150);
+    await sleep3(150);
     await this.verifyTyped(backendNodeId, text);
   }
   async hover(nodeId) {
     const backendNodeId = this.backendNodeId(nodeId);
     const { x, y } = await this.centerOf(backendNodeId);
     this.emitCursor({ kind: "move", x, y, caption: "Hovering over " + this.nodeLabel(nodeId) });
-    await sleep2(350);
+    await sleep3(350);
     await this.c.Input.dispatchMouseEvent({ type: "mouseMoved", x, y });
-    await sleep2(250);
+    await sleep3(250);
   }
   async pressKey(key) {
     await this.c.Page.bringToFront().catch(() => {
@@ -12980,7 +13220,7 @@ var LiteExtensionBrowser = class {
     this.emitCursor({ kind: "caption", caption: `Pressing ${key}` });
     await this.c.Input.dispatchKeyEvent({ type: "keyDown", key });
     await this.c.Input.dispatchKeyEvent({ type: "keyUp", key });
-    await sleep2(150);
+    await sleep3(150);
   }
   async selectOption(nodeId, value) {
     const backendNodeId = this.backendNodeId(nodeId);
@@ -13012,14 +13252,14 @@ var LiteExtensionBrowser = class {
       if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {
       });
     }
-    await sleep2(200);
+    await sleep3(200);
   }
   async reload() {
     this.emitCursor({ kind: "caption", caption: "Reloading the page" });
     const loaded = this.c.Page.loadEventFired();
     await this.c.Page.reload({ ignoreCache: false });
-    await Promise.race([loaded, sleep2(15e3)]);
-    await sleep2(300);
+    await Promise.race([loaded, sleep3(15e3)]);
+    await sleep3(300);
   }
   async goBack() {
     this.emitCursor({ kind: "caption", caption: "Going back" });
@@ -13027,14 +13267,14 @@ var LiteExtensionBrowser = class {
     if (currentIndex <= 0) throw new Error("goBack() failed: no previous history entry");
     const loaded = this.c.Page.loadEventFired();
     await this.c.Page.navigateToHistoryEntry({ entryId: entries[currentIndex - 1].id });
-    await Promise.race([loaded, sleep2(15e3)]);
-    await sleep2(300);
+    await Promise.race([loaded, sleep3(15e3)]);
+    await sleep3(300);
   }
   async uploadFile(nodeId, paths) {
     const backendNodeId = this.backendNodeId(nodeId);
     this.emitCursor({ kind: "caption", caption: "Uploading file(s) to " + this.nodeLabel(nodeId) });
     await this.c.DOM.setFileInputFiles({ files: paths, backendNodeId });
-    await sleep2(150);
+    await sleep3(150);
   }
   async dragAndDrop(sourceId, targetId) {
     const src = await this.centerOf(this.backendNodeId(sourceId));
@@ -13047,11 +13287,11 @@ var LiteExtensionBrowser = class {
       const x = src.x + (dst.x - src.x) * i / STEPS;
       const y = src.y + (dst.y - src.y) * i / STEPS;
       await this.c.Input.dispatchMouseEvent({ type: "mouseMoved", x, y, button: "left" });
-      await sleep2(30);
+      await sleep3(30);
     }
     await this.c.Input.dispatchMouseEvent({ type: "mouseReleased", x: dst.x, y: dst.y, button: "left", clickCount: 1 });
     this.emitCursor({ kind: "click", x: dst.x, y: dst.y });
-    await sleep2(200);
+    await sleep3(200);
   }
   async blur(nodeId) {
     const backendNodeId = this.backendNodeId(nodeId);
@@ -13069,14 +13309,14 @@ var LiteExtensionBrowser = class {
       if (objectId) await this.c.Runtime.releaseObject({ objectId }).catch(() => {
       });
     }
-    await sleep2(100);
+    await sleep3(100);
   }
   async mouse(kind, x, y) {
     await this.c.Page.bringToFront().catch(() => {
     });
     const type = kind === "move" ? "mouseMoved" : kind === "down" ? "mousePressed" : "mouseReleased";
     await this.c.Input.dispatchMouseEvent({ type, x, y, button: "left", clickCount: 1 });
-    await sleep2(kind === "move" ? 50 : 150);
+    await sleep3(kind === "move" ? 50 : 150);
   }
   /** Tab primitives are NOT implemented for the lite extension transport: the
    * SW deps injected here (LiteBrowserDeps) don't expose chrome.tabs
@@ -13140,7 +13380,7 @@ var LiteExtensionBrowser = class {
       await this.c.Input.dispatchKeyEvent({ type: "char", text: ch, unmodifiedText: ch, key: ch });
       await this.c.Input.dispatchKeyEvent({ type: "keyUp", key: ch });
     }
-    await sleep2(100);
+    await sleep3(100);
   }
   async screenshot() {
     const { data } = await this.c.Page.captureScreenshot({ format: "png" });

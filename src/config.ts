@@ -53,7 +53,15 @@ export interface QaConfig {
   googleCliEnv: Record<string, string>;
   /** Where run artifacts (report.json, screenshots) are written. */
   artifactsDir: string;
-  /** File-backed verified action cache. Disabled by default until explicitly enabled. */
+  /** File-backed verified action cache. Enabled by default (A9, 2026-08-09):
+   * `verifyActionEffect()` now requires intent-specific proof per action type
+   * (targeted element/URL/region evidence for click/hover, exact-match-first
+   * for select_option, previously-empty-or-changed for secret `type`) instead
+   * of the old "anything on the page changed" catch-all, so a hit landing on
+   * a role+name+nth match that is no longer the semantically same element
+   * (reordered list, recycled label) can no longer be laundered by an
+   * unrelated page mutation (toast, ad refresh, ticker). Set
+   * `SPIKE_ACTION_CACHE=0` to disable. */
   actionCache: boolean;
   actionCacheDir: string;
   /** Default driver-loop step budget. */
@@ -119,7 +127,7 @@ const DEFAULTS: QaConfig = {
   googleCliModel: 'gemini-3-flash-preview',
   googleCliEnv: { NODE_OPTIONS: '--use-system-ca' },
   artifactsDir: path.resolve('artifacts'),
-  actionCache: false,
+  actionCache: true,
   actionCacheDir: path.resolve('.spike-action-cache'),
   maxSteps: 40,
   allowedHosts: ['localhost', '127.0.0.1'],

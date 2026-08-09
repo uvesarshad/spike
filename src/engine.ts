@@ -36,10 +36,10 @@ import { defaultModelFor, type PlannerMode, type ProviderId } from './vibe/setti
 import { ArtifactStore } from './report/artifacts.js';
 import { runDriverLoop, type StepInfo } from './driver/loop.js';
 import { Vault } from './vault/vault.js';
-import type { Report } from './report/report.js';
+import type { Report, RunVerdict } from './report/report.js';
 import { diffScripts, loadScript, saveScript, scriptFromReport, type QaScript } from './recorder/script.js';
 import { replayScript } from './recorder/replay.js';
-import { matchReplayScript } from './recorder/matcher.js';
+import { matchReplayScriptDetailed, NEAR_MISS_MARGIN, type ReplayMatch } from './recorder/matcher.js';
 import { startClipRecorder, type ClipRecorder } from './clip/screencast.js';
 import { FileActionCache } from './cache/action-cache.js';
 import { getDefaultTracer } from './telemetry/env.js';
@@ -100,6 +100,20 @@ export interface QaRunResult extends Report {
    * a fresh AI run — the matched script's name and match score. Absent on a
    * fresh AI-driven run. */
   replayMatch?: { name: string; score: number };
+  /** A10 (P1): set when the matcher DID find a confident replay candidate but
+   * that replay came back fail/errored, so qaRun silently fell back to a
+   * fresh AI pass — without this field, that fallback (replay time PLUS a
+   * full AI run) is invisible to any `--json`/MCP/programmatic caller that
+   * doesn't wire onProgress. Absent when no match was attempted, or the
+   * matched replay itself passed/was uncertain. */
+  replayFallback?: {
+    name: string;
+    score: number;
+    /** The verdict the matched replay actually produced, or 'uncertain' when
+     * the replay threw before producing one (see `reason`). */
+    replayVerdict: RunVerdict;
+    reason: 'replay-failed' | 'replay-error';
+  };
 }
 
 /** Browser-only session — the transport (CdpBrowser or ExtensionBrowser) plus
@@ -389,6 +403,32 @@ function targetHostCandidates(url: string): string[] {
   return host.startsWith('www.') ? [host, host.slice(4)] : [host, `www.${host}`];
 }
 
+/** A10 (P1): pure decision of what to attach to a QaRunResult when a matched
+ * replay came back `fail` (or threw) and qaRun is about to fall back to a
+ * fresh AI pass. Split out from qaRun's body so the fallback shape is
+ * unit-testable without a live browser session — a test can stub/fake
+ * `replayVerdict`/`reason` directly instead of driving a real replay to
+ * failure. `reason: 'replay-error'` (qaReplay threw) has no real verdict to
+ * report, so it's recorded as 'uncertain' rather than fabricating one. */
+export function buildReplayFallback(
+  match: ReplayMatch,
+  replayVerdict: RunVerdict,
+  reason: 'replay-failed' | 'replay-error',
+): NonNullable<QaRunResult['replayFallback']> {
+  return { name: match.name, score: match.score, replayVerdict, reason };
+}
+
+/** A10 (P1): pure decision of whether a sub-threshold `bestCandidate` is close
+ * enough to `threshold` (within `NEAR_MISS_MARGIN`) to be worth a "you had a
+ * near-miss script" progress line, and the line to print — null when there's
+ * nothing worth saying. Split out for the same unit-testability reason as
+ * `buildReplayFallback` (no live matcher/browser needed to exercise the
+ * boundary math). */
+export function nearMissMessage(bestCandidate: ReplayMatch | undefined, threshold: number): string | null {
+  if (!bestCandidate || bestCandidate.score < threshold - NEAR_MISS_MARGIN) return null;
+  return `near-miss replay candidate "${bestCandidate.name}" scored ${bestCandidate.score.toFixed(2)} (threshold ${threshold.toFixed(2)}) — a task/URL rewording likely moved it below the bar; running a fresh AI pass`;
+}
+
 /** Best-effort re-persist of report.json AFTER engine.ts adds a field the
  * module that originally wrote the file (driver/loop.ts, recorder/replay.ts —
  * neither owned here) doesn't know about, mirroring the existing clip-path
@@ -409,8 +449,9 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
   try {
     // Phase 14: pre-run replay matcher — a confident match replays
     // deterministically at $0 before a fresh AI run is even considered.
+    let replayFallback: QaRunResult['replayFallback'];
     if (opts.replay ?? true) {
-      const match = matchReplayScript(task, url);
+      const { matched: match, bestCandidate, threshold } = matchReplayScriptDetailed(task, url);
       runSpan.addEvent('replay.match', { found: Boolean(match), name: match?.name, score: match?.score });
       if (match) {
         progress(`matched replay ${match.name} (score ${match.score.toFixed(2)}) — using $0 replay (override with --no-replay)`);
@@ -429,14 +470,35 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
           }
           progress('matched replay failed — falling back to a fresh AI run');
           runSpan.addEvent('replay.fallback', { reason: 'replay-failed', name: match.name });
+          replayFallback = buildReplayFallback(match, replayed.verdict, 'replay-failed');
         } catch (e) {
           progress(`matched replay errored (${e instanceof Error ? e.message : String(e)}) — falling back to a fresh AI run`);
           runSpan.addEvent('replay.fallback', { reason: 'replay-error', name: match.name, error: e instanceof Error ? e.message : String(e) });
+          replayFallback = buildReplayFallback(match, 'uncertain', 'replay-error');
+        }
+      } else {
+        // A10 (P1): no confident match, but something came close — surfacing
+        // this is the only way a caller learns that a rename/rewording of the
+        // task (or the recorded script) is what cost them a paid AI run,
+        // since near-misses were previously never reported anywhere.
+        const nearMiss = nearMissMessage(bestCandidate, threshold);
+        if (nearMiss) {
+          progress(nearMiss);
+          runSpan.addEvent('replay.near_miss', { name: bestCandidate!.name, score: bestCandidate!.score, threshold });
         }
       }
     }
 
     const result = await runFreshAiPass(task, url, opts, progress, runSpan);
+    if (replayFallback) {
+      // Same "attach + re-persist" pattern as the replayMatch success path
+      // above: runFreshAiPass/runDriverLoop already wrote report.json without
+      // knowing about the fallback, so patch it in here — this is what makes
+      // it visible to a --json/MCP/programmatic caller that reads report.json
+      // rather than wiring onProgress (A10, P1).
+      result.replayFallback = replayFallback;
+      persistReportPatch(loadConfig(opts.config ?? {}).artifactsDir, result);
+    }
     runSpan.end({ verdict: result.verdict, source: 'ai', runId: result.runId });
     return result;
   } catch (e) {

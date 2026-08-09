@@ -40,6 +40,19 @@ function defaultSettingsPath(): string {
  * src/config.ts's own DEFAULTS.planner; keep the two in sync. */
 const DAEMON_PLANNER_MIGRATION: PlannerSelection = { provider: 'claude', mode: 'cli', model: '' };
 
+/** Daemon-only migration target for a MISSING navigator pin — the exact
+ * navigator counterpart of DAEMON_PLANNER_MIGRATION above, and for the same
+ * reason. A27 changed DEFAULT_SETTINGS.navigator to claude:api because LITE
+ * mode is BYOK-only (one API key: a small model drives, a big model judges) and
+ * has no on-device probe it can trust. This store, though, is also what the
+ * DAEMON reads, and the daemon owns a real CDP Chrome where Nano genuinely
+ * lives — which is why src/config.ts's DEFAULTS.navigator was decoupled back to
+ * nano in the same change. Borrowing DEFAULT_SETTINGS.navigator here silently
+ * migrated daemon configs onto claude:api, contradicting both that decoupling
+ * and CLAUDE.md's documented "missing navigator → nano:ondevice". Keep this in
+ * sync with src/config.ts's DEFAULTS.navigator, exactly as the planner pair is. */
+const DAEMON_NAVIGATOR_MIGRATION: PlannerSelection = { provider: 'nano', mode: 'ondevice', model: '' };
+
 export class SettingsStore {
   private readonly file: string;
   /** Last-read raw value + the file's mtime at that read, so an unchanged file
@@ -99,7 +112,7 @@ export class SettingsStore {
     const migrated: Partial<QaSettings> = {
       ...parsed,
       planner: deadPlanner ? { ...DAEMON_PLANNER_MIGRATION } : parsed.planner,
-      navigator: missingNavigator ? { ...DEFAULT_SETTINGS.navigator } : parsed.navigator,
+      navigator: missingNavigator ? { ...DAEMON_NAVIGATOR_MIGRATION } : parsed.navigator,
     };
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });
