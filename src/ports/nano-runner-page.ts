@@ -25,8 +25,84 @@ export interface NanoRunnerOptions {
   profileDir: string;
 }
 
+/** A3 (P0): the runner HTTP server, shared PROCESS-WIDE per port and
+ * refcounted. Before this, every `NanoRunnerPage.start()` unconditionally
+ * called `http.createServer(...).listen(this.opts.runnerPort)` — fine when
+ * calls are strictly sequential (today's default, each qaRun/qaReplay opens
+ * and closes its own session before the next begins), but the exact
+ * EADDRINUSE crash the audit calls out by name (finding A3: "Nano runner HTTP
+ * port 9400 ... Second process throws EADDRINUSE — sharpest, loudest
+ * failure") the moment two sessions overlap — which is now possible via
+ * `replay --all --workers N` with `via: 'playwright'` (several concurrent
+ * qaReplay calls sharing ONE Chrome on cfg.cdpPort/cfg.runnerPort by design,
+ * see engine.ts's resolveNanoLaunchOpts). Keyed by port so isolated sessions
+ * that allocated their OWN distinct runnerPort never share a server (and
+ * never need to) — this only matters for callers pointed at the SAME port. */
+const sharedServers = new Map<number, { server: http.Server; refs: number }>();
+
+export async function acquireRunnerServer(port: number): Promise<http.Server> {
+  const existing = sharedServers.get(port);
+  if (existing) {
+    existing.refs++;
+    return existing.server;
+  }
+  const server = http
+    .createServer((req, res) => {
+      if (req.url === '/runner.js') {
+        res.setHeader('content-type', 'text/javascript');
+        res.end(RUNNER_JS);
+      } else {
+        res.setHeader('content-type', 'text/html');
+        res.end(RUNNER_HTML);
+      }
+    })
+    .listen(port);
+  await new Promise<void>((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
+  sharedServers.set(port, { server, refs: 1 });
+  return server;
+}
+
+/** Drop this instance's reference; only actually closes the server once the
+ * last referencing NanoRunnerPage on this port has released it — a single
+ * `close()` must never yank the server out from under a sibling instance
+ * still using the same port (see acquireRunnerServer's doc comment). */
+export function releaseRunnerServer(port: number): void {
+  const existing = sharedServers.get(port);
+  if (!existing) return;
+  existing.refs--;
+  if (existing.refs <= 0) {
+    existing.server.close();
+    sharedServers.delete(port);
+  }
+}
+
+/** A3 (P0): serialize `Runtime.evaluate` calls into the SAME runner tab,
+ * keyed by cdpPort — the audit's own words: "Nano warm session — one tab, one
+ * session, no lock around concurrent Runtime.evaluate calls." Two
+ * NanoRunnerPage instances that share a cdpPort (the `via: 'playwright'` +
+ * `--workers N` case: one shared Chrome, one shared Nano tab) each hold their
+ * OWN chrome-remote-interface connection to that SAME tab, so nothing before
+ * this serialized their calls into `window.nano` — a concurrent verdict()
+ * and navStep() could interleave inside the page's single Prompt-API session
+ * object. Distinct cdpPorts (isolated/split Chromes) never contend, so they
+ * never wait on each other. */
+const nanoCallLocks = new Map<number, Promise<unknown>>();
+
+export function withNanoLock<T>(port: number, fn: () => Promise<T>): Promise<T> {
+  const prior = nanoCallLocks.get(port) ?? Promise.resolve();
+  const chained = prior.then(fn, fn); // run fn after prior settles either way
+  // Store a version that never rejects, so a failed call doesn't wedge the
+  // lock for whoever queues next — the ACTUAL result/rejection still flows to
+  // this call's own caller via `chained` below.
+  nanoCallLocks.set(port, chained.catch(() => undefined));
+  return chained;
+}
+
 export class NanoRunnerPage implements NanoPort {
-  private server: http.Server | null = null;
+  private serverAcquired = false;
   private client: CDP.Client | null = null;
   private tabId: string | null = null;
 
@@ -44,48 +120,43 @@ export class NanoRunnerPage implements NanoPort {
   async start(): Promise<void> {
     if (this.client) return;
 
-    this.server = http
-      .createServer((req, res) => {
-        if (req.url === '/runner.js') {
-          res.setHeader('content-type', 'text/javascript');
-          res.end(RUNNER_JS);
-        } else {
-          res.setHeader('content-type', 'text/html');
-          res.end(RUNNER_HTML);
-        }
-      })
-      .listen(this.opts.runnerPort);
-    await new Promise<void>((resolve, reject) => {
-      this.server!.once('listening', resolve);
-      this.server!.once('error', reject);
-    });
+    await acquireRunnerServer(this.opts.runnerPort);
+    this.serverAcquired = true;
+    try {
+      await ensureChrome({
+        port: this.opts.cdpPort,
+        profileDir: this.opts.profileDir,
+        headless: false, // see header comment
+      });
 
-    await ensureChrome({
-      port: this.opts.cdpPort,
-      profileDir: this.opts.profileDir,
-      headless: false, // see header comment
-    });
+      // reuse a surviving runner tab (warm model) before opening a new one
+      const targets = await CDP.List({ port: this.opts.cdpPort });
+      const existing = targets.find((t) => t.url === this.runnerUrl());
+      if (existing) {
+        this.tabId = existing.id;
+      } else {
+        const created = await CDP.New({ port: this.opts.cdpPort, url: this.runnerUrl() });
+        this.tabId = (created as { id?: string }).id ?? (created as { targetId?: string }).targetId!;
+        await sleep(1200); // let runner.js evaluate
+      }
+      this.client = await CDP({ port: this.opts.cdpPort, target: this.tabId });
+      await this.client.Runtime.enable();
 
-    // reuse a surviving runner tab (warm model) before opening a new one
-    const targets = await CDP.List({ port: this.opts.cdpPort });
-    const existing = targets.find((t) => t.url === this.runnerUrl());
-    if (existing) {
-      this.tabId = existing.id;
-    } else {
-      const created = await CDP.New({ port: this.opts.cdpPort, url: this.runnerUrl() });
-      this.tabId = (created as { id?: string }).id ?? (created as { targetId?: string }).targetId!;
-      await sleep(1200); // let runner.js evaluate
+      // make sure window.nano actually exists (fresh tab vs reused tab)
+      for (let i = 0; i < 20; i++) {
+        const t = await evalIn<string>(this.c, 'typeof window.nano', { userGesture: false });
+        if (t === 'object') return;
+        await sleep(300);
+      }
+      throw new Error('runner page never exposed window.nano');
+    } catch (e) {
+      // A3: don't leak the shared server's refcount on a failed start() — the
+      // caller (engine.ts's openSession) never calls close() in this path, so
+      // this is the only place that can release it.
+      releaseRunnerServer(this.opts.runnerPort);
+      this.serverAcquired = false;
+      throw e;
     }
-    this.client = await CDP({ port: this.opts.cdpPort, target: this.tabId });
-    await this.client.Runtime.enable();
-
-    // make sure window.nano actually exists (fresh tab vs reused tab)
-    for (let i = 0; i < 20; i++) {
-      const t = await evalIn<string>(this.c, 'typeof window.nano', { userGesture: false });
-      if (t === 'object') return;
-      await sleep(300);
-    }
-    throw new Error('runner page never exposed window.nano');
   }
 
   async availability(): Promise<NanoAvailability> {
@@ -93,48 +164,54 @@ export class NanoRunnerPage implements NanoPort {
   }
 
   async ensureModel(onProgress?: (status: string) => void): Promise<NanoAvailability> {
-    let a = await this.availability();
-    if (a === 'available') return a;
-    if (a === 'unavailable' || a === 'api-missing') {
-      throw new Error(this.unavailableHint(a));
-    }
-    // downloadable | downloading → kick off and poll window.__status
-    void evalIn(this.c, 'window.nano.download()', { timeout: 60 * 60 * 1000 }).catch(() => {
-      /* surfaced via availability below */
-    });
-    let last = '';
-    for (;;) {
-      await sleep(4000);
-      const s = await evalIn<string>(this.c, 'window.__status', { userGesture: false });
-      if (s !== last) {
-        onProgress?.(s);
-        last = s;
+    return withNanoLock(this.opts.cdpPort, async () => {
+      let a = await this.availability();
+      if (a === 'available') return a;
+      if (a === 'unavailable' || a === 'api-missing') {
+        throw new Error(this.unavailableHint(a));
       }
-      if (s === 'download done') break;
-    }
-    a = await this.availability();
-    if (a !== 'available') throw new Error(this.unavailableHint(a));
-    return a;
+      // downloadable | downloading → kick off and poll window.__status
+      void evalIn(this.c, 'window.nano.download()', { timeout: 60 * 60 * 1000 }).catch(() => {
+        /* surfaced via availability below */
+      });
+      let last = '';
+      for (;;) {
+        await sleep(4000);
+        const s = await evalIn<string>(this.c, 'window.__status', { userGesture: false });
+        if (s !== last) {
+          onProgress?.(s);
+          last = s;
+        }
+        if (s === 'download done') break;
+      }
+      a = await this.availability();
+      if (a !== 'available') throw new Error(this.unavailableHint(a));
+      return a;
+    });
   }
 
   async warmup(): Promise<void> {
-    await evalIn(this.c, 'window.nano.warmup()', { timeout: 120_000 });
+    await withNanoLock(this.opts.cdpPort, () => evalIn(this.c, 'window.nano.warmup()', { timeout: 120_000 }));
   }
 
   async verdict(png: Buffer, task: string): Promise<{ verdict: NanoVerdict; ms: number }> {
     const dataUrl = 'data:image/png;base64,' + png.toString('base64');
-    return evalIn<{ verdict: NanoVerdict; ms: number }>(
-      this.c,
-      `window.nano.verdict(${JSON.stringify(dataUrl)}, ${JSON.stringify(task)})`,
-      { timeout: 5 * 60 * 1000 },
+    return withNanoLock(this.opts.cdpPort, () =>
+      evalIn<{ verdict: NanoVerdict; ms: number }>(
+        this.c,
+        `window.nano.verdict(${JSON.stringify(dataUrl)}, ${JSON.stringify(task)})`,
+        { timeout: 5 * 60 * 1000 },
+      ),
     );
   }
 
   async navStep(prompt: string, schema: object): Promise<unknown> {
-    return evalIn<unknown>(
-      this.c,
-      `window.nano.navStep(${JSON.stringify(prompt)}, ${JSON.stringify(schema)})`,
-      { timeout: 2 * 60 * 1000 },
+    return withNanoLock(this.opts.cdpPort, () =>
+      evalIn<unknown>(
+        this.c,
+        `window.nano.navStep(${JSON.stringify(prompt)}, ${JSON.stringify(schema)})`,
+        { timeout: 2 * 60 * 1000 },
+      ),
     );
   }
 
@@ -144,9 +221,9 @@ export class NanoRunnerPage implements NanoPort {
       try { await this.client.close(); } catch { /* already closed */ }
       this.client = null;
     }
-    if (this.server) {
-      this.server.close();
-      this.server = null;
+    if (this.serverAcquired) {
+      releaseRunnerServer(this.opts.runnerPort);
+      this.serverAcquired = false;
     }
   }
 

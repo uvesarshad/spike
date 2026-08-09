@@ -13325,6 +13325,31 @@ var STRUCTURAL = /* @__PURE__ */ new Set([
   "figure"
 ]);
 var STATE_PROPS = /* @__PURE__ */ new Set(["disabled", "focused", "required", "checked", "expanded", "invalid", "selected"]);
+var TESTID_ATTRS = ["data-testid", "data-test-id", "data-test", "data-qa"];
+function extractTestId(attributes) {
+  if (!attributes) return void 0;
+  const byName = /* @__PURE__ */ new Map();
+  for (let i = 0; i + 1 < attributes.length; i += 2) byName.set(attributes[i].toLowerCase(), attributes[i + 1]);
+  for (const attr of TESTID_ATTRS) {
+    const v = byName.get(attr);
+    if (v) return v;
+  }
+  return void 0;
+}
+function buildTestIdMap(root) {
+  const map = /* @__PURE__ */ new Map();
+  const walk = (n) => {
+    if (n.backendNodeId !== void 0) {
+      const testId = extractTestId(n.attributes);
+      if (testId) map.set(n.backendNodeId, testId);
+    }
+    for (const c of n.children ?? []) walk(c);
+    if (n.contentDocument) walk(n.contentDocument);
+    for (const sr of n.shadowRoots ?? []) walk(sr);
+  };
+  walk(root);
+  return map;
+}
 function findFocusEntry(entries, focus) {
   if (focus.id) return entries.find((e) => e.id === focus.id);
   if (!focus.role) return void 0;
@@ -13422,9 +13447,16 @@ async function snapshotAxTree(client, opts = {}) {
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
   const root = nodes.find((n) => !n.parentId && !n.ignored) ?? nodes[0];
   if (!root) throw new Error("empty accessibility tree");
+  let testIdByBackendId = /* @__PURE__ */ new Map();
+  try {
+    const { root: domRoot } = await client.DOM.getDocument({ depth: -1, pierce: true });
+    testIdByBackendId = buildTestIdMap(domRoot);
+  } catch {
+  }
   const nodeMap = /* @__PURE__ */ new Map();
   let seq = 0;
-  const keep = (role, name, parentName) => {
+  const keep = (role, name, parentName, testId) => {
+    if (testId) return true;
     if (INTERACTIVE.has(role) || STRUCTURAL.has(role)) return true;
     if (role === "StaticText") return name.length > 0 && name !== parentName;
     return name.length > 0 && name !== parentName;
@@ -13437,12 +13469,21 @@ async function snapshotAxTree(client, opts = {}) {
     const role = raw.role?.value ?? "";
     if (role === "InlineTextBox" || role === "LineBreak") return [];
     const name = (raw.name?.value ?? "").trim();
+    const testId = raw.backendDOMNodeId !== void 0 ? testIdByBackendId.get(raw.backendDOMNodeId) : void 0;
     const children = depth >= MAX_DEPTH ? [] : (raw.childIds ?? []).flatMap((cid) => build(byId.get(cid), name || parentName, depth + 1));
-    if (!keep(role, name, parentName)) return children;
+    if (!keep(role, name, parentName, testId)) return children;
     const states = (raw.properties ?? []).filter((p) => STATE_PROPS.has(p.name) && p.value?.value !== false && p.value?.value !== "false").map((p) => p.value?.value === true || p.value?.value === void 0 ? p.name : `${p.name}=${p.value.value}`);
     const id = `n${seq++}`;
     if (raw.backendDOMNodeId !== void 0) nodeMap.set(id, raw.backendDOMNodeId);
-    const node = { id, role, ...name && { name }, ...raw.value?.value && { value: raw.value.value }, ...states.length && { states }, ...children.length && { children } };
+    const node = {
+      id,
+      role,
+      ...name && { name },
+      ...raw.value?.value && { value: raw.value.value },
+      ...states.length && { states },
+      ...testId && { testId },
+      ...children.length && { children }
+    };
     return [node];
   };
   const roots = build(root, "");

@@ -27,11 +27,57 @@ import { validateQaScript } from './schema.js';
  * `qaId` is a stamped `data-qa-id` fallback locator for name-less targets (#9):
  * scriptFromReport copies it through from the StepTarget verbatim. Both fields
  * are inherited from StepTarget (re-declared here only for documentation). */
+/** A8 (P1): one entry in an ordered candidate-locator stack — testid, then
+ * role+name(+nth), then a stamped qaId, then a last-resort text match.
+ * `replay.ts`'s `resolveTargetInTree`/`findByTarget` try each in order and
+ * degrade to the next instead of failing outright. The `role` variant also
+ * carries optional disambiguation HINTS captured at record time (the nearest
+ * landmark ancestor, the target's sibling text) — used only to SCORE live
+ * candidates when role+name alone resolves to more than one node; absent on a
+ * target that was uniquely resolved (the common case) and on every script
+ * recorded before this change. */
+export type LocatorCandidate =
+  | { kind: 'testid'; value: string }
+  | {
+      kind: 'role';
+      role: string;
+      name?: string;
+      nth?: number;
+      landmark?: { role: string; name?: string };
+      siblingText?: string;
+    }
+  | { kind: 'qaId'; value: string }
+  | { kind: 'text'; value: string };
+
 export interface ScriptTarget extends StepTarget {
   /** 0-based index among role+name matches. Absent → exactly-one-match required. */
   nth?: number;
   /** Stamped `data-qa-id` fallback for name-less targets (best-effort on replay). */
   qaId?: string;
+  /** A8 (P1): explicit ordered candidate-locator stack (see LocatorCandidate).
+   * Additive and OPTIONAL — a target with none (every script recorded before
+   * this change, and any target that only ever had a plain role+name+nth+qaId
+   * locator) resolves through `candidateStackFor()`'s synthesized stack, which
+   * reproduces exactly the pre-A8 resolution order and is therefore byte-for-
+   * byte behaviourally identical to today for those scripts. */
+  candidates?: LocatorCandidate[];
+}
+
+/** A8 (P1): the ordered candidate stack `findByTarget` resolves against.
+ *
+ * When `target.candidates` is explicitly set (hand-authored, or a future
+ * recorder wired to emit testid/landmark/siblingText hints), it is used
+ * verbatim. Otherwise a stack is SYNTHESIZED from the legacy flat fields —
+ * `[role+name+nth, qaId?]` — which is exactly the resolution order every
+ * script has always had: role+name (disambiguated by `nth` when present),
+ * falling back to the stamped qaId. This is the crux of A8's backward-
+ * compatibility guarantee: a pre-A8 script never populates `candidates`, so it
+ * always takes this exact synthesized path. */
+export function candidateStackFor(target: ScriptTarget): LocatorCandidate[] {
+  if (target.candidates && target.candidates.length > 0) return target.candidates;
+  const stack: LocatorCandidate[] = [{ kind: 'role', role: target.role, name: target.name, nth: target.nth }];
+  if (target.qaId) stack.push({ kind: 'qaId', value: target.qaId });
+  return stack;
 }
 
 export type ScriptStep =
@@ -426,6 +472,13 @@ const ROLE_MAP: Record<string, string> = {
 };
 
 function locator(target: ScriptTarget): string {
+  // A8: a testid candidate is the strongest locator available — resilient to
+  // reordering, i18n, and virtualization — so it codegens first, ahead of
+  // both role+name and the qaId fallback below.
+  const testIdCandidate = candidateStackFor(target).find((c) => c.kind === 'testid');
+  if (testIdCandidate) {
+    return `page.getByTestId(${JSON.stringify(testIdCandidate.value)})`;
+  }
   // #9: a name-less target with a stamped data-qa-id codegens the attribute
   // locator (resilient, no nth needed — the id is unique on the page).
   if (!target.name && target.qaId) {

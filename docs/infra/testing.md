@@ -3,11 +3,13 @@
 > Scope: Test strategy, test suite layout, frameworks, and how to run each suite.
 > Rendering context: Server-side (Node.js daemon)
 > Project tier: 3
-> Last updated: 2026-07-18
+> Last updated: 2026-08-09
 
 ## Overview
 
-Testing is layered: contract tests (m1, m2, m4, m5, m6 — note there is no m3; the ExtensionBrowser contract test is numbered v3, see below) verify interface boundaries without exercising the full stack; e2e tests (e2e.*.ts) run the full engine against the fixture app; numbered integration spikes and focused regressions (v1-v33) document specific capabilities. No test framework like Jest or Vitest is used; suites run directly with tsx and assert() / throw.
+Testing is layered: contract tests (m1, m2, m4, m5, m6 — note there is no m3; the ExtensionBrowser contract test is numbered v3, see below) verify interface boundaries without exercising the full stack; e2e tests (e2e.*.ts) run the full engine against the fixture app; numbered integration spikes and focused regressions (v1-v46) document specific capabilities. No test framework like Jest or Vitest is used; suites run directly with tsx and assert() / throw.
+
+As of 2026-08-09 (A15) there is also a CI gate and an aggregate runner — see "Running Tests" and "Continuous Integration" below.
 
 AGENT OWNER: test/
 
@@ -57,8 +59,16 @@ No external test runner is used. Tests use Node.js assert() (strict) and throw o
 
 ## Running Tests
 
-Full e2e suite (primary CI gate):
-npm run test:e2e
+**Aggregate runner (A15, 2026-08-09):** `scripts/run-tests.mjs` discovers every suite under `test/*.ts`, runs each as a standalone `tsx` child process (same house convention as always — no Jest/Vitest introduced), and prints a per-suite PASS/FAIL/SKIP tally. It exits nonzero if anything failed. It classifies every suite into exactly one of two buckets — **not** by filename pattern, but by reading each file for real Chrome/CDP usage (`CdpBrowser`, `chrome-remote-interface`, `launchChromeWithExtension`) or a real bound network socket (`BridgeServer`, the fixture HTTP server, a full `qaRun` in `cdp` mode) versus an explicit "no Chrome / offline / mock" self-description in the suite's own header comment:
+
+```
+npm test            # fast bucket: 26 suites, pure/in-memory, pooled (concurrency ~min(4, cpus-1))
+npm run test:browser # browser bucket: 28 suites, real Chrome/sockets, run SERIALLY (fixed ports)
+npm run test:e2e     # unchanged: tsx test/e2e.run-fixture.ts directly (the single primary oracle)
+node scripts/run-tests.mjs --list   # print the bucket assignment without running anything
+```
+
+The browser bucket **must** run one suite at a time — the suites themselves document a shared, deliberately-disjoint set of hardcoded ports (9322/9332/9401/9402/9411/9427/...) that only stay collision-free if nothing else is listening; `run-tests.mjs --browser` runs them in a straight `for` loop for exactly this reason. The fast bucket has no such constraint (each suite is in-memory or uses ephemeral `mkdtemp`/random ports), so it's pooled.
 
 Individual contract test (example):
 npx tsx test/m1.browser-port.ts
@@ -75,15 +85,23 @@ npx tsx test/v32.script-runner.ts
 Telemetry span coverage:
 npx tsx test/v33.trace-spans.ts
 
-All m* contract tests in sequence (no npm script; run manually):
-npx tsx test/m1.browser-port.ts && npx tsx test/m2.nano-port.ts && npx tsx test/m5.fixture.ts && npx tsx test/m6.mcp.ts
-
 Spike regression (frozen reference; keep passing):
 cd spikes/cdp-logpoint && npm install && npm run spike
 
-AGENT NOTE: m2 (NanoPort) and v3 (ExtensionBrowser) require specific hardware and setup: Nano needs 22 GB free and the model downloaded; v3 needs the extension bridge running (chrome.debugger + BridgeServer). These are not suitable as automated CI gates on generic runners.
+AGENT NOTE: m2 (NanoPort) and v3 (ExtensionBrowser) require specific hardware and setup: Nano needs 22 GB free and the model downloaded; v3 needs the extension bridge running (chrome.debugger + BridgeServer). These are why they're in the browser bucket, not suitable as automated CI gates on generic runners.
 
 AGENT NOTE: e2e.run-fixture.ts starts the fixture app internally. Do not start `spike fixture` manually before running it, or the port will conflict.
+
+AGENT NOTE: `test/port-contract.ts` is excluded from both buckets — it's a shared library (`runPortContract()`) imported by m1 and v3, not a standalone entry point (no top-level execution, no `process.exit`). Running it directly via tsx is a silent no-op, so `run-tests.mjs` skips it entirely rather than counting it as a suite.
+
+## Continuous Integration
+
+`.github/workflows/ci.yml`, added 2026-08-09 (A15), has two jobs:
+
+- **`test`** runs on every push and PR: `npm ci` → `npm run typecheck` → `npm run build` → `npm test` (the fast bucket only). This is a real gate — a regression in any of the 26 fast suites fails the build.
+- **`browser-suites`** is `workflow_dispatch`-only (manual trigger, never on push/PR). It runs `npm run test:browser`. It is deliberately NOT part of the default gate: a stock GitHub-hosted runner has Chromium, not branded Chrome (several paths — extension dev-loading, Gemini Nano's Prompt API — are branded-Chrome-specific); Nano needs a ~2GB model plus 22GB free already provisioned, which nothing can trigger unattended in CI; `e2e.autofix-real.ts`/`v10.batching.ts`/`v20b.measure.ts` need live model/agent credentials; and the fixed-port suites need to run alone on a machine, which a shared CI fleet doesn't guarantee. The workflow file documents each of these inline. Treat `browser-suites` as a human-triggered smoke test on a machine that mirrors a real dev setup, not as a CI gate — a green `test` job does NOT mean the Chrome-driving half of the suite passed.
+
+**History worth knowing:** `test/e2e.run-fixture.ts` and `test/e2e.recorder.ts` were both failing silently for some time before 2026-08-09, because `config.readOnly` defaults to `true` (a safety posture for driving arbitrary user-owned sites) and neither suite opted out — so every type/click against the fixture app they start themselves was silently a no-op. `e2e.run-fixture.ts` could never log in, so both its "expect pass" and "expect a captured error" branches were unreachable; `e2e.recorder.ts` never got a script into `generated-tests/`, so the whole record→replay→heal chain it exists to prove died at the first `loadScript()`. Both now explicitly pass `{ ...cfg, readOnly: false }` (see the `A1` comments in each file). Neither suite was wired into any CI, so this went unnoticed — exactly the class of bug a real CI gate exists to catch, which is the practical case for A15 beyond "it'd be nice to have a green badge."
 
 ## Fixture App as Test Oracle
 
@@ -97,9 +115,11 @@ AGENT AVOID: Do not randomize the fixture app's behavior. The e2e tests assert s
 
 ## What is NOT Tested
 
+- **On every push/PR (the default `test` CI job):** none of the 28 browser-bucket suites run — that's the entire real-Chrome, real-extension-bridge, real-Nano, and live-model-call surface of the project (m1, m2, m5, m6, v1, v3, v5, v6, v7, v8, v9, v10, v11, v14–v19, v20b, v21, v22, v24, v45, and all three `e2e.*` suites, including the primary oracle `e2e.run-fixture.ts`). A green push/PR check means the ~26 pure/unit suites pass and the project builds and typechecks — it says nothing about whether a real Chrome run still works. Run `npm run test:browser` locally, or trigger the manual `browser-suites` GitHub Actions job, to actually exercise that surface.
 - The extension side panel UI (panel.js, overlay.js): manual testing only; see docs/vibe-panel-manual-test.md.
-- The auto-fix loop on CI: requires a real coding agent CLI on PATH.
+- The auto-fix loop on CI: requires a real coding agent CLI on PATH (`e2e.autofix-real.ts` self-gates behind `SPIKE_REAL_AGENT_E2E=1` for this reason and is excluded from the automated `browser-suites` job's normal env).
 - Multi-Chrome concurrent runs: manual / ad hoc only.
+- Whether the browser-bucket suites still pass at all, on any schedule — `browser-suites` is manual-trigger only, so nothing runs it unless a human remembers to. There is no scheduled (`cron`) run of it.
 
 ## Update Triggers
 
@@ -109,6 +129,8 @@ AGENT AVOID: Do not randomize the fixture app's behavior. The e2e tests assert s
 - When the spike regression scripts change.
 - When action-cache, assertion-policy, video assertion, runtime data, telemetry, gateway, script-runner, or trace-span coverage changes.
 - When a test file is renumbered/renamed (e.g. the v3-not-m3 extension-port contract naming) — verify against `ls test/` rather than trusting this doc.
+- When a new suite is added: classify it into `scripts/run-tests.mjs`'s `BROWSER_SUITES` (real Chrome/CDP or a real bound socket) or leave it to fall into the fast bucket by default — verify with `node scripts/run-tests.mjs --list`, don't guess from the filename.
+- When `.github/workflows/ci.yml`'s jobs, triggers, or the browser-bucket exclusion reasons change.
 
 ## Related Docs
 
@@ -116,3 +138,5 @@ AGENT AVOID: Do not randomize the fixture app's behavior. The e2e tests assert s
 - docs/modules/browser-port.md - BrowserPort contract (m1, v3 test this)
 - docs/modules/action-cache.md - v28 unit coverage and v31 driver wiring coverage
 - docs/infra/deployment.md - how to build before running m6
+- .github/workflows/ci.yml - the CI gate itself (A15)
+- scripts/run-tests.mjs - the aggregate runner and fast/browser bucket assignment (A15)

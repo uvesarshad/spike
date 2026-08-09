@@ -12,15 +12,17 @@
  * optimization, not a dependency: without Nano the router starts at rung 1. */
 
 import type { ChildProcess } from 'node:child_process';
-import { loadConfig, type QaConfig } from './config.js';
+import type CDP from 'chrome-remote-interface';
+import { loadConfig, type EmulationConfig, type QaConfig, type RouteRule } from './config.js';
 import { CdpBrowser } from './ports/cdp-browser.js';
 import { ExtensionBrowser } from './ports/extension-browser.js';
+import { PlaywrightBrowser } from './ports/playwright-browser.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { ExtensionNano } from './ports/extension-nano.js';
 import type { NanoPort } from './ports/nano-port.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { launchChromeWithExtension } from './chrome/extensions.js';
-import { cdpAlive } from './chrome/launch.js';
+import { cdpAlive, allocateFreePort } from './chrome/launch.js';
 import type { BrowserPort } from './ports/browser-port.js';
 import { ModelRouter } from './router/model-router.js';
 import type { ModelAdapter } from './router/adapter.js';
@@ -92,6 +94,29 @@ export interface QaRunOptions {
    * OTHER than the named target (ad iframes, unexpected redirects) still stay
    * read-only unless separately allow-listed. */
   trustTargetHost?: boolean;
+  /** A7 (P1): run the QA browser's Chrome headless for THIS run, overriding
+   * cfg.headless. Absent → cfg.headless (default false, unchanged behavior).
+   * A headless qaRun skips the opportunistic rung-0 Nano probe entirely
+   * (ladder starts at rung 1) rather than dragging Nano into a headless
+   * Chrome or spinning up a second headed one just for a live AI-driven
+   * run — see CLAUDE.md's headed requirement for Nano and this file's
+   * resolveNanoLaunchOpts(). The fully-worked-out split (Nano on its own
+   * headed Chrome while the rest runs headless) is wired for qaReplay below,
+   * where "does this run even need Nano" is a cheap static check on the
+   * recorded script rather than a guess. */
+  headless?: boolean;
+  /** A6 (P1): load this storage-state file (cookies + localStorage) into the
+   * session's browser context before the driver starts — the injection half
+   * of "log in once, reuse everywhere". Absent → session starts with
+   * whatever the transport's own default context already has (unchanged
+   * behavior). See captureStorageState/injectStorageState below for the
+   * shape (Playwright's own storageState() format; a raw-CDP fallback
+   * produces/consumes the identical shape for the cdp/extension transports). */
+  storageStatePath?: string;
+  /** A6 (P1): on a PASSING run only, capture the session's storage state and
+   * write it to this path — the capture half of the auth fixture. Absent →
+   * no capture (unchanged behavior). */
+  saveStorageStatePath?: string;
 }
 
 export interface QaRunResult extends Report {
@@ -164,7 +189,7 @@ export async function openBrowserSession(
           cdpPort: cfg.cdpPort,
           extensionDir: cfg.extensionDir,
           profileDir: cfg.chromeProfile,
-          headless: false,
+          headless: cfg.headless, // A7 — default false, unchanged behavior
         });
         chromeProcess = chrome;
       }
@@ -199,11 +224,36 @@ export async function openBrowserSession(
     }
   }
 
+  // A3/A6/A13 (P1): 'playwright' — PlaywrightBrowser attached via
+  // connectOverCDP to the SAME Chrome ensureChrome() would give CdpBrowser
+  // (see docs/plan/26-08-08-audit-deterministic-speed.md finding A26,
+  // RESOLVED). A fresh, genuinely isolated BrowserContext per session is the
+  // whole point — that's PlaywrightBrowser.launch()'s own doc comment, not
+  // rebuilt here. Also the transport that exposes storageState()/
+  // setStorageState() (A6) and route() (A13) — see this file's
+  // applyRouteRules/applyEmulation/captureStorageState/injectStorageState.
+  if (cfg.via === 'playwright') {
+    const browser = new PlaywrightBrowser({
+      port: cfg.cdpPort,
+      profileDir: cfg.chromeProfile,
+      headless: cfg.headless, // A7 — default false, unchanged behavior
+      allowedHosts: deps.allowedHosts,
+    });
+    await browser.launch();
+    return {
+      cfg,
+      browser,
+      async close() {
+        await browser.close(); // this run's BrowserContext closes; Chrome stays warm
+      },
+    };
+  }
+
   // 'cdp' — exactly today's behavior.
   const browser = new CdpBrowser({
     port: cfg.cdpPort,
     profileDir: cfg.chromeProfile,
-    headless: false, // headed: Nano lives here, and this window is the future "watch the robot" show
+    headless: cfg.headless, // A7 — default false, unchanged (headed: Nano lives here, and this window is the future "watch the robot" show)
     allowedHosts: deps.allowedHosts,
   });
   await browser.launch();
@@ -219,32 +269,69 @@ export async function openBrowserSession(
 interface Session {
   cfg: QaConfig;
   browser: BrowserPort;
-  nano: NanoPort;
+  /** null when the caller opted out via `wantNano: false` (A7 — a headless
+   * run that doesn't need Nano skips constructing it at all, rather than
+   * starting one just to report 'unavailable'). */
+  nano: NanoPort | null;
   close(): Promise<void>;
 }
 
-async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeServer; tabId?: number; clientId?: number; allowedHosts?: string[] } = {}): Promise<Session> {
+/** A7 (P1): where Nano's OWN Chrome/profile should live for this cfg.
+ *
+ *  - `cfg.headless === false` (default): unchanged from before this finding
+ *    — Nano shares the QA browser's Chrome (cfg.cdpPort/chromeProfile/
+ *    runnerPort), exactly today's "one headed Chrome hosts both tabs"
+ *    design.
+ *  - `cfg.headless === true`: the QA browser's Chrome is headless, and Nano's
+ *    documented requirement is headed (nano-runner-page.ts) — so it needs a
+ *    SEPARATE Chrome process, which also means a separate `--user-data-dir`
+ *    (two Chromes can never share one) and, if nothing pins `cfg.
+ *    nanoCdpPort`, a separate CDP port too (reusing cfg.cdpPort would either
+ *    attach Nano to the already-running HEADLESS Chrome via ensureChrome()'s
+ *    reuse-if-alive check, or collide with it — neither is right). A pinned
+ *    `nanoCdpPort` keeps `runnerPort` as-is (the operator's problem to keep
+ *    distinct across whatever else runs); an UNPINNED one also gets a freshly
+ *    allocated `runnerPort`, since two NanoRunnerPage HTTP servers on the
+ *    same port from two different Chrome processes is exactly the EADDRINUSE
+ *    failure the audit calls out (A3) — allocateFreePort() sidesteps it
+ *    entirely rather than asking the operator to manage a second fixed port. */
+export async function resolveNanoLaunchOpts(cfg: QaConfig): Promise<{ cdpPort: number; runnerPort: number; profileDir: string }> {
+  if (!cfg.headless) return { cdpPort: cfg.cdpPort, runnerPort: cfg.runnerPort, profileDir: cfg.chromeProfile };
+  if (cfg.nanoCdpPort) {
+    return { cdpPort: cfg.nanoCdpPort, runnerPort: cfg.runnerPort, profileDir: cfg.nanoProfileDir ?? `${cfg.chromeProfile}-nano` };
+  }
+  const [cdpPort, runnerPort] = await Promise.all([allocateFreePort(), allocateFreePort()]);
+  return { cdpPort, runnerPort, profileDir: cfg.nanoProfileDir ?? `${cfg.chromeProfile}-nano` };
+}
+
+async function openSession(
+  config: Partial<QaConfig>,
+  deps: { bridge?: BridgeServer; tabId?: number; clientId?: number; allowedHosts?: string[]; wantNano?: boolean } = {},
+): Promise<Session> {
   const browserSession = await openBrowserSession(config, deps);
   const { cfg } = browserSession;
-  // Nano access depends on HOW Chrome got here:
-  //  - injected bridge (vibe path: the user's own Chrome, no daemon CDP) → talk
-  //    to the extension's own Prompt API over the bridge (ExtensionNano). There
-  //    is no daemon CDP page here to host the localhost runner.
-  //  - we launched Chrome ourselves (proven cdp path; extension mode that
-  //    spawned its own Chrome) → NanoRunnerPage over cfg.cdpPort.
-  const nano: NanoPort =
-    cfg.via === 'extension' && deps.bridge
-      ? new ExtensionNano({ bridge: deps.bridge })
-      : new NanoRunnerPage({
-          cdpPort: cfg.cdpPort,
-          runnerPort: cfg.runnerPort,
-          profileDir: cfg.chromeProfile,
-        });
-  try {
-    await nano.start();
-  } catch (e) {
-    await browserSession.close();
-    throw e;
+  const wantNano = deps.wantNano ?? true; // default true: unchanged from before this finding
+  let nano: NanoPort | null = null;
+  if (wantNano) {
+    // Nano access depends on HOW Chrome got here:
+    //  - injected bridge (vibe path: the user's own Chrome, no daemon CDP) → talk
+    //    to the extension's own Prompt API over the bridge (ExtensionNano). There
+    //    is no daemon CDP page here to host the localhost runner.
+    //  - we launched Chrome ourselves (proven cdp path; extension mode that
+    //    spawned its own Chrome) → NanoRunnerPage, split onto its own
+    //    port/Chrome when cfg.headless (A7 — see resolveNanoLaunchOpts).
+    if (cfg.via === 'extension' && deps.bridge) {
+      nano = new ExtensionNano({ bridge: deps.bridge });
+    } else {
+      const nanoOpts = await resolveNanoLaunchOpts(cfg);
+      nano = new NanoRunnerPage(nanoOpts);
+    }
+    try {
+      await nano.start();
+    } catch (e) {
+      await browserSession.close();
+      throw e;
+    }
   }
   return {
     cfg,
@@ -252,9 +339,248 @@ async function openSession(config: Partial<QaConfig>, deps: { bridge?: BridgeSer
     nano,
     async close() {
       await browserSession.close(); // QA tab closes; Chrome + runner tab stay warm
-      await nano.close();
+      if (nano) await nano.close();
     },
   };
+}
+
+/* =============================================================================
+ * A6 (P1) — storage-state capture / injection ("log in once, reuse everywhere")
+ * ========================================================================== */
+
+/** The file format for a captured session (cookies + per-origin localStorage).
+ * Deliberately its OWN type rather than a re-export of Playwright's
+ * `setStorageState`/`storageState` types: those make `sameSite` required on
+ * the way IN but the way OUT (`storageState()`'s return) is structurally
+ * identical anyway, and keeping an independent type here means the raw-CDP
+ * fallback (cdp/extension transports) never has to fight Playwright's type
+ * shape to construct one. `sameSite` is always populated (defaulted to
+ * 'Lax' — Chrome's own default for a cookie set without an explicit
+ * attribute) rather than left optional, precisely so it satisfies
+ * PlaywrightBrowser.setStorageState()'s stricter required field with no cast
+ * needed at the call site below. */
+export interface StorageState {
+  cookies: Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    /** Unix time in seconds; session cookies use -1, matching CDP's Cookie shape. */
+    expires: number;
+    httpOnly: boolean;
+    secure: boolean;
+    sameSite: 'Strict' | 'Lax' | 'None';
+  }>;
+  origins: Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>;
+}
+
+function asPlaywrightBrowser(browser: BrowserPort): PlaywrightBrowser | null {
+  return browser instanceof PlaywrightBrowser ? browser : null;
+}
+
+/** Capture the session's current cookies + localStorage. Prefers
+ * PlaywrightBrowser's own `storageState()` (native — proven by the A26 spike
+ * to reflect the run's isolated BrowserContext exactly); falls back to raw
+ * CDP for the cdp/extension transports (finding A6's explicit "keep a
+ * raw-CDP fallback via cdpClient()" requirement): `Network.getCookies()` for
+ * cookies, plus a `Runtime.evaluate` read of `window.localStorage` on
+ * whatever origin the page is CURRENTLY on (the only origin a single-page
+ * CDP session can see localStorage for without navigating away first — a
+ * caller that needs multiple origins' localStorage should capture right
+ * after visiting each one). */
+export async function captureStorageState(browser: BrowserPort): Promise<StorageState> {
+  const pw = asPlaywrightBrowser(browser);
+  if (pw) return pw.storageState();
+
+  const client = browser.cdpClient?.() as CDP.Client | undefined;
+  if (!client) throw new Error('captureStorageState: this transport exposes no cdpClient() — cannot capture storage state');
+  const { cookies } = await client.Network.getCookies();
+  let origins: StorageState['origins'] = [];
+  try {
+    const origin = new URL(await browser.url()).origin;
+    const { result } = await client.Runtime.evaluate({
+      expression: 'JSON.stringify(Object.entries(window.localStorage))',
+      returnByValue: true,
+    });
+    const entries = JSON.parse((result.value as string | undefined) ?? '[]') as Array<[string, string]>;
+    if (entries.length) origins = [{ origin, localStorage: entries.map(([name, value]) => ({ name, value })) }];
+  } catch {
+    // current page has no accessible localStorage (about:blank, opaque
+    // origin, a cross-origin restriction) — cookies alone are still useful.
+  }
+  return {
+    cookies: cookies.map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path,
+      expires: c.expires,
+      httpOnly: c.httpOnly,
+      secure: c.secure,
+      sameSite: c.sameSite ?? 'Lax',
+    })),
+    origins,
+  };
+}
+
+/** Inject a previously-captured state. Prefers PlaywrightBrowser's
+ * `setStorageState()` (its own documented semantics: clears then restores in
+ * one call); the raw-CDP fallback sets cookies directly (domain-scoped, no
+ * navigation needed) and, for localStorage, navigates to EACH captured
+ * origin in turn before setting its entries — localStorage is only settable
+ * on a page currently showing that origin. Callers should inject BEFORE the
+ * driver's own first navigation; the extra origin hop(s) this may cause are
+ * harmless (the driver navigates to its target url immediately after). */
+export async function injectStorageState(browser: BrowserPort, state: StorageState): Promise<void> {
+  const pw = asPlaywrightBrowser(browser);
+  if (pw) {
+    await pw.setStorageState(state);
+    return;
+  }
+  const client = browser.cdpClient?.() as CDP.Client | undefined;
+  if (!client) throw new Error('injectStorageState: this transport exposes no cdpClient() — cannot inject storage state');
+  if (state.cookies.length) await client.Network.setCookies({ cookies: state.cookies });
+  for (const o of state.origins) {
+    if (!o.localStorage.length) continue;
+    await browser.navigate(o.origin);
+    for (const { name, value } of o.localStorage) {
+      await client.Runtime.evaluate({ expression: `window.localStorage.setItem(${JSON.stringify(name)}, ${JSON.stringify(value)})` });
+    }
+  }
+}
+
+/** Read a storage-state file written by saveStorageStateFile (or Playwright's
+ * own `storageState({ path })`, which is the same JSON shape). */
+export function loadStorageStateFile(p: string): StorageState {
+  return JSON.parse(fs.readFileSync(p, 'utf8')) as StorageState;
+}
+
+export function saveStorageStateFile(p: string, state: StorageState): void {
+  fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(state, null, 2));
+}
+
+/* =============================================================================
+ * A13 (P1) — network interception + viewport/device/network-throttle emulation
+ * ========================================================================== */
+
+/** Turns a CDP-style glob (`*` = zero-or-more, `?` = exactly one — the same
+ * syntax `Network.setBlockedURLs`/`Fetch.enable` accept) into a RegExp, so a
+ * single `RouteRule.urlPattern` can drive BOTH the CDP-side match (for
+ * `Network.setBlockedURLs`, which does its own glob matching in the browser)
+ * AND our own Node-side dispatch inside the `Fetch.requestPaused` handler
+ * below, which has to decide in JS which configured rule paused a given
+ * request — CDP's `Fetch.enable` patterns filter WHICH requests pause, but
+ * the paused event itself doesn't say which pattern matched. */
+export function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`);
+}
+
+/** Apply `rules` via raw CDP (works over ANY transport that exposes
+ * `cdpClient()` — cdp, playwright, extension — rather than routed through
+ * PlaywrightBrowser's own `route()`, which only the playwright transport
+ * has; see this file's header comment on A13). 'block' rules go through
+ * `Network.setBlockedURLs` (the browser aborts them before they're even
+ * issued — cheapest possible block, ideal for third-party/analytics speed
+ * wins). 'fail' rules go through `Fetch.enable` + a `requestPaused` handler
+ * that fulfills a matching request with the configured status instead of
+ * letting it reach the network — deterministic negative-path testing ("what
+ * does the UI do when this API 500s") without needing to reproduce that by
+ * luck. No-ops (never throws) when the transport has no `cdpClient()` or
+ * `rules` is empty — callers don't need to guard the call. */
+export async function applyRouteRules(browser: BrowserPort, rules: RouteRule[]): Promise<void> {
+  if (rules.length === 0) return;
+  const client = browser.cdpClient?.() as CDP.Client | undefined;
+  if (!client) return;
+
+  const blockPatterns = rules.filter((r) => r.action === 'block').map((r) => r.urlPattern);
+  if (blockPatterns.length) await client.Network.setBlockedURLs({ urls: blockPatterns }).catch(() => {});
+
+  const failRules = rules.filter((r) => r.action === 'fail');
+  if (failRules.length === 0) return;
+  const compiled = failRules.map((r) => ({ rule: r, re: globToRegExp(r.urlPattern) }));
+  await client.Fetch.enable({ patterns: failRules.map((r) => ({ urlPattern: r.urlPattern })) }).catch(() => {});
+  client.Fetch.requestPaused((params: unknown) => {
+    const p = params as { requestId: string; request: { url: string } };
+    const hit = compiled.find(({ re }) => re.test(p.request.url));
+    const settle = hit
+      ? client.Fetch.fulfillRequest({
+          requestId: p.requestId,
+          responseCode: hit.rule.status ?? 500,
+          body: hit.rule.body ? Buffer.from(hit.rule.body, 'utf8').toString('base64') : undefined,
+        })
+      : client.Fetch.continueRequest({ requestId: p.requestId });
+    settle.catch(() => {
+      // the request may already have settled/aborted on its own (a
+      // navigation away, a client-side abort()) — never let a stale
+      // requestId throw out of an event handler with no caller to catch it.
+    });
+  });
+}
+
+/** Named throttle presets, expressed in CDP's own units (bytes/sec, ms) —
+ * rough real-world approximations, not a spec: 'slow-3g'/'fast-3g' mirror the
+ * profiles Chrome DevTools itself ships under those names. */
+const THROTTLE_PRESETS: Record<
+  'offline' | 'slow-3g' | 'fast-3g',
+  { offline: boolean; latency: number; downloadThroughput: number; uploadThroughput: number }
+> = {
+  offline: { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 },
+  'slow-3g': { offline: false, latency: 400, downloadThroughput: (50 * 1024) / 8, uploadThroughput: (50 * 1024) / 8 },
+  'fast-3g': { offline: false, latency: 150, downloadThroughput: (1.5 * 1024 * 1024) / 8, uploadThroughput: (750 * 1024) / 8 },
+};
+
+/** Apply viewport/device/network-throttle emulation via raw CDP — same
+ * "works over any transport with cdpClient()" rationale as applyRouteRules.
+ * No-ops (never throws) when `emulation` is unset or the transport has no
+ * `cdpClient()`. */
+export async function applyEmulation(browser: BrowserPort, emulation: EmulationConfig | undefined): Promise<void> {
+  if (!emulation) return;
+  const client = browser.cdpClient?.() as CDP.Client | undefined;
+  if (!client) return;
+  if (emulation.viewport) {
+    await client.Emulation.setDeviceMetricsOverride({
+      width: emulation.viewport.width,
+      height: emulation.viewport.height,
+      deviceScaleFactor: emulation.deviceScaleFactor ?? 1,
+      mobile: emulation.isMobile ?? false,
+    }).catch(() => {});
+  }
+  if (emulation.networkThrottle) {
+    const profile = typeof emulation.networkThrottle === 'string' ? THROTTLE_PRESETS[emulation.networkThrottle] : { offline: false, ...emulation.networkThrottle };
+    await client.Network.emulateNetworkConditions(profile).catch(() => {});
+  }
+}
+
+/* =============================================================================
+ * A3 (P0) — isolated session allocation for `replay --all --workers N`
+ * ========================================================================== */
+
+/** Allocate a FULLY ISOLATED session's connection info — a free CDP port, a
+ * free Nano-runner HTTP port, and a fresh scratch profile dir — instead of
+ * the fixed cdpPort/runnerPort/chromeProfile defaults. This is the EXPENSIVE
+ * isolation path (a brand-new Chrome process): use it only when the
+ * transport can't give you the CHEAP path instead (a `via: 'playwright'`
+ * BrowserContext per run on ONE shared Chrome — see PlaywrightBrowser.
+ * launch(), which already does this for free on every session). `replay
+ * --all --workers N` uses this for every concurrent entry when `via !==
+ * 'playwright'`, since CdpBrowser has no per-context isolation primitive: N
+ * concurrent CdpBrowser sessions on the SAME Chrome share one cookie jar
+ * even though each opens its own tab.
+ *
+ * Known tradeoff: like every Chrome this codebase launches (see
+ * chrome/launch.ts's `ensureChrome` — always detached, never killed), an
+ * isolated Chrome spun up here is NOT torn down when the session closes; it
+ * is left running warm, consistent with the rest of the product's "Chrome
+ * stays warm" design. For a one-off `--workers N` suite run this means N
+ * extra idle Chrome processes accumulate rather than exiting with the CLI —
+ * an accepted cost of reusing the existing launch primitive rather than
+ * building separate process-lifecycle tracking for this one call site. */
+export async function allocateIsolatedSession(baseProfileDir: string): Promise<Pick<QaConfig, 'cdpPort' | 'runnerPort' | 'chromeProfile'>> {
+  const [cdpPort, runnerPort] = await Promise.all([allocateFreePort(), allocateFreePort()]);
+  const chromeProfile = path.join(`${baseProfileDir}-isolated`, `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  return { cdpPort, runnerPort, chromeProfile };
 }
 
 /** Nano availability with a download grace window. A fresh Chrome reports
@@ -461,6 +787,13 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
             config: opts.config,
             onProgress: progress,
             bridge: opts.bridge,
+            // A7/A6: thread the caller's per-run overrides through so a
+            // matched-replay short-circuit still honors them — a caller that
+            // asked for --headless / --storage-state shouldn't silently lose
+            // it just because a confident script match was found.
+            headless: opts.headless,
+            storageStatePath: opts.storageStatePath,
+            saveStorageStatePath: opts.saveStorageStatePath,
           });
           if (replayed.verdict !== 'fail') {
             runSpan.addEvent('replay.used', { name: match.name, verdict: replayed.verdict });
@@ -519,20 +852,47 @@ async function runFreshAiPass(
   progress: (line: string) => void,
   runSpan: ActiveSpan,
 ): Promise<QaRunResult> {
+  // A7 (P1): fold the per-call --headless override into the config BEFORE
+  // loadConfig() resolves cfg, same precedence tier as every other opts.*
+  // override that flows through `config` (env still wins if a caller set
+  // both, matching every other field's existing precedence).
+  const configOverride: Partial<QaConfig> = { ...opts.config, ...(opts.headless !== undefined && { headless: opts.headless }) };
+
   // Computed before the session opens so CdpBrowser/ExtensionBrowser get the
   // Tier-4 allowedHosts guard (A4, P0) at construction time, not just inside
   // the driver loop — closes the "raw cdp passthrough bypasses the guard" gap.
-  const preCfg = loadConfig(opts.config ?? {});
+  const preCfg = loadConfig(configOverride);
   const allowedHosts = (opts.trustTargetHost ?? true)
     ? [...preCfg.allowedHosts, ...targetHostCandidates(url)]
     : preCfg.allowedHosts;
 
-  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId, allowedHosts });
+  // A7: a headless qaRun skips the opportunistic rung-0 Nano probe entirely
+  // (see QaRunOptions.headless's doc comment) rather than either dragging
+  // Nano into a headless Chrome or spinning up a second headed one just for
+  // the $0 optimization on a live AI-driven run.
+  const session = await openSession(configOverride, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId, allowedHosts, wantNano: !preCfg.headless });
   const { cfg, browser, nano } = session;
+
+  // A13 (P1) + A6 (P1): interception/emulation and storage-state injection,
+  // both BEFORE the driver's own first navigation — see each helper's doc
+  // comment. Guarded by the same try/close-on-failure discipline openSession
+  // itself uses for nano.start(), so a bad --storage-state path or a
+  // misconfigured route rule doesn't leak the session.
+  try {
+    await applyRouteRules(browser, cfg.routeRules);
+    await applyEmulation(browser, cfg.emulation);
+    if (opts.storageStatePath) {
+      await injectStorageState(browser, loadStorageStateFile(opts.storageStatePath));
+      progress(`storage state loaded from ${opts.storageStatePath}`);
+    }
+  } catch (e) {
+    await session.close();
+    throw e;
+  }
 
   const vault = new Vault();
   const adapters: ModelAdapter[] = [];
-  if ((await pollNanoAvailable(nano, progress)) === 'available') {
+  if (nano && (await pollNanoAvailable(nano, progress)) === 'available') {
     progress('rung 0: Gemini Nano available — warming up');
     await nano.warmup();
     adapters.push(new NanoAdapter(nano));
@@ -612,6 +972,17 @@ async function runFreshAiPass(
       progress(`recorded: ${jsonPath} (+ Playwright twin ${specPath}) — replay at $0 with \`spike replay\``);
       runSpan.addEvent('script.recorded', { jsonPath });
     }
+    // A6 (P1): capture-half of the auth fixture — only on a passing run (a
+    // failed/uncertain run's cookies may reflect a broken/half-logged-in
+    // state not worth propagating to every subsequent flow).
+    if (report.verdict === 'pass' && opts.saveStorageStatePath) {
+      try {
+        saveStorageStateFile(opts.saveStorageStatePath, await captureStorageState(browser));
+        progress(`storage state saved to ${opts.saveStorageStatePath}`);
+      } catch (e) {
+        progress(`storage state capture failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
     return report;
   } finally {
     await session.close();
@@ -633,6 +1004,24 @@ export interface QaReplayOptions {
    * a clean first-try pass, so a real flake rate stays visible instead of
    * being silently absorbed into "green". */
   retries?: number;
+  /** A7 (P1): run this replay's browser headless, overriding cfg.headless.
+   * Unlike qaRun's headless (which just skips Nano opportunistically), this
+   * gates Nano on whether the SCRIPT actually needs it: if any step is
+   * `assert_visual`, Nano is started on its OWN split-off headed Chrome
+   * (resolveNanoLaunchOpts) alongside the headless QA browser; otherwise
+   * Nano is skipped entirely — no second Chrome pays for a run that was
+   * never going to use it. See replay.ts:53-55 for how "does this run need
+   * Nano" already gets decided once nano is (or isn't) present. */
+  headless?: boolean;
+  /** A6 (P1): load this storage-state file before replaying — see
+   * QaRunOptions.storageStatePath. */
+  storageStatePath?: string;
+  /** A6 (P1): on a PASSING replay, capture + save storage state here — see
+   * QaRunOptions.saveStorageStatePath. This is the primitive the suite-level
+   * auth fixture (cli.ts's `replay --all --auth-fixture`) is built on: run a
+   * login script once with this set, then pass the resulting file as every
+   * subsequent entry's `storageStatePath`. */
+  saveStorageStatePath?: string;
 }
 
 /** A11 (P1): recorded when `retries` masked at least one failed attempt.
@@ -751,11 +1140,33 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   const tracer = getDefaultTracer();
   const replaySpan = tracer.startSpan('qa.replay', { scriptName: script.name, task: script.task, url: script.url });
 
+  // A7: fold the per-call --headless override in before loadConfig() resolves
+  // cfg — same precedence tier as every other opts.* override, see qaRun's
+  // identical configOverride.
+  const configOverride: Partial<QaConfig> = { ...opts.config, ...(opts.headless !== undefined && { headless: opts.headless }) };
+
   // Same A4 (P0) defense-in-depth wiring as qaRun: give the port the recorded
   // script's own host up front, so the guard is live even during replay.
-  const preCfg = loadConfig(opts.config ?? {});
+  const preCfg = loadConfig(configOverride);
   const allowedHosts = [...preCfg.allowedHosts, ...targetHostCandidates(script.url)];
-  const session = await openSession(opts.config ?? {}, { bridge: opts.bridge, allowedHosts });
+  // A7: unlike qaRun, gate Nano on whether THIS script actually uses it — a
+  // headless replay with no assert_visual step never needs a second Chrome.
+  const scriptNeedsNano = script.steps.some((s) => s.type === 'assert_visual');
+  const wantNano = !preCfg.headless || scriptNeedsNano;
+  const session = await openSession(configOverride, { bridge: opts.bridge, allowedHosts, wantNano });
+
+  // A13 (P1) + A6 (P1): same wiring as runFreshAiPass — see its doc comment.
+  try {
+    await applyRouteRules(session.browser, session.cfg.routeRules);
+    await applyEmulation(session.browser, session.cfg.emulation);
+    if (opts.storageStatePath) {
+      await injectStorageState(session.browser, loadStorageStateFile(opts.storageStatePath));
+      progress(`storage state loaded from ${opts.storageStatePath}`);
+    }
+  } catch (e) {
+    await session.close();
+    throw e;
+  }
 
   const maxAttempts = 1 + Math.max(0, opts.retries ?? 0);
   const attemptReports: QaReplayResult[] = [];
@@ -782,6 +1193,15 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
     }
     progress(`replay verdict: ${report.verdict} (${Math.round(report.durationMs / 1000)}s)`);
     replaySpan.setAttribute('runId', report.runId);
+    // A6 (P1): capture-half of the auth fixture — see QaReplayOptions.saveStorageStatePath.
+    if (report.verdict === 'pass' && opts.saveStorageStatePath) {
+      try {
+        saveStorageStateFile(opts.saveStorageStatePath, await captureStorageState(session.browser));
+        progress(`storage state saved to ${opts.saveStorageStatePath}`);
+      } catch (e) {
+        progress(`storage state capture failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
   } catch (e) {
     replaySpan.fail(e);
     throw e;

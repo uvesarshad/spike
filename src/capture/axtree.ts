@@ -45,6 +45,56 @@ interface RawAxNode {
   parentId?: string;
 }
 
+/** A8 (P1): the handful of `data-*` attributes projects commonly use to mark a
+ * stable, test-only hook on an element. First one present on a node wins, in
+ * this priority order — `data-testid` is by far the most common convention
+ * (Testing Library et al.), the rest are aliases seen in the wild. Exported so
+ * `CdpBrowser.findByTestId`'s live-DOM fallback tries the exact same
+ * attributes in the exact same priority order as the snapshot capture below —
+ * one list, never two that can drift apart. */
+export const TESTID_ATTRS = ['data-testid', 'data-test-id', 'data-test', 'data-qa'];
+
+/** Minimal shape of a `DOM.getDocument({depth:-1, pierce:true})` node — only
+ * the fields the testid walk needs. `attributes` is CDP's flat
+ * [name1, value1, name2, value2, …] encoding. `contentDocument` covers
+ * same-process iframes; `shadowRoots` covers open shadow DOM — both are
+ * walked so a testid inside either is still found. */
+interface DomAttrNode {
+  backendNodeId?: number;
+  attributes?: string[];
+  children?: DomAttrNode[];
+  contentDocument?: DomAttrNode;
+  shadowRoots?: DomAttrNode[];
+}
+
+function extractTestId(attributes?: string[]): string | undefined {
+  if (!attributes) return undefined;
+  const byName = new Map<string, string>();
+  for (let i = 0; i + 1 < attributes.length; i += 2) byName.set(attributes[i].toLowerCase(), attributes[i + 1]);
+  for (const attr of TESTID_ATTRS) {
+    const v = byName.get(attr);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+/** Walk a `DOM.getDocument` tree ONCE and index every testid by backendNodeId
+ * — a single bulk pass per snapshot, not a per-node round-trip. */
+function buildTestIdMap(root: DomAttrNode): Map<number, string> {
+  const map = new Map<number, string>();
+  const walk = (n: DomAttrNode): void => {
+    if (n.backendNodeId !== undefined) {
+      const testId = extractTestId(n.attributes);
+      if (testId) map.set(n.backendNodeId, testId);
+    }
+    for (const c of n.children ?? []) walk(c);
+    if (n.contentDocument) walk(n.contentDocument);
+    for (const sr of n.shadowRoots ?? []) walk(sr);
+  };
+  walk(root);
+  return map;
+}
+
 export interface AxTreeResult {
   snapshot: AxSnapshot;
   nodeMap: Map<string, number>;
@@ -210,10 +260,29 @@ export async function snapshotAxTree(client: CDP.Client, opts: SerializeAxTreeOp
   const root = nodes.find((n) => !n.parentId && !n.ignored) ?? nodes[0];
   if (!root) throw new Error('empty accessibility tree');
 
+  // A8 (P1): ONE bulk DOM fetch per snapshot (not per node, and not an
+  // additional per-step round-trip beyond the snapshot every step already
+  // takes) to pick up data-testid/aliases — see AxNode.testId's doc comment
+  // for why this is what lets replay resolve by testid for free. Best-effort:
+  // a torn-down frame mid-navigation just means no testids are known for this
+  // snapshot, same as today's testid-less behaviour.
+  let testIdByBackendId = new Map<number, string>();
+  try {
+    const { root: domRoot } = (await client.DOM.getDocument({ depth: -1, pierce: true })) as unknown as { root: DomAttrNode };
+    testIdByBackendId = buildTestIdMap(domRoot);
+  } catch {
+    /* no testids available for this snapshot — resolution falls back to role+name */
+  }
+
   const nodeMap = new Map<string, number>();
   let seq = 0;
 
-  const keep = (role: string, name: string, parentName: string): boolean => {
+  const keep = (role: string, name: string, parentName: string, testId?: string): boolean => {
+    // A8: a node carrying a test attribute is ALWAYS worth keeping, even when
+    // it would otherwise collapse (no accessible name, a generic/presentation
+    // role) — the canvas/SVG/charting-widget case the A8 finding calls out as
+    // having no accessible name at all.
+    if (testId) return true;
     if (INTERACTIVE.has(role) || STRUCTURAL.has(role)) return true;
     // page text (totals, error banners…) is evidence — but not when it merely
     // repeats the name of the element it lives in
@@ -230,11 +299,12 @@ export async function snapshotAxTree(client: CDP.Client, opts: SerializeAxTreeOp
     const role = raw.role?.value ?? '';
     if (role === 'InlineTextBox' || role === 'LineBreak') return []; // layout artifacts of StaticText
     const name = (raw.name?.value ?? '').trim();
+    const testId = raw.backendDOMNodeId !== undefined ? testIdByBackendId.get(raw.backendDOMNodeId) : undefined;
     const children = depth >= MAX_DEPTH
       ? [] // pathologically deep DOM — stop descending, let MAX_CHARS truncation handle the rest
       : (raw.childIds ?? []).flatMap((cid) => build(byId.get(cid), name || parentName, depth + 1));
 
-    if (!keep(role, name, parentName)) return children; // collapse: promote children
+    if (!keep(role, name, parentName, testId)) return children; // collapse: promote children
 
     const states = (raw.properties ?? [])
       .filter((p) => STATE_PROPS.has(p.name) && p.value?.value !== false && p.value?.value !== 'false')
@@ -242,7 +312,15 @@ export async function snapshotAxTree(client: CDP.Client, opts: SerializeAxTreeOp
 
     const id = `n${seq++}`;
     if (raw.backendDOMNodeId !== undefined) nodeMap.set(id, raw.backendDOMNodeId);
-    const node: AxNode = { id, role, ...(name && { name }), ...(raw.value?.value && { value: raw.value.value }), ...(states.length && { states }), ...(children.length && { children }) };
+    const node: AxNode = {
+      id,
+      role,
+      ...(name && { name }),
+      ...(raw.value?.value && { value: raw.value.value }),
+      ...(states.length && { states }),
+      ...(testId && { testId }),
+      ...(children.length && { children }),
+    };
     return [node];
   };
 

@@ -13,6 +13,19 @@ export interface AxNode {
   value?: string;
   /** Notable states: disabled, focused, required, checked… */
   states?: string[];
+  /** A8 (P1): the node's `data-testid` (or `data-test-id`/`data-test`/`data-qa`
+   * alias, first one present wins in that priority order) — captured once per
+   * snapshot in axtree.ts's `snapshotAxTree()` via a single bulk DOM fetch, so
+   * it costs ZERO additional CDP round-trips beyond the snapshot every step
+   * already takes. This is what lets the recorder/replay resolve a target by
+   * testid straight out of the in-memory tree, no live DOM query needed on the
+   * common path (BrowserPort.findByTestId is the live fallback for the
+   * uncommon one — see its doc comment). A node that carries a test attribute
+   * is ALSO kept by the AX pruning in axtree.ts even when it would otherwise
+   * collapse (no accessible name, a generic/presentation role) — the exact
+   * canvas/SVG/charting-widget case the A8 finding calls out as having no
+   * accessible name at all. */
+  testId?: string;
   children?: AxNode[];
 }
 
@@ -333,6 +346,16 @@ export interface BrowserPort {
    * the attribute was lost across a reload). Implementations register the match
    * into their own nodeMap so the returned id resolves. Optional. */
   findByQaId?(qaId: string): Promise<string | null>;
+  /** A8 (P1): locate a node in the CURRENT page by a `data-testid` (or
+   * `data-test-id`/`data-test`/`data-qa`) attribute and return a nodeId usable
+   * with click()/type(), or null when no element carries it. This is the LIVE
+   * fallback for the uncommon case — the common path resolves testid straight
+   * out of the already-fetched AxSnapshot (`AxNode.testId`, populated once per
+   * snapshot with no extra round-trip); this method exists for the moment the
+   * snapshot is stale (element rendered after it was taken) or was pruned for
+   * an unrelated reason. Implementations register the match into their own
+   * nodeMap so the returned id resolves. Optional. */
+  findByTestId?(testId: string): Promise<string | null>;
   /** A4 (P0): resolves once the network has gone quiet (no in-flight requests
    * for `networkQuietMs`) or `timeoutMs` elapses, whichever first — the
    * condition-based replacement for the ~20 fixed sleeps this finding names.

@@ -45,6 +45,8 @@
     "build:lite": "tsup --config tsup.lite.config.ts",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "test:browser": "node scripts/run-tests.mjs --browser",
     "test:e2e": "tsx test/e2e.run-fixture.ts",
     "gen:icons": "tsx scripts/gen-icons.ts",
     "pack:extension": "tsx scripts/pack-extension.ts",

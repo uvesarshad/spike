@@ -47,10 +47,25 @@ function isAssertionStep(s: ScriptStep): s is Extract<ScriptStep, { type: 'asser
   return s.type === 'assert_dom' || s.type === 'assert_visual';
 }
 
-/** "Navigation/wait" steps — the only kinds `notice` allows a heal to ADD
- * beyond what was already there. */
-function isNavOrWaitStep(s: ScriptStep): boolean {
-  return s.type === 'navigate' || s.type === 'wait' || s.type === 'reload' || s.type === 'go_back';
+/** Steps a heal may INSERT without quarantining.
+ *
+ * Originally nav/wait only. Widened to every non-assertion step after the
+ * dogfood drift test (2026-08-09): the UI gained a required interaction, the
+ * AI correctly re-derived a script with one extra `click`, and quarantining
+ * that made `--heal` useless for the exact case it exists to serve — real UI
+ * drift usually ADDS or MOVES interaction steps, it rarely just relocates a
+ * locator.
+ *
+ * Widening is safe because step count was never the safety property —
+ * ASSERTIONS are. A heal cannot launder a regression into green by adding
+ * clicks: every original assertion still has to survive unchanged (checked
+ * separately) and still has to PASS on replay. What must never be waved
+ * through is a step being REMOVED, or an assertion being removed, weakened,
+ * or re-targeted — those remain quarantine, and an inserted ASSERTION is
+ * excluded here too, since a heal inventing its own expectations is exactly
+ * the "AI marks its own homework" case this gate is for. */
+function isInsertableStep(s: ScriptStep): boolean {
+  return !isAssertionStep(s);
 }
 
 function targetsEqual(a: ScriptTarget | undefined, b: ScriptTarget | undefined): boolean {
@@ -163,8 +178,8 @@ interface AlignResult {
   /** Non-assertion steps whose only difference from their old counterpart
    * was a target/locator move — reported as the 'auto' reasons. */
   targetOnlyChanges: string[];
-  /** Count of navigation/wait steps present in `newSteps` with no
-   * counterpart in `oldSteps` (the only kind of insertion `notice` allows). */
+  /** Count of steps present in `newSteps` with no counterpart in `oldSteps`
+   * (non-assertion insertions — see isInsertableStep for why that is safe). */
   insertedCount: number;
 }
 
@@ -200,7 +215,7 @@ function alignAndCompare(oldSteps: ScriptStep[], newSteps: ScriptStep[]): AlignR
       j++;
       continue;
     }
-    if (isNavOrWaitStep(w)) {
+    if (isInsertableStep(w)) {
       // Treat `w` as an inserted step and try the same old step against the
       // next new step.
       insertedCount++;
@@ -211,7 +226,7 @@ function alignAndCompare(oldSteps: ScriptStep[], newSteps: ScriptStep[]): AlignR
   }
   // Any remaining new-side steps must themselves be trailing insertions.
   while (j < newSteps.length) {
-    if (!isNavOrWaitStep(newSteps[j])) return null;
+    if (!isInsertableStep(newSteps[j])) return null;
     insertedCount++;
     j++;
   }
@@ -258,7 +273,7 @@ export function classifyHeal(oldScript: QaScript, newScript: QaScript): HealClas
   //    only navigation/wait insertions permitted beyond that.
   const aligned = alignAndCompare(oldSteps, newSteps);
   if (!aligned) {
-    return { tier: 'quarantine', reasons: ['steps could not be aligned with the original without an unexplained change (reordering, replacement, or an inserted step that is not navigation/wait)'] };
+    return { tier: 'quarantine', reasons: ['steps could not be aligned with the original without an unexplained change (a step was removed, reordered, replaced, or an ASSERTION was inserted)'] };
   }
 
   if (aligned.insertedCount > 0) {

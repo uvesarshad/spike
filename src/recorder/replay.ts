@@ -13,7 +13,8 @@ import type { NanoPort } from '../ports/nano-port.js';
 import { firstError } from '../capture/console-network.js';
 import type { ArtifactStore } from '../report/artifacts.js';
 import type { FailingStep, Report, RunVerdict, StepRecord } from '../report/report.js';
-import type { QaScript, ScriptStep, ScriptTarget } from './script.js';
+import type { LocatorCandidate, QaScript, ScriptStep, ScriptTarget } from './script.js';
+import { candidateStackFor } from './script.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders } from '../run-data/index.js';
 import { validateScriptSteps, runScriptSteps } from '../driver/script-runner/index.js';
 import type { Vault } from '../vault/vault.js';
@@ -401,50 +402,209 @@ function describeScriptStep(s: ScriptStep): string {
   }
 }
 
+/* ---------- A8 (P1): candidate-locator stack resolution ---------- */
+
+/** Outcome of trying to resolve a `ScriptTarget` against ONE in-memory
+ * `AxSnapshot` — pure, no browser/CDP calls (the `qaId`/`testId` LIVE
+ * fallbacks are async and handled one layer up, in `findByTarget`, since they
+ * need a real DOM query). Exported for direct unit testing (test/v50). */
+export type TargetResolution =
+  | { status: 'found'; node: AxNode; via: LocatorCandidate['kind'] }
+  | { status: 'absent' }
+  /** Present, but role+name alone didn't uniquely pick one and no candidate
+   * further down the in-tree stack (testid/text) resolved it either — the
+   * live wrapper still gets one more shot via the qaId/testId LIVE fallbacks
+   * before this becomes the thrown error. */
+  | { status: 'ambiguous'; detail: string };
+
+/** A role+name match plus enough tree context (ancestor chain, sibling list)
+ * to SCORE it against a target's disambiguation hints. */
+interface RoleMatch {
+  node: AxNode;
+  /** 0-based index among role+name matches, in document (pre-order) order —
+   * what a recorded `nth` refers to. */
+  index: number;
+  /** Root → immediate-parent ancestor chain (excludes the node itself). */
+  ancestors: AxNode[];
+  /** The node's own sibling list (its parent's children), INCLUDING itself. */
+  siblings: AxNode[];
+}
+
+/** Roles treated as "landmarks" for the nearest-landmark disambiguation hint
+ * — a superset small enough to stay a clear structural signal (a table row, a
+ * dialog, a nav region…), not every STRUCTURAL role in axtree.ts. */
+const LANDMARK_ROLES = new Set([
+  'navigation', 'main', 'form', 'dialog', 'alertdialog', 'table', 'row',
+  'list', 'region', 'banner', 'contentinfo', 'complementary', 'article',
+]);
+
+/** All nodes matching role+name, in document (pre-order) order, each with its
+ * ancestor chain and sibling list for scoring. */
+function collectRoleMatches(root: AxNode, role: string, name?: string): RoleMatch[] {
+  const out: RoleMatch[] = [];
+  let index = 0;
+  const walk = (n: AxNode, ancestors: AxNode[], siblings: AxNode[]): void => {
+    if (n.role === role && n.name === name) out.push({ node: n, index: index++, ancestors, siblings });
+    const children = n.children ?? [];
+    for (const c of children) walk(c, [...ancestors, n], children);
+  };
+  walk(root, [], [root]);
+  return out;
+}
+
+/** Nodes whose accessible name exactly matches `text` (case/whitespace
+ * insensitive) — the last-resort locator for elements with no stable role or
+ * testid (a canvas/SVG label, an ad-hoc `<div>`). */
+function collectByText(root: AxNode, text: string): AxNode[] {
+  const needle = text.trim().toLowerCase();
+  const out: AxNode[] = [];
+  const walk = (n: AxNode): void => {
+    if (n.name && n.name.trim().toLowerCase() === needle) out.push(n);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+  return out;
+}
+
+/** Nodes stamped with a matching `AxNode.testId` (see browser-port.ts) — the
+ * common, zero-round-trip path; the live `findByTestId` port method is the
+ * fallback for when the snapshot predates the element. */
+function collectByTestId(root: AxNode, testId: string): AxNode[] {
+  const out: AxNode[] = [];
+  const walk = (n: AxNode): void => {
+    if (n.testId === testId) out.push(n);
+    for (const c of n.children ?? []) walk(c);
+  };
+  walk(root);
+  return out;
+}
+
+const nearestLandmark = (ancestors: AxNode[]): AxNode | undefined => {
+  for (let i = ancestors.length - 1; i >= 0; i--) {
+    if (LANDMARK_ROLES.has(ancestors[i].role)) return ancestors[i];
+  }
+  return undefined;
+};
+
+/** Score ONE role+name match against a target's disambiguation hints. Purely
+ * additive signals — each on its own is worth enough to break a tie against a
+ * candidate with none of it, but a genuine tie (same score, e.g. no hints on
+ * either side) MUST stay a tie; see `pickClearRoleWinner`. */
+function scoreRoleMatch(m: RoleMatch, c: Extract<LocatorCandidate, { kind: 'role' }>): number {
+  let score = 0;
+  // Position closeness to a recorded nth — the virtualised-list case: the
+  // page still has the item, just at a shifted index (scroll, pagination).
+  if (typeof c.nth === 'number') score += Math.max(0, 10 - Math.abs(m.index - c.nth));
+  // Nearest-landmark match — the data-table-row case: two "Delete" buttons
+  // that live under two different rows/regions.
+  if (c.landmark) {
+    const lm = nearestLandmark(m.ancestors);
+    if (lm && lm.role === c.landmark.role && (c.landmark.name === undefined || lm.name === c.landmark.name)) {
+      score += 20;
+    }
+  }
+  // Sibling text — the recorded target sat next to text that uniquely
+  // identifies its row/group even when the control itself doesn't.
+  if (c.siblingText) {
+    const needle = c.siblingText.toLowerCase();
+    if (m.siblings.some((s) => s !== m.node && s.name?.toLowerCase().includes(needle))) score += 15;
+  }
+  return score;
+}
+
+/** Pick a role+name match ONLY when it is a CLEAR winner: at least one
+ * disambiguation signal fired (score > 0) AND no other candidate tied it.
+ * Two equally-good candidates — including the common case of NO signal at
+ * all, where every match scores 0 — return null, preserving today's explicit
+ * failure rather than silently guessing (per the A8 finding: "a wrong click
+ * is worse than a clear error"). */
+function pickClearRoleWinner(matches: RoleMatch[], c: Extract<LocatorCandidate, { kind: 'role' }>): AxNode | null {
+  const scored = matches.map((m) => ({ m, score: scoreRoleMatch(m, c) })).sort((a, b) => b.score - a.score);
+  const best = scored[0];
+  if (!best || best.score <= 0) return null;
+  const second = scored[1];
+  if (second && second.score >= best.score) return null; // tie at the top — no clear winner
+  return best.m.node;
+}
+
+/** Resolve a `ScriptTarget` against ONE already-fetched `AxSnapshot`, trying
+ * its candidate stack (`candidateStackFor` — testid → role+name(+nth,
+ * scored) → text) in order and degrading to the next instead of failing
+ * outright. `qaId` candidates are skipped here (they need a live DOM query —
+ * see `findByTarget`'s async wrapper) but still recorded into the returned
+ * `ambiguous` detail's precedence: role ambiguity is remembered and only
+ * surfaced if nothing later in the stack (including the live qaId/testid
+ * fallbacks one layer up) resolves it either — exactly mirroring the
+ * pre-A8 order (role+name, then qaId, then fail). */
+export function resolveTargetInTree(root: AxNode, target: ScriptTarget): TargetResolution {
+  let ambiguousDetail: string | undefined;
+  for (const c of candidateStackFor(target)) {
+    if (c.kind === 'qaId') continue; // live-DOM only; handled by the async wrapper
+    if (c.kind === 'testid') {
+      const matches = collectByTestId(root, c.value);
+      if (matches.length > 0) return { status: 'found', node: matches[0], via: 'testid' };
+      continue;
+    }
+    if (c.kind === 'text') {
+      const matches = collectByText(root, c.value);
+      if (matches.length === 1) return { status: 'found', node: matches[0], via: 'text' };
+      continue; // zero or ambiguous by text — nothing further to degrade to
+    }
+    // c.kind === 'role'
+    const matches = collectRoleMatches(root, c.role, c.name);
+    if (matches.length === 0) continue;
+    if (typeof c.nth === 'number') {
+      if (c.nth >= 0 && c.nth < matches.length) return { status: 'found', node: matches[c.nth].node, via: 'role' };
+      const winner = pickClearRoleWinner(matches, c);
+      if (winner) return { status: 'found', node: winner, via: 'role' };
+      ambiguousDetail ??= `locator out of range: nth=${c.nth} but only ${matches.length} × ${c.role} "${c.name ?? ''}" on the page`;
+      continue;
+    }
+    if (matches.length === 1) return { status: 'found', node: matches[0].node, via: 'role' };
+    const winner = pickClearRoleWinner(matches, c);
+    if (winner) return { status: 'found', node: winner, via: 'role' };
+    ambiguousDetail ??= `ambiguous locator: ${matches.length} × ${c.role} "${c.name ?? ''}" — re-record or refine (add nth)`;
+  }
+  if (ambiguousDetail) return { status: 'ambiguous', detail: ambiguousDetail };
+  return { status: 'absent' };
+}
+
 /** Find the node a target locator points at, polling while the page settles.
  *
- * Disambiguation semantics:
- *   - `nth` set → use the nth (0-based) role+name match; out-of-range fails.
- *   - `nth` unset + exactly one match → use it.
- *   - `nth` unset + MULTIPLE matches → FAIL with a precise 'ambiguous locator'
- *     error rather than silently picking the first. (COMPROMISE for this round:
- *     the loop doesn't yet record which of N matches it used, so a recorded
- *     script can't carry `nth` automatically — but the replay schema accepts it,
- *     so a future loop change can populate `nth` with no version bump, and
- *     hand-authored scripts can use it today.)
- *   - zero matches → UI-drift error after the settle timeout. */
+ * A8 (P1) resolution order (see `resolveTargetInTree`/`candidateStackFor`):
+ * testid → role+name(+nth, scored on ambiguity/out-of-range) → stamped qaId
+ * (live) → text → testid (live, in case the snapshot predates the element).
+ * A legacy target (no `candidates`) synthesizes exactly `[role+name+nth,
+ * qaId?]` — the pre-A8 stack — so it degrades through the identical two steps
+ * in the identical order it always has; the only behaviour change for such a
+ * target is that a role+name ambiguity/out-of-range case gets ONE extra,
+ * purely-additive chance (scored disambiguation) before falling through to
+ * qaId exactly as before. Timing is preserved too: an "absent" result keeps
+ * polling until the timeout (unresolved matches might still be rendering); an
+ * "ambiguous" result (the element(s) DO exist, just not uniquely) fails
+ * immediately after one qaId/testid attempt, same as pre-A8 — polling cannot
+ * fix an ambiguity that already exists. */
 async function findByTarget(browser: BrowserPort, target: ScriptTarget): Promise<AxNode> {
-  const { role, name, nth } = target;
   const deadline = Date.now() + FIND_TIMEOUT_MS;
   for (;;) {
     const ax = await browser.axTree();
-    const matches = collectByRoleName(ax.root, role, name);
-    if (matches.length > 0) {
-      if (typeof nth === 'number') {
-        if (nth < 0 || nth >= matches.length) {
-          // nth out of range can be UI drift (fewer matches than recorded) —
-          // try the qaId fallback before failing.
-          const viaQa = await tryQaIdFallback(browser, target);
-          if (viaQa) return viaQa;
-          throw new Error(
-            `locator out of range: nth=${nth} but only ${matches.length} × ${role} "${name ?? ''}" on the page`,
-          );
-        }
-        return matches[nth];
-      }
-      if (matches.length === 1) return matches[0];
-      // ambiguous role+name — a stamped data-qa-id (#9) resolves it uniquely.
+    const resolution = resolveTargetInTree(ax.root, target);
+    if (resolution.status === 'found') return resolution.node;
+    if (resolution.status === 'ambiguous') {
       const viaQa = await tryQaIdFallback(browser, target);
       if (viaQa) return viaQa;
-      throw new Error(
-        `ambiguous locator: ${matches.length} × ${role} "${name ?? ''}" — re-record or refine (add nth)`,
-      );
+      const viaTestId = await tryTestIdFallback(browser, target);
+      if (viaTestId) return viaTestId;
+      throw new Error(resolution.detail);
     }
     if (Date.now() > deadline) {
-      // zero role+name matches (UI drift) — last resort: the stamped data-qa-id.
+      // zero matches anywhere in the stack (UI drift) — last resort: the live
+      // qaId/testid lookups.
       const viaQa = await tryQaIdFallback(browser, target);
       if (viaQa) return viaQa;
-      throw new Error(`UI drift: no ${role} ${name ? `"${name}" ` : ''}on the page after ${FIND_TIMEOUT_MS}ms`);
+      const viaTestId = await tryTestIdFallback(browser, target);
+      if (viaTestId) return viaTestId;
+      throw new Error(`UI drift: no ${target.role} ${target.name ? `"${target.name}" ` : ''}on the page after ${FIND_TIMEOUT_MS}ms`);
     }
     await sleep(300);
   }
@@ -461,15 +621,16 @@ async function tryQaIdFallback(browser: BrowserPort, target: ScriptTarget): Prom
   return { id: nodeId, role: target.role, name: target.name };
 }
 
-/** All nodes matching role+name, in document (pre-order) order. */
-function collectByRoleName(root: AxNode, role: string, name?: string): AxNode[] {
-  const out: AxNode[] = [];
-  const walk = (n: AxNode): void => {
-    if (n.role === role && n.name === name) out.push(n);
-    for (const c of n.children ?? []) walk(c);
-  };
-  walk(root);
-  return out;
+/** A8 (P1) live fallback: only tried when the target's candidate stack
+ * actually carries a testid candidate (mirrors `tryQaIdFallback`'s own
+ * guard) — locates by `data-testid`/alias directly in the live DOM for the
+ * uncommon case where the already-fetched snapshot predates the element. */
+async function tryTestIdFallback(browser: BrowserPort, target: ScriptTarget): Promise<AxNode | null> {
+  const testIdCandidate = candidateStackFor(target).find((c): c is Extract<LocatorCandidate, { kind: 'testid' }> => c.kind === 'testid');
+  if (!testIdCandidate || !browser.findByTestId) return null;
+  const nodeId = await browser.findByTestId(testIdCandidate.value).catch(() => null);
+  if (!nodeId) return null;
+  return { id: nodeId, role: target.role, name: target.name };
 }
 
 function findNodeById(root: AxNode, id: string): AxNode | undefined {

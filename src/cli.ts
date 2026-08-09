@@ -6,9 +6,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { Command } from 'commander';
+import os from 'node:os';
 import { loadConfig, type QaConfig } from './config.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
-import { isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
+import { allocateIsolatedSession, isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
 import { slimReport, type Report } from './report/report.js';
 import { resolveSuite } from './suite/config.js';
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
@@ -73,7 +74,7 @@ function collectRepeatable(value: string, previous: string[]): string[] {
  *    the localhost/127.0.0.1 defaults stay in place and the flag opens up extra
  *    hosts for click/type just for this run. */
 function mergeConfig(
-  via: 'cdp' | 'extension' | undefined,
+  via: 'cdp' | 'extension' | 'playwright' | undefined,
   hosts: string[],
   actionCache?: boolean,
 ): Partial<QaConfig> | undefined {
@@ -90,22 +91,28 @@ program
   .argument('<task>', 'what to test, in plain English')
   .requiredOption('--url <url>', 'page to start on')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
-  .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
+  .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
   .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically', collectRepeatable, [])
   .option('--action-cache', 'enable the verified file-backed action cache for this run')
   .option('--no-action-cache', 'bypass the verified action cache for this run')
   .option('--no-record', 'do not record a passing run to generated-tests/')
   .option('--no-replay', 'skip the pre-run replay matcher — always run a fresh AI pass, even if a recorded script confidently matches this task+url')
+  .option('--headless', 'run Chrome headless — skips the opportunistic $0 Nano rung for this run (see CLAUDE.md); replay is the well-tested headless path', false)
+  .option('--storage-state <path>', 'load cookies + localStorage from this file before running (auth reuse — see `spike replay --save-storage-state`)')
+  .option('--save-storage-state <path>', 'on a PASSING run, save cookies + localStorage to this file')
   .option('--fix', 'on failure, hand the fix prompt to your coding agent (claude/codex/gemini) and re-test', false)
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension'; allowHost: string[]; actionCache?: boolean; record: boolean; replay: boolean; fix: boolean; maxFixAttempts?: number; json: boolean }) => {
+  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; json: boolean }) => {
     const onProgress = opts.json ? undefined : (l: string) => console.log(l);
     const config = mergeConfig(opts.via, opts.allowHost, opts.actionCache);
     const qaRunOpts = {
       maxSteps: opts.maxSteps,
       record: opts.record,
       replay: opts.replay,
+      headless: opts.headless,
+      storageStatePath: opts.storageState,
+      saveStorageStatePath: opts.saveStorageState,
       ...(config && { config }),
       onProgress,
     };
@@ -203,22 +210,26 @@ program
   .argument('[name]', 'script name (or path to a generated-tests/*.json)')
   .option('--all', 'replay the suite (spike.suite.json if present, else every script in generated-tests/, sorted)', false)
   .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
-  .option('--via <transport>', 'cdp (default) | extension — how to drive Chrome')
+  .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
   .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically', collectRepeatable, [])
   .option('--json', 'print slim JSON verdicts only', false)
-  .option('--workers <n>', 'with --all: concurrent scripts in flight (default 1 — today\'s serial behaviour)', (v) => parseInt(v, 10))
+  .option('--workers <n>', 'with --all: concurrent scripts in flight (default 1 — today\'s serial behaviour). With --via playwright this is the cheap path (one shared Chrome, one isolated BrowserContext per script); otherwise each concurrent script gets its OWN fully isolated Chrome (A3)', (v) => parseInt(v, 10))
   .option('--tag <tag>', 'with --all + spike.suite.json: run only entries tagged with this (repeatable, OR match)', collectRepeatable, [])
   .option('--filter <substr>', 'with --all: run only scripts whose name/path contains this substring')
   .option('--shard <i/N>', 'with --all: run only shard i of N, deterministically partitioned by sorted script name (1-based i)')
   .option('--reporter <type>', 'with --all: also emit a report in this format — currently "junit" (requires --out)')
   .option('--out <path>', 'with --reporter: file path to write the report to')
+  .option('--headless', 'run Chrome headless — a script needing assert_visual still gets Nano on its own split-off headed Chrome (A7)', false)
+  .option('--storage-state <path>', 'load cookies + localStorage from this file before replaying (auth reuse)')
+  .option('--save-storage-state <path>', 'single-script replay only: on a PASSING replay, save storage state to this file (with --all, use --auth-fixture instead)')
+  .option('--auth-fixture', 'with --all + a configured suite setup script: run setup once, capture the storage state it produces, and inject it into every entry — "log in once, reuse everywhere" (A6)', false)
   .action(
     async (
       name: string | undefined,
       opts: {
         all: boolean;
         heal: boolean;
-        via?: 'cdp' | 'extension';
+        via?: 'cdp' | 'extension' | 'playwright';
         allowHost: string[];
         json: boolean;
         workers?: number;
@@ -227,6 +238,10 @@ program
         shard?: string;
         reporter?: string;
         out?: string;
+        headless: boolean;
+        storageState?: string;
+        saveStorageState?: string;
+        authFixture: boolean;
       },
     ) => {
       const config = mergeConfig(opts.via, opts.allowHost);
@@ -241,6 +256,9 @@ program
           heal: opts.heal,
           ...(config && { config }),
           onProgress: opts.json ? undefined : (l) => console.log(l),
+          headless: opts.headless,
+          storageStatePath: opts.storageState,
+          saveStorageStatePath: opts.saveStorageState,
         });
         const out = { script: name, healed: report.healed, ...slimReport(report) };
         console.log(JSON.stringify(out, null, 2));
@@ -276,12 +294,64 @@ program
         entries = shardEntries(entries, shard);
       }
 
+      // A6 (P1): "log in once, reuse everywhere" suite fixture. When asked,
+      // run the suite's own `setup` script ourselves FIRST (outside runSuite,
+      // so we control its options), capture the storage state it leaves
+      // behind, and feed that state into every entry's runOne call below —
+      // then tell runSuite to skip running setup a second time. Falling back
+      // to `opts.storageState` when there's no setup (or it failed) means
+      // `--storage-state` alone still works as a plain "use this pre-captured
+      // file" flag, same as the single-script path above.
+      let authStatePath: string | undefined = opts.storageState;
+      let suiteSetup = suiteConfig.setup;
+      if (opts.authFixture) {
+        if (!suiteConfig.setup) {
+          console.error('--auth-fixture has no effect: no setup script configured for this suite (see spike.suite.json)');
+        } else {
+          console.error(`auth fixture: running setup "${suiteConfig.setup}" once and capturing its storage state`);
+          const capturedPath = path.join(os.tmpdir(), `spike-auth-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`);
+          const setupReport = await qaReplay(suiteConfig.setup, {
+            heal: opts.heal,
+            ...(config && { config }),
+            onProgress: opts.json ? undefined : (l) => console.log(l),
+            headless: opts.headless,
+            saveStorageStatePath: capturedPath,
+          });
+          if (setupReport.verdict === 'pass' && fs.existsSync(capturedPath)) {
+            authStatePath = capturedPath;
+            suiteSetup = undefined; // already ran it — don't let runSuite run it again
+            console.error(`auth fixture: captured storage state to ${capturedPath}`);
+          } else {
+            console.error(`auth fixture: setup did not pass (${setupReport.verdict}) — continuing without shared storage state (setup will still run again per runSuite's own semantics)`);
+          }
+        }
+      }
+
+      // A3 (P0): the resolved `via` for this invocation — needed to decide
+      // whether concurrent entries get the cheap isolation path (playwright:
+      // one shared Chrome, one BrowserContext per script — free, nothing to
+      // allocate here) or the expensive one (a fully separate Chrome per
+      // concurrent script — see engine.ts's allocateIsolatedSession).
+      const resolvedVia = config?.via ?? loadConfig().via;
+      const parallel = (opts.workers ?? 1) > 1;
+      const baseProfileDir = loadConfig(config).chromeProfile;
+
       const jsonResults: unknown[] = [];
       const runOne = async (scriptId: string): Promise<RunOneResult> => {
+        // A3: only pay for a brand-new isolated Chrome when concurrency was
+        // actually requested AND the transport can't isolate more cheaply
+        // (playwright already gets a fresh BrowserContext per session for
+        // free — see openBrowserSession's 'playwright' branch). workers=1
+        // (the default) never allocates anything extra, so this is a no-op
+        // for every existing caller.
+        const isolation = parallel && resolvedVia !== 'playwright' ? await allocateIsolatedSession(baseProfileDir) : undefined;
+        const perCallConfig = isolation ? { ...config, ...isolation } : config;
         const report = await qaReplay(scriptId, {
           heal: opts.heal,
-          ...(config && { config }),
+          ...(perCallConfig && { config: perCallConfig }),
           onProgress: opts.json ? undefined : (l) => console.log(l),
+          headless: opts.headless,
+          storageStatePath: authStatePath,
         });
         return { verdict: report.verdict, report };
       };
@@ -292,10 +362,10 @@ program
         else console.log(JSON.stringify(out, null, 2));
       };
 
-      if (suiteConfig.setup) console.error(`setup: ${suiteConfig.setup}`);
+      if (suiteSetup) console.error(`setup: ${suiteSetup}`);
       const outcome = await runSuite(entries, runOne, {
         workers: opts.workers,
-        setup: suiteConfig.setup,
+        setup: suiteSetup,
         teardown: suiteConfig.teardown,
         onResult,
         // A11: quarantined flows still run and still report — they are only

@@ -1,0 +1,77 @@
+name: CI
+
+# Two jobs, deliberately split by what a runner can actually provide:
+#
+#   - `test` runs on every push/PR. It only exercises suites that are pure/
+#     in-memory (see scripts/run-tests.mjs's BROWSER_SUITES list and
+#     docs/infra/testing.md) — no real Chrome, no fixed ports, no external
+#     model credentials. This is a genuine gate: it fails the build on a
+#     real regression in ~35 of the ~55 suites in test/.
+#
+#   - `browser-suites` is workflow_dispatch-only (manual). It is NOT part of
+#     the push/PR gate — see the job's own comment below for exactly why a
+#     stock GitHub-hosted runner cannot run it unattended. Being explicit
+#     about this gap is the point: a green `test` job does not mean the
+#     Chrome-driving ~half of the suite passed, and this workflow does not
+#     pretend otherwise.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: typecheck, build, fast tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+
+  browser-suites:
+    name: browser suites (manual only — see comments)
+    runs-on: ubuntu-latest
+    # Manual only: this is NOT part of the push/PR gate. It cannot be, for
+    # reasons a stock GitHub-hosted runner can't fix:
+    #
+    #   1. Real branded Chrome required. These suites drive an actual Chrome
+    #      via CDP (CdpBrowser / chrome-remote-interface) or dev-load the MV3
+    #      extension (launchChromeWithExtension). ubuntu-latest ships
+    #      Chromium, not branded Chrome, and several code paths
+    #      (--load-extension being dead on Chrome 137+, Extensions.loadUnpacked,
+    #      Gemini Nano's Prompt API) are branded-Chrome-specific.
+    #   2. Gemini Nano needs ~2GB downloaded plus 22GB free on the profile
+    #      volume (CLAUDE.md: "Gemini Nano requires 22 GB free on the volume
+    #      holding the profile") — m2.nano-port.ts and v6.extension-nano.ts
+    #      need the on-device model already provisioned; there is no
+    #      unattended way to trigger and wait out that download in CI.
+    #   3. Live model credentials. e2e.autofix-real.ts needs a real `claude`
+    #      CLI logged in (gated behind SPIKE_REAL_AGENT_E2E=1 for exactly
+    #      this reason); v10.batching.ts and v20b.measure.ts make real
+    #      paid/free-quota model calls end to end.
+    #   4. Fixed ports (9322/9332/9401/9402/9411/...) that only make sense
+    #      run serially, one at a time, on a machine nobody else is using —
+    #      scripts/run-tests.mjs's `--browser` mode already enforces serial
+    #      execution for this reason.
+    #
+    # Use this job as a human-triggered smoke test on a machine that already
+    # has a real Chrome + Nano model + model credentials set up (e.g. a
+    # self-hosted runner mirroring a dev machine) — not as a CI gate.
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run build
+      - run: npm run test:browser
+        env:
+          SPIKE_REAL_AGENT_E2E: '0' # opt in explicitly if this runner has a real coding-agent CLI + credentials

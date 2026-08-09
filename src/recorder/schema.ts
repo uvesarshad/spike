@@ -24,18 +24,40 @@
  * drift apart. */
 
 import { z } from 'zod';
-import type { QaScript, ScriptStep, ScriptTarget } from './script.js';
+import type { LocatorCandidate, QaScript, ScriptStep, ScriptTarget } from './script.js';
 import { ScriptRunnerStepSchema } from '../driver/script-runner/schema.js';
+
+/** A8 (P1): runtime twin of `LocatorCandidate` (script.ts) — one branch per
+ * candidate kind, same `.strict()`/discriminated-union conventions as
+ * `ScriptStepSchema` below. */
+export const LocatorCandidateSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('testid'), value: z.string() }).strict(),
+  z
+    .object({
+      kind: z.literal('role'),
+      role: z.string(),
+      name: z.string().optional(),
+      nth: z.number().int().nonnegative().optional(),
+      landmark: z.object({ role: z.string(), name: z.string().optional() }).strict().optional(),
+      siblingText: z.string().optional(),
+    })
+    .strict(),
+  z.object({ kind: z.literal('qaId'), value: z.string() }).strict(),
+  z.object({ kind: z.literal('text'), value: z.string() }).strict(),
+]);
 
 /** Locator schema shared by every step that targets a page element. `nth` and
  * `qaId` are the same optional disambiguators documented on `ScriptTarget` in
- * script.ts — both are best-effort fallbacks, never required. */
+ * script.ts — both are best-effort fallbacks, never required. `candidates`
+ * (A8) is additive and optional — a script with none (every script recorded
+ * before A8) validates exactly as it always has. */
 export const ScriptTargetSchema = z
   .object({
     role: z.string(),
     name: z.string().optional(),
     nth: z.number().int().nonnegative().optional(),
     qaId: z.string().optional(),
+    candidates: z.array(LocatorCandidateSchema).optional(),
   })
   .strict();
 
@@ -148,9 +170,15 @@ const _forwardDriftCheck: QaScript = {} as InferredQaScript;
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const _reverseDriftCheck: InferredQaScript = {} as QaScript;
 
+type InferredLocatorCandidate = z.infer<typeof LocatorCandidateSchema>;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _forwardCandidateDriftCheck: LocatorCandidate = {} as InferredLocatorCandidate;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _reverseCandidateDriftCheck: InferredLocatorCandidate = {} as LocatorCandidate;
+
 // Re-exported so callers can reference the exact locator/step shapes without
 // reaching back into script.ts for the zod-adjacent types.
-export type { ScriptTarget, ScriptStep, QaScript };
+export type { ScriptTarget, ScriptStep, QaScript, LocatorCandidate };
 
 /** Format one zod issue as `path.to.field: message` (e.g.
  * `steps[3].target.role: Required`), matching how a hand-editor thinks about

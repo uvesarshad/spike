@@ -24,9 +24,39 @@ const DEFAULT_EXTENSION_DIR = path.resolve(
   'extension',
 );
 
+/** A13 (P1): one interception rule. 'block' aborts the request outright
+ * (third-party/analytics — pure speed win, no response is ever synthesized);
+ * 'fail' fulfills it with a chosen status (deterministic negative tests —
+ * "what does the UI do when this API 500s" without needing to reproduce that
+ * by luck). `urlPattern` uses CDP's own glob syntax (`*` wildcard) — the same
+ * syntax `Network.setBlockedURLs`/`Fetch.enable` already accept, so no new
+ * pattern language is invented here. */
+export interface RouteRule {
+  urlPattern: string;
+  action: 'block' | 'fail';
+  /** action:'fail' only — HTTP status to respond with (default 500). */
+  status?: number;
+  /** action:'fail' only — optional response body. */
+  body?: string;
+}
+
+/** A13 (P1) viewport/device/network-throttle emulation, applied via CDP's
+ * Emulation/Network domains (transport-agnostic — works over any BrowserPort
+ * that exposes `cdpClient()`, not just the Playwright transport). */
+export interface EmulationConfig {
+  viewport?: { width: number; height: number };
+  deviceScaleFactor?: number;
+  isMobile?: boolean;
+  /** Named presets, or explicit CDP-shaped throttle numbers (bytes/sec, ms). */
+  networkThrottle?: 'offline' | 'slow-3g' | 'fast-3g' | { downloadThroughput: number; uploadThroughput: number; latency: number };
+}
+
 export interface QaConfig {
-  /** Transport that drives Chrome: daemon-launched CDP, or the MV3 extension bridge. */
-  via: 'cdp' | 'extension';
+  /** Transport that drives Chrome: daemon-launched CDP, the MV3 extension
+   * bridge, or Playwright attached via connectOverCDP (A3/A6/A13 — see
+   * ports/playwright-browser.ts and docs/plan/26-08-08-audit-deterministic-
+   * speed.md finding A26). Default stays 'cdp' — 'playwright' is opt-in. */
+  via: 'cdp' | 'extension' | 'playwright';
   /** WebSocket port the daemon↔extension bridge listens on (extension mode). */
   bridgePort: number;
   /** Interface the bridge WebSocket server binds to. Defaults to loopback-only
@@ -43,6 +73,36 @@ export interface QaConfig {
   fixturePort: number;
   /** Chrome profile dir — must live on a volume with 22 GB+ free (Gemini Nano storage gate). */
   chromeProfile: string;
+  /** A7 (P1): run the QA browser's Chrome headless. Default false (unchanged
+   * behavior) — every product call site used to hardcode `headless: false`.
+   * Gemini Nano's availability in headless is undocumented/unproven
+   * (nano-runner-page.ts), so a headless run either skips the opportunistic
+   * $0 Nano rung (qaRun) or, when the run genuinely needs Nano (a replay
+   * script with an `assert_visual` step), splits Nano onto its OWN headed
+   * Chrome via nanoCdpPort/nanoProfileDir below rather than dragging it into
+   * the headless one. See engine.ts's resolveNanoLaunchOpts(). */
+  headless: boolean;
+  /** A7 (P1): CDP port for Nano's OWN Chrome when it must be split from the
+   * (headless) QA browser's Chrome. Unset (default) → when headless is also
+   * false this is irrelevant (Nano shares cfg.cdpPort, today's behavior
+   * unchanged); when headless is true and this is unset, engine.ts allocates
+   * a free port dynamically per run rather than colliding two Chrome
+   * processes on one port. Set this to pin a stable port instead (e.g. a
+   * long-running headless daemon that wants Nano's Chrome at a fixed
+   * address). */
+  nanoCdpPort?: number;
+  /** A7 (P1): profile dir for Nano's split-off Chrome (see nanoCdpPort) — two
+   * Chrome processes can never share one --user-data-dir. Unset (default) →
+   * `${chromeProfile}-nano` when a split is actually needed. */
+  nanoProfileDir?: string;
+  /** A13 (P1): network interception rules — block third-party/analytics for
+   * speed, or force an error status for deterministic negative tests. Empty
+   * (default) — no interception, unchanged behavior. Config-driven (spike.
+   * config.json / SPIKE_ROUTE_RULES) so a suite can declare it once. */
+  routeRules: RouteRule[];
+  /** A13 (P1): viewport/device/network-throttle emulation for the whole
+   * session. Unset (default) — no emulation, unchanged behavior. */
+  emulation?: EmulationConfig;
   /** Rung-1 Google CLI binary (gemini today, antigravity after 2026-06-18 — never hardcode). */
   googleCliBin: string;
   /** Rung-1 model id passed to the CLI. */
@@ -123,6 +183,12 @@ const DEFAULTS: QaConfig = {
   runnerPort: 9400,
   fixturePort: 9401,
   chromeProfile: path.join(process.env.LOCALAPPDATA ?? process.env.HOME ?? '.', 'spike-chrome-profile'),
+  // A7: headed by default — exactly today's hardcoded behavior at every call site.
+  headless: false,
+  // nanoCdpPort/nanoProfileDir intentionally absent — undefined means "derive
+  // from headless/chromeProfile at session-open time" (see engine.ts).
+  // A13: no interception/emulation by default — unchanged behavior.
+  routeRules: [],
   googleCliBin: 'gemini',
   googleCliModel: 'gemini-3-flash-preview',
   googleCliEnv: { NODE_OPTIONS: '--use-system-ca' },
@@ -182,7 +248,7 @@ function fromFile(cwd: string): Partial<QaConfig> {
 function fromEnv(): Partial<QaConfig> {
   const e = process.env;
   const out: Partial<QaConfig> = {};
-  if (e.SPIKE_VIA === 'cdp' || e.SPIKE_VIA === 'extension') out.via = e.SPIKE_VIA;
+  if (e.SPIKE_VIA === 'cdp' || e.SPIKE_VIA === 'extension' || e.SPIKE_VIA === 'playwright') out.via = e.SPIKE_VIA;
   if (e.SPIKE_BRIDGE_PORT) out.bridgePort = Number(e.SPIKE_BRIDGE_PORT);
   if (e.SPIKE_BRIDGE_HOST) out.bridgeHost = e.SPIKE_BRIDGE_HOST;
   if (e.SPIKE_EXTENSION_DIR) out.extensionDir = e.SPIKE_EXTENSION_DIR;
@@ -190,6 +256,42 @@ function fromEnv(): Partial<QaConfig> {
   if (e.SPIKE_RUNNER_PORT) out.runnerPort = Number(e.SPIKE_RUNNER_PORT);
   if (e.SPIKE_FIXTURE_PORT) out.fixturePort = Number(e.SPIKE_FIXTURE_PORT);
   if (e.SPIKE_CHROME_PROFILE) out.chromeProfile = e.SPIKE_CHROME_PROFILE;
+  // A7
+  if (e.SPIKE_HEADLESS) out.headless = e.SPIKE_HEADLESS !== '0' && e.SPIKE_HEADLESS !== 'false';
+  if (e.SPIKE_NANO_CDP_PORT) out.nanoCdpPort = Number(e.SPIKE_NANO_CDP_PORT);
+  if (e.SPIKE_NANO_PROFILE_DIR) out.nanoProfileDir = e.SPIKE_NANO_PROFILE_DIR;
+  // A13: SPIKE_ROUTE_RULES is a JSON-encoded RouteRule[]; SPIKE_BLOCK_HOSTS is a
+  // comma list of glob patterns folded in as convenience 'block' rules (both
+  // may be present at once — block rules are appended, never replace explicit
+  // JSON rules). Malformed JSON is ignored rather than crashing config load.
+  {
+    const rules: RouteRule[] = [];
+    if (e.SPIKE_ROUTE_RULES) {
+      try {
+        const parsed: unknown = JSON.parse(e.SPIKE_ROUTE_RULES);
+        if (Array.isArray(parsed)) {
+          for (const r of parsed) {
+            if (r && typeof r === 'object' && typeof (r as RouteRule).urlPattern === 'string' && ((r as RouteRule).action === 'block' || (r as RouteRule).action === 'fail')) {
+              rules.push(r as RouteRule);
+            }
+          }
+        }
+      } catch { /* ignore malformed */ }
+    }
+    if (e.SPIKE_BLOCK_HOSTS) {
+      for (const pattern of e.SPIKE_BLOCK_HOSTS.split(',').map((h) => h.trim()).filter(Boolean)) {
+        rules.push({ urlPattern: pattern, action: 'block' });
+      }
+    }
+    if (rules.length) out.routeRules = rules;
+  }
+  if (e.SPIKE_VIEWPORT) {
+    const m = /^(\d+)x(\d+)$/.exec(e.SPIKE_VIEWPORT.trim());
+    if (m) out.emulation = { ...out.emulation, viewport: { width: Number(m[1]), height: Number(m[2]) } };
+  }
+  if (e.SPIKE_NETWORK_THROTTLE === 'offline' || e.SPIKE_NETWORK_THROTTLE === 'slow-3g' || e.SPIKE_NETWORK_THROTTLE === 'fast-3g') {
+    out.emulation = { ...out.emulation, networkThrottle: e.SPIKE_NETWORK_THROTTLE };
+  }
   if (e.SPIKE_GOOGLE_CLI_BIN) out.googleCliBin = e.SPIKE_GOOGLE_CLI_BIN;
   if (e.SPIKE_GOOGLE_CLI_MODEL) out.googleCliModel = e.SPIKE_GOOGLE_CLI_MODEL;
   if (e.GEMINI_API_KEY) out.geminiApiKey = e.GEMINI_API_KEY;

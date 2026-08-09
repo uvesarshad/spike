@@ -7,7 +7,7 @@ import CDP from 'chrome-remote-interface';
 import { ensureChrome, sleep, type LaunchOptions } from '../chrome/launch.js';
 import { attachCapture, type CaptureBuffers } from '../capture/console-network.js';
 import { setLogpointByContent } from '../capture/logpoints.js';
-import { snapshotAxTree } from '../capture/axtree.js';
+import { snapshotAxTree, TESTID_ATTRS } from '../capture/axtree.js';
 import { INVARIANT_PROBE_JS } from '../assertions/invariants.js';
 import {
   assertMutationHostAllowed,
@@ -665,6 +665,36 @@ export class CdpBrowser implements BrowserPort {
       const synthetic = `qa:${qaId}`;
       this.nodeMap.set(synthetic, backendNodeId);
       return synthetic;
+    } catch {
+      return null;
+    }
+  }
+
+  /** A8 (P1) live fallback for BrowserPort.findByTestId: the COMMON path
+   * resolves a testid straight out of the already-fetched AxSnapshot
+   * (`AxNode.testId`, populated once per snapshot in axtree.ts with no extra
+   * round-trip) — this method only runs when that misses (element rendered
+   * after the snapshot was taken, or pruned for an unrelated reason). Tries
+   * each attribute in TESTID_ATTRS in priority order (same list, same order,
+   * as the snapshot capture — see its doc comment) and returns on the first
+   * match; querying attributes one at a time (rather than one grouped CSS
+   * selector) is what lets `data-testid` win over `data-qa` on a page that
+   * happens to carry both, matching the snapshot's own priority. */
+  async findByTestId(testId: string): Promise<string | null> {
+    try {
+      const { root } = await this.c.DOM.getDocument({ depth: 0 });
+      const escaped = testId.replace(/"/g, '\\"');
+      for (const attr of TESTID_ATTRS) {
+        const { nodeId: domNodeId } = await this.c.DOM.querySelector({ nodeId: root.nodeId, selector: `[${attr}="${escaped}"]` });
+        if (!domNodeId) continue;
+        const { node } = await this.c.DOM.describeNode({ nodeId: domNodeId });
+        const backendNodeId = node.backendNodeId;
+        if (backendNodeId === undefined) continue;
+        const synthetic = `testid:${testId}`;
+        this.nodeMap.set(synthetic, backendNodeId);
+        return synthetic;
+      }
+      return null;
     } catch {
       return null;
     }

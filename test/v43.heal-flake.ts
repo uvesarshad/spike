@@ -132,6 +132,44 @@ console.log('\n=== v43 2/7: classifyHeal — an inserted wait step, assertions u
   check('reasons mention the added step', result.reasons.some((r) => /added/i.test(r)));
 }
 
+/* ===== 2b: an inserted INTERACTION step, assertions unchanged -> notice ===== */
+console.log('\n=== v43 2b: classifyHeal — an inserted click, assertions unchanged → notice ===');
+{
+  // Regression lock for the 2026-08-09 dogfood drift: the UI gained a required
+  // interaction, the AI re-derived a script with one extra `click`, and the
+  // original nav/wait-only insertion rule quarantined it — which made --heal
+  // useless for the exact case it exists to serve. Step count was never the
+  // safety property; assertions are, and they are unchanged here.
+  const oldS = baseScript();
+  const newS = withSteps(oldS, [
+    { type: 'navigate', url: 'http://localhost:9401/login' },
+    { type: 'type', target: { role: 'textbox', name: 'Email' }, text: 'test@test.com' },
+    { type: 'click', target: { role: 'button', name: 'Accept cookies' } }, // <-- new required interaction
+    { type: 'click', target: { role: 'button', name: 'Login' } },
+    { type: 'assert_dom', target: { role: 'status', name: 'Message' }, contains: 'Order confirmed successfully' },
+  ]);
+  const result = classifyHeal(oldS, newS);
+  check('inserted click is notice, not quarantine', result.tier === 'notice');
+}
+
+/* ===== 2c: an inserted ASSERTION still quarantines ===== */
+console.log('\n=== v43 2c: classifyHeal — an inserted assertion → quarantine ===');
+{
+  // The counterweight to 2b: widening insertions must NOT let a heal invent
+  // its own expectations. An AI marking its own homework is precisely what
+  // this gate exists to stop.
+  const oldS = baseScript();
+  const newS = withSteps(oldS, [
+    { type: 'navigate', url: 'http://localhost:9401/login' },
+    { type: 'type', target: { role: 'textbox', name: 'Email' }, text: 'test@test.com' },
+    { type: 'click', target: { role: 'button', name: 'Login' } },
+    { type: 'assert_dom', target: { role: 'status', name: 'Message' }, contains: 'ok' }, // <-- invented
+    { type: 'assert_dom', target: { role: 'status', name: 'Message' }, contains: 'Order confirmed successfully' },
+  ]);
+  const result = classifyHeal(oldS, newS);
+  check('inserted assertion quarantines', result.tier === 'quarantine');
+}
+
 /* ===================== 3/7: classifyHeal — quarantine: step removed ===================== */
 console.log('\n=== v43 3/7: classifyHeal — a step was removed → quarantine ===');
 {
