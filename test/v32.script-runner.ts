@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Vault } from '../src/vault/vault.js';
+import { Vault, FileKeyProvider } from '../src/vault/vault.js';
 import { runDriverLoop } from '../src/driver/loop.js';
 import { ArtifactStore } from '../src/report/artifacts.js';
 import { ModelRouter } from '../src/router/model-router.js';
@@ -200,7 +200,7 @@ function tmpArtifacts(): ArtifactStore {
 console.log('\n=== v32 2/2: script action end-to-end ===');
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-vault-script-'));
-  const vault = new Vault({ dir });
+  const vault = new Vault({ dir, keyProvider: new FileKeyProvider(path.join(dir, 'key.bin')) });
   const REAL = 'p@ssw0rd-REAL-VALUE';
   vault.set('LOGIN_PW', REAL);
 

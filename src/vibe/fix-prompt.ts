@@ -55,6 +55,8 @@ export function humanizeStep(step: StepRecord): string {
       return 'checked the console had no errors';
     case 'extract':
       return `extracted ${a.key} from ${targetPhrase ?? 'the page'}`;
+    case 'wait_for_email':
+      return `waited for a verification email${a.matching ? ` matching "${a.matching}"` : ''}`;
     case 'upload_file':
       return `uploaded ${a.paths.length === 1 ? 'a file' : `${a.paths.length} files`} to ${targetPhrase ?? 'a field'}`;
     case 'drag_and_drop':

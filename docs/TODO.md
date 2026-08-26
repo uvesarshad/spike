@@ -2,9 +2,123 @@
 
 > Status legend: `[x]` done · `[ ]` not started · `[~]` partial/in progress
 > Source of truth for scope: [`spike-agent-product-doc.md`](spike-agent-product-doc.md) §6.
-> Last updated: 2026-06-07 (MVP + Recorder shipped).
+> Last updated: 2026-08-27 (v0.2 — feature waves 1–5 + market-readiness hardening waves 1–5 landed).
 
 ---
+
+## Current state (v0.2)
+
+The MVP (Phase 0–3.5 below) shipped 2026-06-07 and has since had two further
+rounds of work layered on top of it, both on the `v0.2` branch:
+
+**Feature waves 1–5** (`19d7f13` → `1663ce1`, plus the integration-gap sweep
+`51eef1f`): unblocked the deterministic pillar and added the Tier-0 oracle;
+auto-waiting, cache verification, backoff, and a loud fallback path; the
+Playwright port, real assertions, a suite runner, and heal gating; an
+autonomy layer (`spike map` / `spike coverage`, parallel session isolation,
+resilient locators) plus a CI gate; a discovery CLI, a benchmark harness, and
+docs — then a sweep that wired 5 modules that existed in `src/` but were
+never called from anywhere real.
+
+**Market-readiness hardening, waves 1–4** (`649ec0e` → `cd71580`, from an
+audit numbered A1–A58 — see `docs/plan/26-08-27-audit-market-readiness.md`
+and its paired task list):
+
+- **Wave 1** — P0 engine reliability: deterministic oracles now gate the
+  verdict (`strictOracles`), the navigator-only degrade path no longer
+  silently caps out early, batch/node-map races and missing timeout classes
+  are closed, stdin EPIPE is handled, a run can no longer crash without
+  writing a report, Chrome-path override + profile-lock detection added.
+- **Wave 2** — P0 legal/docs + P1 hardening: `PRIVACY.md` and store-kit
+  placeholders filled in, `SECURITY.md` added, a third-party site redacted
+  from the docs, broken doc links fixed, auto-fix given a one-time consent
+  gate + input sanitization, untrusted-content framing added to
+  navigator/brain prompts, `trustTargetHost` disclosed.
+- **Wave 3** — P1 driver hardening + extension reliability: the live loop
+  routes through auto-waiting, the action cache verifies before executing
+  and no longer guesses on role/name collisions, MV3 service-worker
+  eviction and debugger-detach are handled gracefully, `Retry-After` is
+  honored across BYOK adapters, goal-driven work is bounded, the repeat
+  detector no longer false-positives on real progress, session leaks on
+  throw are closed.
+- **Wave 4** — CI/release plumbing + community files + P2 cleanup: the fast
+  test bucket is genuinely Chrome-free, CI runs a 3-OS matrix, the phantom
+  browser-suite CI job (which could only ever fail) was removed in favor of
+  documenting `npm run test:browser` as a local pre-release gate, a
+  tag-triggered publish workflow was added, `CONTRIBUTING.md` /
+  `CODE_OF_CONDUCT.md` landed, the `allowedHosts` subdomain-trust default
+  was tightened, CLI exit codes became a real 0/1/2/3 contract, and several
+  smaller P2 findings were closed.
+- **This session** (docs-only wave): README quickstart made POSIX-first with
+  a collapsed PowerShell block, the `npm audit` posture documented (README +
+  an `audit-note` comment in `src/mcp-server.ts`), the private product name
+  used as a dogfood-target example redacted to "a real production app",
+  this file rewritten to reflect the above, README given a genuine $0
+  quickstart story + a real command table + a Requirements block, and the
+  macOS/Linux vault-key asymmetry documented in README + `PRIVACY.md`.
+
+Full finding-by-finding detail (severity-tagged, with file:line evidence)
+lives in `docs/plan/26-08-27-audit-market-readiness.md`; the matching task
+list (what's done, what's left, in execution order) is
+`docs/plan/26-08-27-tasks-market-readiness.md`.
+
+## Open items (genuinely open, as of 2026-08-27)
+
+**⛔ Owner-only** — real-world actions no agent can do autonomously:
+
+- [ ] Push the `v0.2`/`main` branches to GitHub and get the first genuinely
+      green CI run (`.github/workflows/ci.yml` has never executed against a
+      remote).
+- [ ] Submit the extension to the Chrome Web Store (trusted-tester first) to
+      test `debugger` + `<all_urls>` approvability.
+- [ ] Decide the fate of the internal strategy docs (product doc, demand
+      research, raw internal audits) — keep public, move private, or trim.
+- [ ] Verify `spike-agent` is free on npm; weigh "Spike" Web-Store
+      discoverability before first publish.
+- [ ] Pick the launch version number (both `package.json` and
+      `extension/manifest.json` — Web Store versions can only increase).
+- [ ] Record the README demo GIF and publish the token-cost benchmark table
+      (needs a live run against real Chrome + real keys).
+
+**Still open — code/docs work:**
+
+- [ ] Mark Nano-as-navigator "Experimental" in the extension panel and in
+      README's settings/navigator section (it works, but has known rough
+      edges — guessed URLs, repeated failing navigation — see `CLAUDE.md`).
+- [ ] Long-run hygiene: expire stale entries in the network `pending` map,
+      subscribe `Inspector.targetCrashed` and abort with a clear message,
+      drain console/network buffers on a timer during long LLM waits (not
+      only per executed action).
+- [ ] Slim the published npm package: drop sourcemaps from the publish
+      build, make `playwright-core` an optional/lazily-imported dependency
+      (it only backs `--via playwright`).
+- [ ] Verify extension icon provenance against `scripts/gen-icons.ts`
+      output.
+- [ ] **OS-keychain vault backends** (`KeychainKeyProvider` for macOS,
+      `LibsecretKeyProvider` for Linux) — closes the vault-key asymmetry
+      documented this session in README/`PRIVACY.md`; not started as of this
+      writing (only `src/vault/dpapi-key-provider.ts` exists today).
+- [ ] Wire the existing-but-unused email/OTP module (`src/email/`) into the
+      driver as a `wait_for_email` action.
+- [ ] Confirm `strictOracles` (deterministic verdicts) is discoverable in
+      `spike config`, the panel Settings, and called out in README as a
+      headline feature, not just implemented.
+- [ ] Surface `spike map`/`spike coverage` output in the extension side
+      panel (currently CLI-only; GUI/vibe-mode users can't see it).
+- [ ] An `activeTab`-narrowed fallback extension build/manifest, so a Web
+      Store rejection over `<all_urls>` has a same-day fallback answer.
+- [ ] Unbranded-Chromium support behind the branded-Chrome candidate list
+      (with a clear "Nano needs Google Chrome" message when Chromium is
+      detected instead).
+- [ ] Feed the `spike map` discovery app-model into the brain's goal-planning
+      prompt when one exists for the target host.
+
+---
+
+## Old phase history
+
+<details>
+<summary>Phase 0–3.6 — original MVP build log (2026-06-06 to 2026-06-07), before the v0.2 hardening waves above</summary>
 
 ## Phase 0 — Spikes (de-risk the two novel bets) ✅ complete
 
@@ -58,7 +172,7 @@
 - [x] README (about, how it works, stack, workflow, timeline) · architecture explainer (non-expert) · CLAUDE.md · Apache-2.0
 
 ### MVP follow-ups (known gaps, not blockers)
-- [ ] Dogfood against a real app (MontrAI social module) — user is preparing; will test on a different app
+- [ ] Dogfood against a real production app — user is preparing; will test on a different app
 - [ ] Planner latency: ~12–20s/call on free CLI quota (CLI boot dominates) — consider persistent BYOK planning as default-when-key-present
 - [x] React controlled inputs: SETTLED — `Input.insertText` satisfies React 18 (fires beforeinput/input like IME; `test/v18.react-typing.ts` 4/4 against real React + `/react` fixture route). Defense-in-depth added anyway: type() always verifies the live `.value`, falls back to per-char key events, throws precisely — silent typing failures are dead
 - [ ] a11y-tree size on real SPAs — measure, tune the truncation window
@@ -130,7 +244,7 @@
 
 ## Phase 3.6 — Pre-launch hardening round (scoped 2026-06-07)
 
-> Items 5–11 from the remaining-work review — ALL SHIPPED 2026-06-07. Dogfood (MontrAI/other app) runs in parallel on the user's side.
+> Items 5–11 from the remaining-work review — ALL SHIPPED 2026-06-07. Dogfood (a real production app) runs in parallel on the user's side.
 
 - [x] **#5 Fast planning when BYOK key present**: plan-step ladder puts rung 2 before rung 1 when a key is live (`preferFreePlanner: true` opts back to free-first); visual verdicts unchanged (Nano first). m4 8/8 held.
 - [x] **#6 Recorder `nth` auto-populate**: loop records the acted node's index among role+name duplicates (`rankByRoleName`, document order — same traversal as replay/codegen); flows into scripts automatically. v21.
@@ -140,10 +254,15 @@
 - [x] **#10 Interaction consent UX**: CLI repeatable `--allow-host` on run/replay (appends to allowedHosts); panel pre-run checkbox "Allow the agent to click & type on this site" (amber third-party note) → `allowHost` through vibe.run.
 - [x] **#11 Multi-Chrome bridge multiplexing**: BridgeServer tracks N clients (clientId per socket, origin-checked response routing, per-client pending cleanup); ExtensionBrowser/cdp-shim bind to a clientId; VibeService routes the whole run + all UI events back to the ASKING Chrome. v24 proof: two Chromes on ONE bridge port, tab created via A undrivable via B, A's run untouched by B. v24 9/9; v7/v3/v17 held.
 
-## Phase 4 — Later (tracked, not scoped)
+</details>
+
+<details>
+<summary>Phase 4 — Later (tracked, not scoped) — pre-v0.2 list, superseded by "Open items" above</summary>
 
 - [x] Tier-4 guardrail core (2026-06-07): AES-256-GCM vault (`spike secret`, `{{secret:NAME}}` resolved at execute-time only — placeholders everywhere else: prompts/reports/scripts/audit), read-only-by-default outside allowedHosts, per-action audit.log. Still open: confirm-on-mutation UX, OS-keychain key backend, secret redaction in screenshots/clips
 - [x] Ollama adapter (rung 3) implemented — untested against a live Ollama (none on this machine)
 - [ ] "Throw anything at it" goal mode (WordPress/Stripe/DNS troubleshooting)
-- [ ] Launch: OSS polish, token-cost benchmark table (vs Playwright MCP / Claude in Chrome), Show HN + split-screen Lovable demo video
+- [ ] Launch: OSS polish, token-cost benchmark table (vs Playwright MCP / Claude in Chrome), Show HN + split-screen demo video
 - [ ] 2026-06-18: Gemini CLI → Antigravity CLI transition — flip `googleCliBin` config, verify `-p`/`--output-format` parity
+
+</details>

@@ -7,6 +7,43 @@
 
 ---
 
+## 0. Submission strategy: two manifest variants
+
+There are now **two** buildable manifests, packaged separately:
+
+- **Default** (`extension/manifest.json`) — `host_permissions: ["<all_urls>"]` +
+  `debugger`. Full functionality: the daemon/pro-mode path can attach to any
+  tab it names (e.g. opening a fresh isolated tab per test run), not just the
+  tab the side panel happens to be open on. Build with `npm run pack:extension`
+  → `dist/extension.zip`. **This is the one submitted first.**
+- **`activeTab`-narrowed fallback** (`extension/manifest.activetab.json`) — drops
+  `host_permissions` entirely, keeps `debugger`, adds `activeTab`. Build with
+  `npx tsx scripts/pack-extension.ts --variant activetab` → `dist/extension-activetab.zip`.
+  The service worker (`extension/sw.js`) gates on a `MANIFEST_VARIANT` constant
+  that the packer token-replaces at build time: when it's `'activetab'`, the
+  debugger-attach path (`attachDebugger()`) refuses to attach to any tab other
+  than the one the user just invoked the extension on (tracked as
+  `lastRunTabId`, set from the panel's own active-tab id on every run request).
+  That means the daemon/pro-mode "attach to an arbitrary tab id" and "create a
+  fresh isolated tab" flows are blocked in this build — it only drives the
+  single tab the side panel is open on. Reduced functionality, but it needs no
+  standing `<all_urls>` grant.
+
+**Why two builds exist:** finding A15 (`docs/plan/26-08-27-audit-market-readiness.md`)
+flags `debugger` + `<all_urls>` + `tabCapture` together as an untested,
+elevated-rejection-risk permission combination for Chrome Web Store review. The
+default build is submitted first because it's the fully-functional product;
+if the Store rejects it specifically over `<all_urls>`, the `activeTab` build
+is a same-day resubmission with a narrower permission footprint and no code
+changes needed beyond the pack flag above — it was built ahead of time so that
+gap doesn't turn into a multi-day scramble.
+
+**This section documents the code-level contingency only.** Whether/when to
+actually submit either build, and how to respond to a specific rejection
+reason, is an owner decision (A15) — not made here.
+
+---
+
 ## 1. Store listing
 
 **Item name**
@@ -131,7 +168,9 @@ Store icon (128px) is already in the package (`extension/icons/icon128.png`).
 
 ## 6. Pre-upload checklist
 
-- [ ] `npm run pack:extension` → `dist/extension.zip` (manifest at zip root).
+- [ ] `npm run pack:extension` → `dist/extension.zip` (manifest at zip root). If
+      this build is rejected over `debugger` + `<all_urls>`, see §0 for the
+      pre-built `activeTab`-narrowed fallback (`--variant activetab`).
 - [ ] Manifest `version` is correct (currently `0.0.1`).
 - [ ] No `key` field or dev-only entries in `manifest.json` (verified: none).
 - [ ] Privacy policy hosted; URL pasted in §4.

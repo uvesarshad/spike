@@ -14,7 +14,10 @@
  * contract and is injected via the Vault constructor — no change to the
  * encryption path or the public API. The first such backend, DpapiKeyProvider
  * (Windows DPAPI, no native deps), is now the DEFAULT on Windows — see the
- * provider-selection rule in the Vault constructor. */
+ * provider-selection rule in the Vault constructor. KeychainKeyProvider
+ * (macOS Keychain) and LibsecretKeyProvider (Linux Secret Service) are the
+ * matching defaults on those platforms, when available (see
+ * defaultKeyProvider() below). */
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -22,6 +25,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { DpapiKeyProvider } from './dpapi-key-provider.js';
+import { KeychainKeyProvider, isKeychainAvailable } from './keychain-key-provider.js';
+import { LibsecretKeyProvider, isLibsecretAvailable } from './libsecret-key-provider.js';
 import { migrateLegacyPath } from '../env-compat.js';
 
 const ALGO = 'aes-256-gcm';
@@ -79,7 +84,8 @@ export interface VaultOptions {
   /** Vault directory (default %LOCALAPPDATA%/qa-subagent-vault). */
   dir?: string;
   /** Key backend — when omitted, selected by platform/migration rule (see the
-   * Vault constructor): DPAPI on Windows for new vaults, else FileKeyProvider. */
+   * Vault constructor): DPAPI on Windows / Keychain on macOS / libsecret on
+   * Linux for new vaults (when available), else FileKeyProvider. */
   keyProvider?: KeyProvider;
 }
 
@@ -88,15 +94,26 @@ export interface VaultOptions {
  * MIGRATION RULE (back-compat is non-negotiable — existing secrets must stay
  * readable):
  *  - If a legacy <dir>/key.bin already exists, KEEP FileKeyProvider so secrets
- *    encrypted under that key still decrypt. We never auto-migrate the key.
+ *    encrypted under that key still decrypt. We NEVER auto-migrate an existing
+ *    vault onto a different backend, on ANY platform — that's the one rule
+ *    every OS-native provider (DPAPI, Keychain, libsecret) is built around.
  *  - Else on Windows (win32), use DpapiKeyProvider — the wrapped key (key.dpapi)
  *    is bound to the Windows user account, a strict upgrade over a raw key.bin.
- *  - Else (non-Windows, no key.bin), FileKeyProvider over key.bin (the
- *    cross-platform fallback; DPAPI is Windows-only). */
+ *  - Else on macOS (darwin), use KeychainKeyProvider IF the `security` CLI is
+ *    available (isKeychainAvailable()) — same strict-upgrade reasoning as
+ *    DPAPI. If unavailable, fall back to FileKeyProvider rather than fail.
+ *  - Else on Linux, use LibsecretKeyProvider IF `secret-tool` + a keyring
+ *    daemon are reachable (isLibsecretAvailable()) — many desktop Linux boxes
+ *    have one, but headless/minimal ones don't, so this is probed rather than
+ *    assumed. If unavailable, fall back to FileKeyProvider rather than fail.
+ *  - Else (no OS-native backend available, no key.bin), FileKeyProvider over
+ *    key.bin (the universal cross-platform fallback). */
 function defaultKeyProvider(dir: string): KeyProvider {
   const legacyKeyBin = path.join(dir, 'key.bin');
   if (fs.existsSync(legacyKeyBin)) return new FileKeyProvider(legacyKeyBin);
   if (process.platform === 'win32') return new DpapiKeyProvider(dir);
+  if (process.platform === 'darwin' && isKeychainAvailable()) return new KeychainKeyProvider();
+  if (process.platform === 'linux' && isLibsecretAvailable()) return new LibsecretKeyProvider();
   return new FileKeyProvider(legacyKeyBin);
 }
 

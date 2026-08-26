@@ -21,6 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Vault, FileKeyProvider } from '../src/vault/vault.js';
 import { DpapiKeyProvider } from '../src/vault/dpapi-key-provider.js';
+import { __setShellRunner } from '../src/vault/shell-runner.js';
 
 const checks: [string, boolean][] = [];
 const check = (label: string, ok: boolean) => {
@@ -115,12 +116,28 @@ if (isWin) {
   check('empty win32 dir: key.dpapi created', fs.existsSync(path.join(dir, 'key.dpapi')));
   check('empty win32 dir: key.bin NOT created', !fs.existsSync(path.join(dir, 'key.bin')));
 } else {
-  // off-Windows the fresh-dir default is FileKeyProvider
-  const dir = tmp('fresh-non-win');
-  const vault = new Vault({ dir });
-  vault.set('K', 'v');
-  check('empty non-win dir: key.bin created (FileKeyProvider fallback)', fs.existsSync(path.join(dir, 'key.bin')));
-  check('empty non-win dir: key.dpapi NOT created', !fs.existsSync(path.join(dir, 'key.dpapi')));
+  // Off-Windows, the fresh-dir default now PREFERS the OS-native keychain
+  // (macOS Keychain / Linux libsecret) when available — see src/vault/vault.ts's
+  // defaultKeyProvider() and test/v68.keychain-vault.ts for that path in full.
+  // This test is specifically about the FileKeyProvider FALLBACK, so it stubs
+  // the shell runner to simulate "no native keychain available" (ENOENT) —
+  // deterministic on every machine, and never touches this developer's real
+  // OS keychain regardless of what happens to be installed here.
+  const prevRunner = __setShellRunner((_file, _args, _input) => ({
+    status: null,
+    stdout: '',
+    stderr: '',
+    spawnError: new Error('ENOENT (stubbed — no native keychain in this test)'),
+  }));
+  try {
+    const dir = tmp('fresh-non-win');
+    const vault = new Vault({ dir });
+    vault.set('K', 'v');
+    check('empty non-win dir, no native keychain: key.bin created (FileKeyProvider fallback)', fs.existsSync(path.join(dir, 'key.bin')));
+    check('empty non-win dir, no native keychain: key.dpapi NOT created', !fs.existsSync(path.join(dir, 'key.dpapi')));
+  } finally {
+    __setShellRunner(prevRunner);
+  }
 }
 
 /* ===================== summary ===================== */

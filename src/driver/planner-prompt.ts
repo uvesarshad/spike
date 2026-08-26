@@ -88,6 +88,7 @@ export const ACTION_RULES_AND_VOCABULARY = `- Interact via nodeIds from the tree
 - Use select_option for native select/combobox controls when the desired value or visible option text is known.
 - Use hover for hover menus/tooltips, press_key for keyboard shortcuts or focused controls, reload to refresh the current page, and go_back to return to the previous page.
 - Use extract to store visible IDs/codes/order numbers into {{run.key}} for later steps; provide a regex pattern when the target contains extra text. When the value isn't a clean single line (e.g. "the order number somewhere in this confirmation paragraph"), give a "prompt" instead of/with "pattern" — a cheap text model reads the (subtree or whole-page) text and pulls the value out; omit nodeId to search the whole page.
+- Use wait_for_email when a flow sends a verification email (signup, password reset, magic link) — it polls the configured inbox until a matching message arrives (use "matching" to filter by subject/body substring) and, when "extractOtpTo" is set, stores the code as {{run.key}} the same way extract does. It fails cleanly if no email provider is configured for this run.
 - Use assert_dom (free) to check visible text; use assert_visual ONLY when correctness must be judged from how the page looks (layout, error banners, missing content).
 - Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode. Video judging is an opt-in, costly feature — when it is off the run still gets a screenshot verdict, just not of the animation mid-flight.
 - Use upload_file to set files on a native file input (an <input type="file"> element) — pass real, existing paths.
@@ -133,6 +134,7 @@ Action types:
 - {"type":"extract","nodeId":string,"key":string,"pattern":string} // store visible text/regex capture as {{run.key}}; or {"type":"extract","key":string,"prompt":string} for model-assisted extraction (nodeId optional)
 - {"type":"script","steps":[{...same verbs as above, no assert_visual/finish/script}]}
 - {"type":"wait","ms":number}
+- {"type":"wait_for_email","matching":string,"extractOtpTo":string,"timeoutMs":number} // all optional; poll the configured inbox for a verification email
 - {"type":"finish","verdict":"pass"|"fail","reason":string}`;
 
 /* ------------------------------------------------------------------------- *
@@ -153,6 +155,11 @@ export interface GoalPlannerContext {
   currentGoal?: number;
   /** Why the navigator escalated (present on escalation). */
   failure?: string;
+  /** A short summary of a previous `spike map` crawl of this same host (from
+   * `.spike/app-model.json`), pre-truncated to a ~300 token budget by the
+   * caller (loop.ts) — see loadSiteMapSummary(). Absent when no app-model
+   * file exists, it doesn't cover this host, or it's too stale to trust. */
+  siteMapSummary?: string;
 }
 
 /** The BRAIN prompt. First call: task + current page → an ordered sub-goal
@@ -173,7 +180,7 @@ ${UNTRUSTED_CONTENT_NOTICE}
 
 CURRENT PAGE (accessibility tree; the navigator references nodeIds like n7 — you do not):
 ${ctx.axText}
-${
+${ctx.siteMapSummary ? `\nKNOWN SITE MAP (from a previous crawl; may be stale — trust the live page over this):\n${ctx.siteMapSummary}\n` : ''}${
   escalating
     ? `
 The navigator is STUCK and has escalated to you.

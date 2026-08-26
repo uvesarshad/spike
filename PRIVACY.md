@@ -60,7 +60,7 @@ Provider data‑retention and training‑on‑inputs practices vary and may chan
 
 ## API keys and secrets
 
-- **API keys** you provide are stored in an **encrypted, on‑device vault** (AES‑256‑GCM; on Windows the encryption key is protected by the OS DPAPI bound to your user account, otherwise a local key file). Keys are decrypted only in memory at request time and sent **only** to the matching provider's API endpoint to authenticate your requests. **We never receive your keys.**
+- **API keys** you provide are stored in an **encrypted, on‑device vault** (AES‑256‑GCM). The vault's encryption key itself is protected differently by platform: on **Windows**, it's wrapped by the OS DPAPI, bound to your user account. On **macOS/Linux**, it is currently a **local key file with `0600` permissions** (owner‑read/write only) rather than OS‑keychain‑backed — a deliberate v1 tradeoff, disclosed here rather than hidden. OS‑keychain backends (macOS Keychain, Linux `libsecret`) are **planned** to bring those platforms to keychain‑backed parity with Windows' DPAPI. Keys are decrypted only in memory at request time and sent **only** to the matching provider's API endpoint to authenticate your requests. **We never receive your keys.**
 - **Secrets** you reference in a task as `{{secret:NAME}}` (e.g. login passwords) are also stored in the encrypted vault and are **never sent to any AI model**. They are substituted into the page only at the moment of typing, locally.
 
 ## What we do *not* do

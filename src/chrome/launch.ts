@@ -22,6 +22,47 @@ import CDP from 'chrome-remote-interface';
  * any Linux/Chromium/Chrome-for-Testing user or non-default install path —
  * see docs/plan/26-08-27-audit-market-readiness.md A10).
  */
+/** "Chromium support" enhancement (docs/plan/26-08-27-audit-market-readiness.md
+ * Suggested Enhancements, after A10): branded Chrome candidates first, common
+ * Chromium install paths as fallbacks BEHIND them — so a box with both
+ * installed still launches branded Chrome (Nano/the Prompt API is
+ * Chrome-only; see isChromiumPath() below and nano-runner-page.ts's
+ * unavailableHint()), while a Chromium-only box can still launch and drive
+ * at all instead of hard-failing with "chrome executable not found". Split
+ * out to a pure function so it (and pickFirstExisting()) are unit-testable
+ * without touching real system paths — see test/v64.chromium-candidates.ts. */
+export function chromeCandidates(): string[] {
+  return [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    path.join(process.env.LOCALAPPDATA ?? '', 'Google\\Chrome\\Application\\chrome.exe'),
+    '/usr/bin/google-chrome',
+    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    // Chromium fallbacks — deliberately last.
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/snap/bin/chromium',
+    '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  ];
+}
+
+/** First candidate that exists on disk, in priority order. Pure/testable —
+ * no env, no SPIKE_CHROME_PATH override logic (that's findChrome()'s job). */
+export function pickFirstExisting(candidates: string[]): string | undefined {
+  return candidates.find((p) => p && fs.existsSync(p));
+}
+
+/** Best-effort: is `chromePath` a Chromium (not branded Chrome) executable?
+ * Used post-launch to make the Nano "unavailable" hint accurate (Nano/the
+ * Prompt API is Chrome-only) rather than generic — see
+ * nano-runner-page.ts's unavailableHint(). Path-name heuristic only; a
+ * custom SPIKE_CHROME_PATH override with an unconventional name won't be
+ * caught, which is fine — this only sharpens a message, it never gates
+ * behavior. */
+export function isChromiumPath(chromePath: string): boolean {
+  return /chromium/i.test(chromePath);
+}
+
 export function findChrome(chromePath?: string): string {
   const override = process.env.SPIKE_CHROME_PATH || chromePath;
   if (override) {
@@ -33,14 +74,7 @@ export function findChrome(chromePath?: string): string {
     }
     return override;
   }
-  const candidates = [
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    path.join(process.env.LOCALAPPDATA ?? '', 'Google\\Chrome\\Application\\chrome.exe'),
-    '/usr/bin/google-chrome',
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  ];
-  const found = candidates.find((p) => p && fs.existsSync(p));
+  const found = pickFirstExisting(chromeCandidates());
   if (!found) {
     throw new Error(
       'chrome executable not found in standard locations. Set the SPIKE_CHROME_PATH env var ' +

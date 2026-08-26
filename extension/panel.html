@@ -56,7 +56,7 @@
 
             <label class="settings-field-label" for="setNavProvider">Provider</label>
             <select id="setNavProvider" class="settings-select">
-              <option value="nano">Gemini Nano (on-device)</option>
+              <option value="nano">Gemini Nano (on-device) — Experimental</option>
               <option value="gemini">Gemini</option>
               <option value="claude">Claude</option>
               <option value="gpt">GPT</option>
@@ -77,7 +77,7 @@
 
             <div id="setNavNanoNote" class="settings-note" hidden>
               <span class="ico" data-icon="info"></span>
-              <span><b>On-device AI (Gemini Nano)</b> runs free on every step, but needs a one-time ~2&nbsp;GB download and a recent GPU.</span>
+              <span><b>On-device AI (Gemini Nano)</b> runs free on every step, but needs a one-time ~2&nbsp;GB download and a recent GPU. <b>Experimental</b> as a navigator — it can guess wrong URLs or repeat a failed step; for a more reliable default, use a cheap vision cloud navigator (Gemini Flash or Claude Haiku via BYOK).</span>
             </div>
             <button id="setNavNanoDownload" class="nano-download-btn" type="button" hidden>Download on-device AI (~2&nbsp;GB)</button>
 
@@ -332,6 +332,21 @@
         <span class="history-label">Recent runs</span>
       </button>
       <div id="historyList" class="history-list" hidden></div>
+    </section>
+
+    <!-- A51: read-only summary of the discovery layer (`spike map` / `spike
+         coverage`) for the current tab's host, when one exists. No mutation
+         from the panel — see siteMapContent's "run `spike map <url>`" hint
+         when no data is present yet. Reuses the history-* card classes
+         (collapsed by default, same toggle pattern) rather than new CSS. -->
+    <section id="siteMapSection" class="history-section">
+      <button id="siteMapToggle" class="history-toggle" type="button" aria-expanded="false">
+        <span class="history-caret" data-icon="chevron"></span>
+        <span class="history-label">Site map</span>
+      </button>
+      <div id="siteMapBody" class="history-list" hidden>
+        <div id="siteMapContent"></div>
+      </div>
     </section>
   </main>
 

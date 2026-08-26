@@ -15,7 +15,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import CDP from 'chrome-remote-interface';
-import { ensureChrome, evalIn, sleep } from '../chrome/launch.js';
+import { ensureChrome, evalIn, sleep, findChrome, isChromiumPath } from '../chrome/launch.js';
 import { RUNNER_HTML, RUNNER_JS } from './runner-assets.js';
 import type { NanoAvailability, NanoPort, NanoVerdict } from './nano-port.js';
 
@@ -105,6 +105,14 @@ export class NanoRunnerPage implements NanoPort {
   private serverAcquired = false;
   private client: CDP.Client | null = null;
   private tabId: string | null = null;
+  /** "Chromium support" enhancement: best-effort re-resolution of the same
+   * candidate list ensureChrome() itself just used to launch/reuse the
+   * daemon's Chrome (NanoRunnerOptions carries no chromePath today, so this
+   * mirrors that exact resolution — see start() below), so unavailableHint()
+   * can say WHY when it's Chromium rather than branded Chrome (the Prompt
+   * API is Chrome-only). Detection failure never breaks start() — it just
+   * leaves the hint generic. */
+  private isChromium = false;
 
   constructor(private readonly opts: NanoRunnerOptions) {}
 
@@ -128,6 +136,11 @@ export class NanoRunnerPage implements NanoPort {
         profileDir: this.opts.profileDir,
         headless: false, // see header comment
       });
+      try {
+        this.isChromium = isChromiumPath(findChrome());
+      } catch {
+        // best-effort only — never let hint detection break start()
+      }
 
       // reuse a surviving runner tab (warm model) before opening a new one
       const targets = await CDP.List({ port: this.opts.cdpPort });
@@ -228,15 +241,22 @@ export class NanoRunnerPage implements NanoPort {
   }
 
   private unavailableHint(a: NanoAvailability): string {
+    // "Chromium support" enhancement: Nano/the Prompt API is Chrome-only, so
+    // a Chromium-launched daemon will never pass this gate no matter how
+    // much free disk it has — say so up front rather than sending the user
+    // chasing the storage/GPU checklist below.
+    const chromiumNote = this.isChromium
+      ? ' Chromium detected: Gemini Nano requires Google Chrome (the Prompt API is Chrome-only) — install branded Chrome or point SPIKE_CHROME_PATH at it.'
+      : '';
     if (a === 'api-missing') {
-      return 'Prompt API not exposed — need desktop Chrome 138+ (multimodal: 148+) on a secure context.';
+      return `Prompt API not exposed — need desktop Chrome 138+ (multimodal: 148+) on a secure context.${chromiumNote}`;
     }
     const free = freeGiBOnVolume(this.opts.profileDir);
     const storage =
       free !== null && free < 22
         ? ` Likely cause: Gemini Nano needs 22 GB free on the volume holding the Chrome profile, and ${path.parse(path.resolve(this.opts.profileDir)).root} has only ${free.toFixed(1)} GB free. Move the profile (SPIKE_CHROME_PROFILE) to a roomier volume.`
         : ' Check chrome://on-device-internals for the exact gate (storage, GPU, or platform).';
-    return `Gemini Nano reports 'unavailable'.${storage}`;
+    return `Gemini Nano reports 'unavailable'.${chromiumNote}${storage}`;
   }
 }
 

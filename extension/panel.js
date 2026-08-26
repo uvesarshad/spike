@@ -15,6 +15,8 @@
  *                 { kind:'status' }
  *                 { kind:'nano' }
  *                 { kind:'bridge-status' }
+ *                 { kind:'map-get', host }       (A51: read-only site-map summary)
+ *                 { kind:'coverage-get', host }  (A51: read-only coverage breakdown)
  *   SW -> panel : { kind:'accepted', accepted? }
  *                 { kind:'error', message }       (run rejected / daemon down)
  *                 { kind:'cancelled', cancelled }  (relayed vibe.cancel result)
@@ -34,6 +36,10 @@
  *                 { kind:'error', message }       (relayed vibe.error)
  *                 { kind:<plan|click|type|navigate|assert|wait|finish>,
  *                   index, text, ok? }            (relayed vibe.step — see below)
+ *                 { kind:'map', present, routeCount?, stateCount?, lastMappedAt?,
+ *                   baseUrl? }                    (A51: relayed vibe.map.get)
+ *                 { kind:'coverage', present, routes?, interactiveElements?,
+ *                   perRoute? }                   (A51: relayed vibe.coverage.get)
  *
  * STEP-EVENT KIND COLLISION
  * The daemon emits vibe.step events with params { index, kind, text, ok }. The
@@ -95,6 +101,11 @@ const nanoGate = $('nanoGate');
 const historySection = $('historySection');
 const historyToggle = $('historyToggle');
 const historyList = $('historyList');
+// A51: "Site map" card — read-only summary of `.spike/app-model.json` (built
+// by `spike map`/`spike coverage`) for the current tab's host.
+const siteMapToggle = $('siteMapToggle');
+const siteMapBody = $('siteMapBody');
+const siteMapContent = $('siteMapContent');
 
 // settings
 const settingsBtn = $('settingsBtn');
@@ -267,6 +278,13 @@ let activeTab = null; // { id, url, title, favIconUrl }
 // the timeline row that is still "in flight" (latest step while busy)
 let pendingStepRow = null;
 
+// A51: last vibe.map.get / vibe.coverage.get results (see onPortMessage's
+// 'map'/'coverage' cases) and the host they were last requested for, so a
+// same-host tab re-render (favicon/title-only updates) doesn't re-fetch.
+let lastMapInfo = null;
+let lastCoverageInfo = null;
+let siteMapRequestedHost = null;
+
 // ---- port ------------------------------------------------------------------
 let port = connectPort();
 
@@ -362,6 +380,14 @@ function onPortMessage(msg) {
     case 'clip-error':
       onClipError(msg.message);
       break;
+    case 'map':
+      lastMapInfo = msg;
+      renderSiteMapCard();
+      break;
+    case 'coverage':
+      lastCoverageInfo = msg;
+      renderSiteMapCard();
+      break;
     case 'config':
       currentConfig = msg;
       if (typeof msg.debugMode === 'string') debugMode = msg.debugMode;
@@ -380,6 +406,12 @@ function onPortMessage(msg) {
 // compatible } — not just a boolean, so we can tell "no daemon" apart from
 // "daemon connected but too old to trust" and never show a plain green dot
 // for the latter.
+// A51: whether the last setBridge() call saw a usable (healthy) daemon —
+// lets a reconnect re-trigger the "Site map" fetch below, since a request
+// made while the daemon was down was answered with present:false and would
+// otherwise stay cached under requestSiteMap()'s same-host de-dupe forever.
+let wasBridgeHealthyForSiteMap = false;
+
 function setBridge(msg) {
   const connected = !!(msg && msg.connected);
   bridgeConnected = connected;
@@ -398,6 +430,13 @@ function setBridge(msg) {
   // daemon-gated UI: the auto-fix toggle warning + the download-clip button
   refreshAutoFixGate();
   refreshClipVisibility();
+
+  const healthyNow = bridgeHealthy();
+  if (healthyNow && !wasBridgeHealthyForSiteMap) {
+    siteMapRequestedHost = null; // force requestSiteMap() to re-fetch below
+    requestSiteMap();
+  }
+  wasBridgeHealthyForSiteMap = healthyNow;
 }
 
 function setNano(availability) {
@@ -566,6 +605,99 @@ function renderTabCard() {
   tabWarning.hidden = testable;
   refreshConsent();
   refreshRunEnabled();
+  requestSiteMap();
+}
+
+// ---- A51: "Site map" card ---------------------------------------------------
+/** Asks the SW (which asks the daemon) for the current tab's discovery-layer
+ * summary. Re-fetches only when the host actually changes (same de-dupe shape
+ * as refreshConsent's consentInitHost) so repeated renderTabCard() calls for
+ * the same page (favicon/title-only updates) don't re-request. Read-only —
+ * this never triggers a crawl, it only reads what `spike map`/`spike
+ * coverage` already wrote to disk. */
+function requestSiteMap() {
+  const testable = activeTab && isTestableUrl(activeTab.url);
+  if (!testable) {
+    siteMapRequestedHost = null;
+    lastMapInfo = null;
+    lastCoverageInfo = null;
+    renderSiteMapCard();
+    return;
+  }
+  const host = hostOf(activeTab.url);
+  if (host === siteMapRequestedHost) return;
+  siteMapRequestedHost = host;
+  postToSW({ kind: 'map-get', host });
+  postToSW({ kind: 'coverage-get', host });
+}
+
+/** Renders the "Site map" card body from the last vibe.map.get / vibe.coverage.get
+ * results: a route/state/last-mapped summary plus a per-route covered/uncovered
+ * list when both are present, or a hint to run `spike map` when absent. Purely
+ * informational — no control here triggers a map/crawl from the panel. */
+function renderSiteMapCard() {
+  if (!siteMapContent) return;
+  siteMapContent.textContent = '';
+
+  if (!lastMapInfo || !lastMapInfo.present) {
+    const hint = document.createElement('div');
+    hint.className = 'settings-note';
+    const icon = document.createElement('span');
+    icon.className = 'ico';
+    icon.setAttribute('data-icon', 'info');
+    hint.appendChild(icon);
+    const text = document.createElement('span');
+    const target = activeTab && isTestableUrl(activeTab.url) ? new URL(activeTab.url).origin : '<url>';
+    text.textContent = `No site map yet for this site. Run "spike map ${target}" (and "spike coverage") in a terminal to build one, then reopen this panel.`;
+    hint.appendChild(text);
+    siteMapContent.appendChild(hint);
+    return;
+  }
+
+  const summary = document.createElement('div');
+  summary.className = 'settings-group-sub';
+  const routeWord = lastMapInfo.routeCount === 1 ? 'route' : 'routes';
+  const stateWord = lastMapInfo.stateCount === 1 ? 'state' : 'states';
+  const lastMapped = lastMapInfo.lastMappedAt ? new Date(lastMapInfo.lastMappedAt).toLocaleString() : 'unknown';
+  summary.textContent = `${lastMapInfo.routeCount} ${routeWord} · ${lastMapInfo.stateCount} ${stateWord} · last mapped ${lastMapped}`;
+  siteMapContent.appendChild(summary);
+
+  if (lastCoverageInfo && lastCoverageInfo.present) {
+    const cov = lastCoverageInfo.routes;
+    if (cov && typeof cov.exercised === 'number' && typeof cov.total === 'number') {
+      const covLine = document.createElement('div');
+      covLine.className = 'settings-group-sub';
+      covLine.textContent = `${cov.exercised}/${cov.total} routes exercised`;
+      siteMapContent.appendChild(covLine);
+    }
+    if (Array.isArray(lastCoverageInfo.perRoute)) {
+      const list = document.createElement('div');
+      list.className = 'history-list';
+      for (const r of lastCoverageInfo.perRoute.slice(0, 25)) {
+        const row = document.createElement('div');
+        // Reuses .history-item's box styling for a read-only row — not a
+        // button, so drop the class's pointer cursor/hover affordance.
+        row.className = 'history-item';
+        row.style.cursor = 'default';
+        const mark = r.exercised ? '✓' : '—'; // check / em-dash
+        const elCount = typeof r.elementsTotal === 'number' && r.elementsTotal > 0
+          ? ` (${r.elementsTouched}/${r.elementsTotal} elements)`
+          : '';
+        row.textContent = `${mark} ${r.route}${elCount}`;
+        row.title = r.route;
+        list.appendChild(row);
+      }
+      siteMapContent.appendChild(list);
+    }
+  }
+}
+
+if (siteMapToggle && siteMapBody) {
+  siteMapToggle.addEventListener('click', () => {
+    const open = siteMapToggle.getAttribute('aria-expanded') === 'true';
+    siteMapToggle.setAttribute('aria-expanded', String(!open));
+    siteMapBody.hidden = open;
+  });
 }
 
 // ---- interaction consent ---------------------------------------------------

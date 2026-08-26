@@ -12,6 +12,12 @@
  *   vibe.fix    {}          → {accepted:true}      (then async vibe.fix-progress/-done events)
  *   vibe.cancel {}          → {cancelled:boolean}  (aborts the active run)
  *   vibe.clip   {}          → {name, mime, dataBase64}  (last saved replay clip)
+ *   vibe.map.get      {host?} → {present:false} | {present:true, baseUrl?, routeCount,
+ *                                stateCount, lastMappedAt}  (A51: read-only summary of
+ *                                .spike/app-model.json for `host`, when it matches the
+ *                                model's mapped host)
+ *   vibe.coverage.get {host?} → {present:false} | {present:true, routes, interactiveElements,
+ *                                perRoute}  (A51: read-only coverageReport() for `host`)
  *
  * Events emitted (via bridge.sendEvent):
  *   vibe.progress     {line}
@@ -38,6 +44,7 @@ import { loadConfig } from '../config.js';
 import { slimReport, type Report } from '../report/report.js';
 import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
 import { dispatchFix } from './auto-fix.js';
+import { loadAppModel, coverageReport, type AppModel } from '../discovery/index.js';
 import {
   SettingsStore,
   defaultModelFor,
@@ -89,6 +96,32 @@ function isPlainHostname(host: string): boolean {
 /** Shape of the extension's rec.start / rec.stop bridge responses. */
 interface RecStartResult { ok: boolean; reason?: string; mime?: string }
 interface RecStopResult { ok: boolean; reason?: string; webmBase64?: string; bytes?: number; mime?: string }
+
+/** A51: the host (hostname[:port], matching the `hostOf()`/`allowHost`
+ * convention used elsewhere in this file and in the panel — see
+ * PLAIN_HOSTNAME_RE above) a discovered AppModel belongs to. `baseUrl` (set by
+ * `discoverApp` whenever a run has one) is the primary source; a legacy/manual
+ * model without it falls back to the first route that parses as an absolute
+ * URL (crawl-discovered routes always are; static-only routes may be bare
+ * patterns like `/about` and are skipped). Undefined when neither yields a
+ * parseable host — callers then treat the model as unscoped (serve it as-is). */
+function appModelHost(model: AppModel): string | undefined {
+  if (model.baseUrl) {
+    try {
+      return new URL(model.baseUrl).host;
+    } catch {
+      /* fall through to route-based lookup */
+    }
+  }
+  for (const r of model.routes) {
+    try {
+      return new URL(r.route).host;
+    } catch {
+      /* not an absolute URL (a bare static pattern) — try the next route */
+    }
+  }
+  return undefined;
+}
 
 export class VibeService {
   private busy = false;
@@ -207,6 +240,49 @@ export class VibeService {
       const ext = path.extname(p).toLowerCase();
       const mime = ext === '.mp4' ? 'video/mp4' : 'video/webm';
       return { name: path.basename(p), mime, dataBase64: buf.toString('base64') };
+    });
+
+    // vibe.map.get — A51: read-only summary of the discovery layer's
+    // `.spike/app-model.json` (built by `spike map`) for the panel's "Site map"
+    // card. No mutation, no host-trust implications — this never drives the
+    // browser, it only reads a file already on disk. `host` (the panel's
+    // current-tab hostname) is optional; when given and the model was mapped
+    // for a different host, we report {present:false} rather than surfacing
+    // stale data for the wrong site.
+    this.bridge.onRequest('vibe.map.get', async (params) => {
+      const rawHost = (params as { host?: unknown } | undefined)?.host;
+      const host = typeof rawHost === 'string' ? rawHost.trim() : '';
+      const model = loadAppModel(process.cwd());
+      if (!model || model.routes.length === 0) return { present: false };
+      const modelHost = appModelHost(model);
+      if (host && modelHost && modelHost !== host) return { present: false };
+      const stateCount = model.routes.reduce((n, r) => n + r.states.length, 0);
+      return {
+        present: true,
+        baseUrl: model.baseUrl,
+        routeCount: model.routes.length,
+        stateCount,
+        lastMappedAt: model.generatedAt,
+      };
+    });
+
+    // vibe.coverage.get — A51: read-only per-route covered/uncovered breakdown
+    // from the same ledger, via discovery/coverage.ts's coverageReport() (never
+    // hand-rolled here). Same host-scoping contract as vibe.map.get above.
+    this.bridge.onRequest('vibe.coverage.get', async (params) => {
+      const rawHost = (params as { host?: unknown } | undefined)?.host;
+      const host = typeof rawHost === 'string' ? rawHost.trim() : '';
+      const model = loadAppModel(process.cwd());
+      if (!model || model.routes.length === 0) return { present: false };
+      const modelHost = appModelHost(model);
+      if (host && modelHost && modelHost !== host) return { present: false };
+      const report = coverageReport(model);
+      return {
+        present: true,
+        routes: report.routes,
+        interactiveElements: report.interactiveElements,
+        perRoute: report.perRoute,
+      };
     });
 
     // vibe.config.get — the panel's settings screen reads the user's current

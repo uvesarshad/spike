@@ -9,6 +9,10 @@ Playwright MCP:  ~114,000 tokens per 10-step test, paid at Opus prices
 This project:     ~2,000 tokens per verdict, the looking done by $0 models
 ```
 
+## Demo
+
+_A demo GIF/screenshot goes here — the ghost-cursor overlay driving a real page._
+
 ## About
 
 Coding agents are blind. They write UI code, claim "fixed!", and can't verify it — so the human becomes the QA department for the AI. The existing fix (browser tools driven by the main model) is ruinously expensive: screenshots cost 10K+ tokens each and the priciest model in the stack ends up clicking login buttons.
@@ -26,6 +30,8 @@ This project flips that: one tool call — `qa_run(task, url)` — delegates the
 ```
 
 The exact error with file:line, the failing step, the failed network call, and a screenshot — for ~660 bytes of the calling agent's context.
+
+**Deterministic verdicts — the model can't hallucinate a pass.** With oracle strict mode (on by default), a `verdict:'fail'` isn't just a model's opinion: any Tier-0 invariant violation (rendered `undefined`/`NaN`, a broken image, a same-origin 5xx), any failed `assert_*` step, or any metamorphic-relation violation forces the final verdict to `fail`, evidence attached — regardless of what the model itself concluded. Check the current setting with `spike config show`; toggle it via `spike.config.json`'s `strictOracles` field or the `SPIKE_STRICT_ORACLES` env var.
 
 📚 Full product vision, research, and competitive landscape: [`docs/spike-agent-product-doc.md`](docs/spike-agent-product-doc.md)
 🧑‍🏫 Plain-English architecture tour (no prior knowledge assumed): [`docs/architecture-explainer.md`](docs/architecture-explainer.md)
@@ -84,7 +90,43 @@ Key design decisions:
 
 No test framework, no lint stack yet — runnable TS scripts with explicit PASS/FAIL output and nonzero exit on regression (see `test/`).
 
+## Requirements
+
+- **Node 20+**
+- **Branded Chrome 138+** (148+ for multimodal Nano) — Windows, macOS, or Linux
+- The $0 on-device navigator (Gemini Nano) needs a one-time **~2GB model download** and **22GB free disk** on the volume holding the Chrome profile — `spike nano --check` tells you if you're short (`SPIKE_CHROME_PATH` overrides Chrome binary discovery if it's not auto-found)
+- A planner — see ["The $0 path"](#the-0-path--no-keys-no-subscriptions) below for the zero-key option, or "Installing" for CLI/BYOK options
+
 ## Getting started
+
+```bash
+npm install
+npm run build
+
+# one-time: set up the $0 on-device model (~2GB download; needs 22GB free
+# on the drive holding the Chrome profile — the tool tells you if not)
+node dist/cli.js nano --check
+node dist/cli.js nano --download
+
+# try it against the built-in fixture app
+node dist/cli.js fixture --bug on        # terminal 1: intentionally broken shop
+node dist/cli.js run "log in as test@test.com with password pw and complete checkout" \
+  --url http://localhost:9401/login      # terminal 2: watch the verdict
+
+# CI replay-first workflow after committing or restoring generated-tests/
+node dist/cli.js replay --all --json
+```
+
+Register as an MCP tool in Claude Code:
+
+```bash
+claude mcp add spike -- node /path/to/repo/dist/mcp-server.js
+```
+
+…then any agent in that session can call `qa_run(task, url)`.
+
+<details>
+<summary>Windows (PowerShell)</summary>
 
 ```powershell
 npm install
@@ -107,10 +149,12 @@ node dist/cli.js replay --all --json
 Register as an MCP tool in Claude Code:
 
 ```powershell
-claude mcp add spike -- node E:\path\to\repo\dist\mcp-server.js
+claude mcp add spike -- node C:\path\to\repo\dist\mcp-server.js
 ```
 
 …then any agent in that session can call `qa_run(task, url)`.
+
+</details>
 
 ## Installing
 
@@ -146,6 +190,46 @@ node dist/cli.js config set --provider glm         # pin GLM as the browsing-con
 
 GLM-5.2 is text-only, so it does the planning while Gemini Nano (or another vision rung) still handles visual checks.
 
+**A note on `npm audit`:** it currently reports vulnerabilities transitively pulled in via `@modelcontextprotocol/sdk`'s HTTP-transport dependencies. Spike only uses the SDK's **stdio transport** (`spike mcp`) — that code path is never loaded or executed by anything in this repo, so we consider these findings unreachable at runtime. Full reasoning in [SECURITY.md](SECURITY.md#npm-audit-findings).
+
+**Vault key storage:** secrets set via `spike secret set` live in an on-device, AES-256-GCM-encrypted vault. On Windows the encryption key is protected by the OS DPAPI, bound to your user account. On **macOS/Linux the encryption key is currently a local file with `0600` permissions** (owner-read/write only) rather than OS-keychain-backed — a deliberate v1 tradeoff, not a bug, and disclosed the same way in [PRIVACY.md](PRIVACY.md). OS-keychain backends (macOS Keychain, Linux `libsecret`) are **planned** to close that gap.
+
+## The $0 path — no keys, no subscriptions
+
+Spike has a real zero-cost path through the whole stack, not just for visual checks:
+
+- **Navigator:** Gemini Nano (on-device, in Chrome) drives every step — reading the page, picking the next action, judging screenshots — entirely on your machine, $0.
+- **Brain:** none required. With no `plan-goals` adapter configured, the driver degrades gracefully to **navigator-only mode** — a single implicit goal covering the whole task, with the driver's *full* step budget (40 steps), not a truncated one.
+- **Replay:** once a run has passed and been recorded, `spike replay` re-runs it deterministically over CDP with zero planner calls — $0, indefinitely, until the UI actually changes.
+
+That's real end-to-end testing — log in, click through a flow, catch a broken checkout — for the price of running Chrome.
+
+What each add-on unlocks:
+
+| Add-on | Unlocks |
+|---|---|
+| A CLI brain (`claude`/`codex` CLI on `PATH`, your account quota) | Smarter up-front planning (`plan-goals`): a sub-goal checklist made once per run and re-consulted only when the navigator gets stuck — better recovery on unfamiliar or complex apps. |
+| A BYOK vision navigator (e.g. `GEMINI_API_KEY`) | A steadier per-step navigator than Nano today — Nano-as-navigator works but is still rough (see `CLAUDE.md`'s "Experimental" note on guessed URLs / repeated failing navigation); a cheap vision cloud navigator is the recommended default for reliability. |
+| The daemon (`spike daemon`) | Auto-fix (hands a failing run's fix prompt to your coding agent and re-tests), shareable replay clips, and the side-panel "vibe mode" GUI — capabilities an MV3 extension worker can't provide alone. |
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `spike run <task> --url <url>` | Run one QA task against a URL; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra error |
+| `spike bless [flow]` | Accept the current stored baseline for a flow as intentional (differential oracle) |
+| `spike map <url>` | Discover the app — routes, states, interactive elements — into `.spike/app-model.json` ($0, no browser) |
+| `spike coverage` | Report what has and hasn't been tested yet, from `.spike/app-model.json` |
+| `spike fixture --bug on\|off` | Start the dogfood fixture app (login → products → cart → checkout) |
+| `spike config` | View or change the browsing-control AI + debugging settings (shared with the extension panel) |
+| `spike replay [name\|--all]` | Replay recorded scripts deterministically — no planner, $0 |
+| `spike daemon` | Start the vibe-mode daemon: the bridge the extension side panel connects to |
+| `spike fix <runId>` | Print the fix prompt for a finished run — or with `--apply`, hand it to your coding agent headlessly |
+| `spike secret` | Manage the local encrypted vault — secrets are typed via `{{secret:NAME}}`, never reach any model |
+| `spike mcp` | Start the MCP stdio server (register in a coding agent as command `spike`, args `["mcp"]`) |
+| `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
+| `spike dashboard` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats |
+
 ## Project structure
 
 ```
@@ -160,7 +244,8 @@ src/
 ├─ mcp-server.ts MCP stdio transport (tool: qa_run)
 └─ cli.ts        spike run | mcp | nano | fixture | config
 fixture/         dogfood shop app with a toggleable checkout bug
-test/            m1/m2/m4/m5/m6 suites + e2e.run-fixture.ts (the oracle)
+test/            60+ suites (fast + browser buckets) + e2e.run-fixture.ts (the oracle) —
+                 run `node scripts/run-tests.mjs --list` for the current breakdown
 spikes/          frozen de-risking spikes (never imported by src/)
 docs/            product doc · architecture explainer · research
 ```
@@ -170,10 +255,10 @@ docs/            product doc · architecture explainer · research
 Day-to-day development loop:
 
 1. `npm run typecheck` — strict TS gate.
-2. Fast suites (no model spend): `npx tsx test/m1.browser-port.ts` (browser port, 7 checks) · `npx tsx test/m5.fixture.ts` (fixture sanity, 7 checks).
-3. Model-touching suites: `npx tsx test/m2.nano-port.ts` (Nano discrimination) · `npx tsx test/m4.router.ts` (escalation + one live CLI call).
-4. The oracle: `npm run test:e2e` — full planner-driven runs against the fixture in both modes (several minutes; every step is a free-quota Flash call). Healthy must `pass`, bug-on must `fail` with `console_error` + screenshot evidence.
-5. MCP contract: `npx tsx test/m6.mcp.ts` (drives the **built** server over stdio).
+2. `npm test` — the fast bucket: every suite that's pure/in-memory and needs no real Chrome, pooled for speed. This is what CI runs on all three OSes.
+3. `npm run test:browser` — the browser bucket: real-Chrome/real-socket suites (contract tests, extension bridge, Nano availability, clip recording…), run serially since they share fixed ports. Local, pre-release only — not run by CI (see `docs/infra/testing.md`).
+4. `node scripts/run-tests.mjs --list` — prints the current fast/browser bucket assignment and suite counts without running anything; treat this as the source of truth over any number quoted in prose (docs drift, this command doesn't).
+5. The oracle: `npm run test:e2e` — full planner-driven runs against the fixture in both modes (several minutes; every step is a real model call). Healthy must `pass`, bug-on must `fail` with `console_error` + screenshot evidence.
 6. Spike regression: `cd spikes/cdp-logpoint && npm run spike` must keep passing.
 
 Conventions worth knowing: logpoint lines are located by content, never hardcoded; the engine imports interfaces, never concrete browsers; machine-specific settings live in gitignored `spike.config.json`; operational gotchas are recorded in [`CLAUDE.md`](CLAUDE.md).
@@ -189,7 +274,7 @@ Conventions worth knowing: logpoint lines are located by content, never hardcode
 | 2026-06-07 | **Recorder**: passed run → JSON trace + Playwright `.spec.ts`; `spike replay` is deterministic, ~9s, $0 AI tokens; self-heals on UI drift and re-emits — e2e 12/12 | ✅ shipped |
 | 2026-06-07 | **Extension transport**: MV3 extension drives Chrome via `chrome.debugger` over a WS bridge; same 7/7 port contract as plain CDP; Nano through the extension's Prompt API; `--via extension` | ✅ shipped |
 | 2026-06-07 | **Vibe mode (core)**: side-panel chat (`spike daemon`), ghost-cursor overlay (glide/ripples/captions), plain-English reports + paste-ready fix prompts (`spike fix`) — headless e2e green | ✅ shipped |
-| next | Dogfood against a real app (MontrAI social module) | 🔜 |
+| next | Dogfood against a real production app | 🔜 |
 | then | **Vibe mode (polish)**: shareable replay clips (MP4/GIF), guided Nano onboarding from the panel, run history | planned |
 | then | **Tier 4 guardrails**: local credential vault (model never sees secrets), read-only-by-default on third-party sites, audit log | planned |
 | then | Launch: OSS core + BYOK, token-cost benchmark vs Playwright MCP / Claude in Chrome | planned |

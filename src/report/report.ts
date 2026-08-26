@@ -236,6 +236,8 @@ export function describeAction(a: Action): string {
       return `console check: no errors${a.allow?.length ? ` (allowing ${a.allow.length} pattern(s))` : ''}`;
     case 'extract':
       return `extract ${a.key} from ${a.nodeId ?? 'page'}${a.prompt ? ' (model)' : a.pattern ? ` matching ${JSON.stringify(a.pattern)}` : ''}`;
+    case 'wait_for_email':
+      return `wait for email${a.matching ? ` matching ${JSON.stringify(a.matching)}` : ''}${a.extractOtpTo ? ` → extract OTP to ${a.extractOtpTo}` : ''}`;
     case 'upload_file':
       return `upload ${a.paths.length} file(s) to ${a.nodeId}`;
     case 'drag_and_drop':

@@ -13,6 +13,17 @@
  * Healthy mode reaches /success with a confirmation message. */
 
 import http from 'node:http';
+import { FakeLocalEmailProvider } from '../src/email/fake-local.js';
+
+/** Shared fake inbox for the dogfood app — the driver's `wait_for_email`
+ * action (config `emailProvider: 'fake-local'`, LoopOptions.emailProvider
+ * pointed at this SAME instance) polls it. A caller delivers a test email
+ * either in-process (import `fixtureEmailProvider` directly, e.g. a
+ * fast-suite test that drives the loop against this fixture) or out-of-
+ * process via POST /api/test/deliver-email (see startFixture below). Cleared
+ * at the top of every startFixture() call so tests don't leak messages
+ * across server instances. */
+export const fixtureEmailProvider = new FakeLocalEmailProvider();
 
 const STYLE = `<style>
   body{font-family:system-ui;margin:0;background:#f6f7fb;color:#16161c}
@@ -252,12 +263,35 @@ export type FixtureVariant = 'v1' | 'v2';
 
 export function startFixture(port: number, bug: boolean, variant: FixtureVariant = 'v1'): http.Server {
   const routes = pages(bug, variant);
+  fixtureEmailProvider.clear();
   const server = http.createServer((req, res) => {
     const url = req.url ?? '/';
     if (url === '/api/order' && req.method === 'POST') {
       res.statusCode = bug ? 500 : 200;
       res.setHeader('content-type', 'application/json');
       res.end(bug ? '{"error":"internal"}' : '{"ok":true}');
+      return;
+    }
+    // Test-only injection point for the email/OTP module: POST a
+    // DeliverEmailInput ({to, subject, text, html?, from?, receivedAt?}) to
+    // land it in fixtureEmailProvider — the SAME inbox a driver run's
+    // wait_for_email action polls when wired to this fixture.
+    if (url === '/api/test/deliver-email' && req.method === 'POST') {
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        try {
+          const input = JSON.parse(raw || '{}');
+          const message = fixtureEmailProvider.deliver(input);
+          res.statusCode = 200;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ ok: true, id: message.id }));
+        } catch (e) {
+          res.statusCode = 400;
+          res.setHeader('content-type', 'application/json');
+          res.end(JSON.stringify({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+        }
+      });
       return;
     }
     const body = routes[url] ?? routes['/login'];

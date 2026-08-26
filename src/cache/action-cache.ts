@@ -193,6 +193,7 @@ export function toCachedActionValue(action: Action, target?: StepTarget): Cached
     // replay from a locator-only record (file paths, tab ids, mouse coords,
     // scripted sequences) — deliberately NOT cached. loop.ts catches this
     // rejection and simply skips caching that step.
+    case 'wait_for_email':
     case 'upload_file':
     case 'drag_and_drop':
     case 'blur':
@@ -590,6 +591,10 @@ function actionIntentForKey(action: Action, target?: StepTarget): string {
       return `assert_dom:${tgt}:contains=${textForKey(action.contains)}`;
     case 'extract':
       return `extract:${tgt}:key=${textForKey(action.key)}:pattern=${textForKey(action.pattern ?? '')}`;
+    // Never actually cached (toCachedActionValue rejects it above) — this arm
+    // exists only so the switch stays exhaustive/type-safe.
+    case 'wait_for_email':
+      return `wait_for_email:${textForKey(action.matching ?? '')}`;
     case 'assert_visual':
       return `assert_visual:${textForKey(action.expectation)}`;
     case 'upload_file':

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Spike — QA testing agent",
+  "version": "0.0.1",
+  "description": "Spike — autonomous browser QA: a cheap-model ladder tests your app in your real Chrome and reports back.",
+  "background": { "service_worker": "sw.js", "type": "module" },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": ["debugger", "activeTab", "tabs", "storage", "alarms", "offscreen", "sidePanel", "tabCapture"],
+  "action": { "default_title": "Open Spike side panel" },
+  "side_panel": { "default_path": "panel.html" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["overlay.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

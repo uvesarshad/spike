@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Vault } from '../src/vault/vault.js';
+import { Vault, FileKeyProvider } from '../src/vault/vault.js';
 import { runDriverLoop } from '../src/driver/loop.js';
 import { ArtifactStore } from '../src/report/artifacts.js';
 import { ModelRouter } from '../src/router/model-router.js';
@@ -40,7 +40,7 @@ const check = (label: string, ok: boolean) => {
 console.log('=== v13 1/3: vault roundtrip + at-rest encryption ===');
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-vault-'));
-  const vault = new Vault({ dir });
+  const vault = new Vault({ dir, keyProvider: new FileKeyProvider(path.join(dir, "key.bin")) });
   const SECRET = 'hunter2-super-secret-value';
 
   vault.set('LOGIN_PW', SECRET);
@@ -66,7 +66,7 @@ console.log('=== v13 1/3: vault roundtrip + at-rest encryption ===');
   check('deleted secret is gone, other remains', vault.get('API_TOKEN') === undefined && vault.get('LOGIN_PW') === SECRET);
 
   // a fresh Vault over the same dir + key decrypts (key persistence works)
-  const reopened = new Vault({ dir });
+  const reopened = new Vault({ dir, keyProvider: new FileKeyProvider(path.join(dir, "key.bin")) });
   check('reopened vault decrypts existing secret', reopened.get('LOGIN_PW') === SECRET);
 }
 
@@ -165,7 +165,7 @@ function tmpArtifacts(): ArtifactStore {
 console.log('\n=== v13 2/3: {{secret}} resolution + redaction ===');
 {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-vault2-'));
-  const vault = new Vault({ dir });
+  const vault = new Vault({ dir, keyProvider: new FileKeyProvider(path.join(dir, "key.bin")) });
   const REAL = 'p@ssw0rd-REAL-VALUE';
   vault.set('LOGIN_PW', REAL);
 
@@ -225,7 +225,8 @@ console.log('\n--- missing-secret path ---');
       { thought: 'stop', actions: [{ type: 'finish', verdict: 'fail', reason: 'stop' }] },
     ]),
   ]);
-  const vault = new Vault({ dir: fs.mkdtempSync(path.join(os.tmpdir(), 'qa-vault3-')) });
+  const vault3Dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-vault3-'));
+  const vault = new Vault({ dir: vault3Dir, keyProvider: new FileKeyProvider(path.join(vault3Dir, 'key.bin')) });
   const report = await runDriverLoop(browser, router, tmpArtifacts(), 'x', 'http://localhost:3000/login', {
     maxSteps: 4,
     allowedHosts: ['localhost'],

@@ -86,6 +86,20 @@ export const ActionSchema = z.discriminatedUnion('type', [
     prompt: z.string().optional(),
   }),
   z.object({ type: z.literal('wait'), ms: z.number().int().min(50).max(10_000) }),
+  // Email/OTP module wiring: polls the configured EmailProvider (src/email/)
+  // until a message matching `matching` (subject/body substring, case-
+  // insensitive; omit to take the newest message) arrives, bounded by
+  // `timeoutMs` (default 30s — see loop.ts's WAIT_FOR_EMAIL_DEFAULT_TIMEOUT_MS).
+  // When `extractOtpTo` is set, findOtp() runs over the matched message and the
+  // result is stored via the SAME recordExtraction() mechanism `extract` uses
+  // (source: 'email'). Never cached (see action-cache.ts) — the match depends
+  // on external, non-replayable state.
+  z.object({
+    type: z.literal('wait_for_email'),
+    matching: z.string().optional(),
+    extractOtpTo: z.string().optional(),
+    timeoutMs: z.number().int().min(1_000).max(120_000).optional(),
+  }),
   // Phase 10 — secure script runner: a small allowlisted declarative step list
   // over BrowserPort verbs (see src/driver/script-runner/). Validated BEFORE
   // execution; a validation failure rejects the whole action (loop.ts treats
@@ -164,6 +178,7 @@ export const PLAN_JSON_SCHEMA = {
               'assert_no_console_errors',
               'extract',
               'wait',
+              'wait_for_email',
               'script',
               'finish',
             ],
@@ -190,6 +205,9 @@ export const PLAN_JSON_SCHEMA = {
           allow: { type: 'array', items: { type: 'string' }, description: 'assert_no_console_errors: substrings of errors to ignore' },
           prompt: { type: 'string', description: 'when set on extract, ask a cheap text model to pull the value instead of DOM-text/regex' },
           ms: { type: 'integer' },
+          matching: { type: 'string', description: 'wait_for_email: only match an email whose subject or body contains this substring (case-insensitive); omit to take the newest email' },
+          extractOtpTo: { type: 'string', description: 'wait_for_email: run-data key to store an OTP/code extracted from the matched email as {{run.<key>}}' },
+          timeoutMs: { type: 'integer', description: 'wait_for_email: max time (ms) to wait for a matching email; default 30000' },
           paths: { type: 'array', items: { type: 'string' }, description: 'upload_file: file paths to set on the input' },
           sourceId: { type: 'string', description: 'drag_and_drop: nodeId to press on' },
           targetId: { type: 'string', description: 'drag_and_drop: nodeId to release on' },

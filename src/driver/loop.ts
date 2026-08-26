@@ -16,9 +16,12 @@
  * target by role+name in a fresh tree; visual fail → run fails; finish:pass →
  * one confirmation visual before accepting; finish:fail → trusted. */
 
+import fs from 'node:fs';
 import type { AxNode, AxSnapshot, BrowserPort } from '../ports/browser-port.js';
 import { isHostAllowed } from '../ports/browser-port.js';
 import { firstError } from '../capture/console-network.js';
+import { findOtp, type EmailMessage, type EmailProvider } from '../email/index.js';
+import { loadAppModel, appModelPath, type AppModel } from '../discovery/index.js';
 import type { ModelRouter } from '../router/model-router.js';
 import type { ArtifactStore } from '../report/artifacts.js';
 import { describeAction, slimReport, type FailingStep, type Report, type SpendSummary, type StepRecord, type RunVerdict } from '../report/report.js';
@@ -150,6 +153,61 @@ function hostOf(url: string): string {
  * can silently drift apart. */
 const hostAllowed = isHostAllowed;
 
+/** wait_for_email defaults — see actions.ts's zod/JSON-schema docs. */
+const WAIT_FOR_EMAIL_DEFAULT_TIMEOUT_MS = 30_000;
+const WAIT_FOR_EMAIL_POLL_INTERVAL_MS = 500;
+
+/** Discovery app-model → brain prompt (feed the crawl into buildGoalPlannerPrompt).
+ * ~4 chars/token heuristic — matches no existing token counter in this file, so
+ * this is intentionally approximate; the cap only needs to keep the prompt
+ * bounded, not be exact. */
+const SITE_MAP_MAX_CHARS = 1_200; // ~300 tokens
+/** Ignore a `.spike/app-model.json` older than this — a stale crawl is worse
+ * than none (see the section's own "may be stale" framing, which covers the
+ * remaining risk of a crawl that's recent but the site changed since). */
+const SITE_MAP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/** One line per route: path, exercised/not, and a few key interactive
+ * elements from its most recent structural state — enough for the brain to
+ * recognize "there's a /checkout route with a Place order button" without
+ * re-deriving it from scratch. Oldest routes are trimmed first (mirrors
+ * planner-prompt.ts's formatHistory .slice(-N) overflow convention) until the
+ * summary fits SITE_MAP_MAX_CHARS. */
+function summarizeAppModel(model: AppModel): string {
+  const lines = [...model.routes]
+    .sort((a, b) => a.discoveredAt.localeCompare(b.discoveredAt))
+    .map((r) => {
+      const latestState = r.states[r.states.length - 1];
+      const elementBits = (latestState?.elements ?? [])
+        .slice(0, 5)
+        .map((e) => (e.name ? `${e.role} "${e.name}"` : e.role));
+      const label = r.exercised ? 'exercised' : 'not exercised';
+      return `- ${r.route} [${label}]${elementBits.length ? `: ${elementBits.join(', ')}` : ''}`;
+    });
+  while (lines.length > 1 && lines.join('\n').length > SITE_MAP_MAX_CHARS) lines.shift();
+  return lines.join('\n');
+}
+
+/** Never throws and never blocks planning: a missing/corrupt/stale/wrong-host
+ * app-model just means "no site map to offer" (mirrors loadAppModel's own
+ * never-throws contract). `targetUrl` is the run's target — see LoopOptions
+ * doc comments; host coverage is checked against the model's single
+ * `baseUrl` (one app-model file describes one site, not per-route hosts). */
+function loadSiteMapSummary(targetUrl: string): string | undefined {
+  try {
+    const p = appModelPath();
+    if (!fs.existsSync(p)) return undefined;
+    if (Date.now() - fs.statSync(p).mtimeMs > SITE_MAP_MAX_AGE_MS) return undefined;
+    const model = loadAppModel();
+    if (!model || !model.baseUrl || !model.routes.length) return undefined;
+    if (hostOf(model.baseUrl) !== hostOf(targetUrl)) return undefined;
+    const summary = summarizeAppModel(model);
+    return summary || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Step-progress callback shape — VibeService forwards these verbatim to the UI. */
 export type StepKind =
   | 'plan'
@@ -162,6 +220,7 @@ export type StepKind =
   | 'assert'
   | 'extract'
   | 'wait'
+  | 'email'
   | 'finish'
   | 'upload'
   | 'drag'
@@ -192,6 +251,13 @@ export interface LoopOptions {
   /** Secrets store for {{secret:NAME}} resolution at execute time. Optional:
    * without it, a {{secret:…}} placeholder fails the step (secret not found). */
   vault?: Vault;
+  /** Email/OTP module wiring: the EmailProvider instance a `wait_for_email`
+   * action polls (e.g. fixture/server.ts's fixtureEmailProvider for the
+   * dogfood app, or a fresh FakeLocalEmailProvider in tests). Same
+   * caller-injects-the-instance shape as `vault`. Omitted (the common case
+   * today — QaConfig.emailProvider defaults to 'none') → `wait_for_email`
+   * fails cleanly instead of hanging or silently no-op'ing. */
+  emailProvider?: EmailProvider;
   /** Cooperative cancellation — checked before each planner call and each
    * action; aborting ends the run 'uncertain' with reason 'cancelled by user'. */
   signal?: AbortSignal;
@@ -261,6 +327,8 @@ function stepKind(action: Action): StepKind {
       return 'assert';
     case 'extract':
       return 'extract';
+    case 'wait_for_email':
+      return 'email';
     case 'upload_file':
       return 'upload';
     case 'drag_and_drop':
@@ -347,6 +415,8 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
       return action.prompt
         ? `Extract ${action.key} (model-assisted: ${action.prompt.slice(0, 60)})`
         : `Extract ${action.key} from ${tgt ?? action.nodeId ?? 'page'}`;
+    case 'wait_for_email':
+      return `Wait for email${action.matching ? ` matching "${action.matching}"` : ''}${action.extractOtpTo ? ` (extract OTP to ${action.extractOtpTo})` : ''}`;
     case 'upload_file':
       return `Upload ${action.paths.length} file(s) to ${tgt ?? action.nodeId}`;
     case 'drag_and_drop':
@@ -483,7 +553,12 @@ export async function runDriverLoop(
   const onStep = opts.onStep ?? (() => {});
   const allowedHosts = opts.allowedHosts ?? ['localhost', '127.0.0.1'];
   const vault = opts.vault;
+  const emailProvider = opts.emailProvider;
   const signal = opts.signal;
+  // Discovery app-model → brain prompt: computed ONCE from the run's target
+  // (never re-derived per navigator step — this only ever feeds the BRAIN's
+  // goal-planning calls). Best-effort — see loadSiteMapSummary's doc comment.
+  const siteMapSummary = loadSiteMapSummary(url);
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
   const perGoalMaxSteps = opts.perGoalMaxSteps ?? Math.min(maxSteps, DEFAULT_PER_GOAL_STEPS);
   const assertionPolicy = opts.assertionPolicy ?? 'single-ladder';
@@ -640,6 +715,7 @@ export async function runDriverLoop(
           history: steps,
           goals,
           currentGoal,
+          siteMapSummary,
           failure,
         }),
         step: stepIndex,
@@ -781,7 +857,7 @@ export async function runDriverLoop(
     onStep({ index: stepIndex, kind: 'plan', text: 'Planning goals…' });
     try {
       const goalPlan = await planGoalsOnce(router, {
-        prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text }),
+        prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text, siteMapSummary }),
         step: stepIndex,
       });
       if (goalPlan.verdict) {
@@ -1176,7 +1252,16 @@ export async function runDriverLoop(
 
       // ---- execute ----
       const cacheBefore =
-        actionCache && a === actions.length - 1 && action.type !== 'finish' && action.type !== 'assert_visual' && action.type !== 'wait'
+        actionCache &&
+        a === actions.length - 1 &&
+        action.type !== 'finish' &&
+        action.type !== 'assert_visual' &&
+        action.type !== 'wait' &&
+        // wait_for_email's "effect" is external mailbox state, not something a
+        // replayed cache hit can reproduce — never cache it (mirrors wait/
+        // assert_visual/finish above; see actionIntentForKey/toCachedActionValue
+        // in cache/action-cache.ts, which reject it outright).
+        action.type !== 'wait_for_email'
           ? await captureActionEffectState(browser).catch(() => null)
           : null;
       // one `browser.action` telemetry span per executed action (no-op sink by
@@ -1355,6 +1440,44 @@ export async function runDriverLoop(
                 record.error = `could not extract ${action.key} from ${action.nodeId}`;
               } else {
                 recordExtraction(runData, { key: action.key, value, source: 'dom', label: record.target?.name });
+              }
+            }
+          }
+        } else if (action.type === 'wait_for_email') {
+          // Email/OTP module wiring: poll the injected EmailProvider (never
+          // constructed here — see LoopOptions.emailProvider's doc comment)
+          // until a message matching `matching` arrives or `timeoutMs`
+          // elapses. `extractOtpTo` set → findOtp() + the SAME recordExtraction()
+          // mechanism `extract` uses above (source: 'email').
+          if (!emailProvider) {
+            record.ok = false;
+            record.error = "no email provider configured — set emailProvider: 'fake-local' (or a future real provider)";
+          } else {
+            const timeoutMs = action.timeoutMs ?? WAIT_FOR_EMAIL_DEFAULT_TIMEOUT_MS;
+            const matching = action.matching?.toLowerCase();
+            const deadline = Date.now() + timeoutMs;
+            let found: EmailMessage | null = null;
+            for (;;) {
+              if (signal?.aborted) break;
+              const messages = await emailProvider.listMessages();
+              found = matching
+                ? messages.find((m) => `${m.subject}\n${m.text}\n${m.html ?? ''}`.toLowerCase().includes(matching)) ?? null
+                : (messages[messages.length - 1] ?? null);
+              if (found || Date.now() >= deadline) break;
+              await sleep(WAIT_FOR_EMAIL_POLL_INTERVAL_MS);
+            }
+            if (!found) {
+              record.ok = false;
+              record.error = action.matching
+                ? `no email matching ${JSON.stringify(action.matching)} arrived within ${timeoutMs}ms`
+                : `no email arrived within ${timeoutMs}ms`;
+            } else if (action.extractOtpTo) {
+              const otp = findOtp(found);
+              if (!otp) {
+                record.ok = false;
+                record.error = `no OTP pattern found in the matched email for ${action.extractOtpTo}`;
+              } else {
+                recordExtraction(runData, { key: action.extractOtpTo, value: otp, source: 'email', label: found.subject });
               }
             }
           }
@@ -2031,7 +2154,8 @@ async function executeCacheAction(
     action.type === 'open_tab' ||
     action.type === 'switch_tab' ||
     action.type === 'close_tab' ||
-    action.type === 'script'
+    action.type === 'script' ||
+    action.type === 'wait_for_email'
   ) {
     throw new Error(`cached ${action.type} is not executable through the action cache`);
   }

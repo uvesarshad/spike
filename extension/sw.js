@@ -31,6 +31,16 @@
 
 import { runLite, buildLiteConfig, DEFAULT_SETTINGS } from './lite-engine.js';
 
+// MANIFEST_VARIANT: token-replaced at pack time by scripts/pack-extension.ts
+// (see stageVariant() there) — 'default' ships with extension/manifest.json
+// (host_permissions <all_urls>, full functionality); 'activetab' ships with
+// extension/manifest.activetab.json (no <all_urls>, activeTab instead). An
+// unpacked/dev-loaded extension always runs the literal default below since
+// there's no pack step. When this is 'activetab' the extension has no
+// standing permission to act on tabs the user hasn't explicitly engaged —
+// see the MANIFEST_VARIANT gate in attachDebugger() further down.
+const MANIFEST_VARIANT = 'default';
+
 /* The daemon's bridge usually listens on 9410 (config default), but tests and
  * multi-instance setups bind nearby ports — the reconnect loop scans a small
  * candidate list round-robin. The list can be PINNED per Chrome instance via
@@ -639,6 +649,31 @@ chrome.runtime.onConnect.addListener((port) => {
           await handleNanoDownload();
           break;
         }
+        case 'map-get': {
+          // A51: read-only discovery-layer summary for the panel's "Site map"
+          // card. No lite-mode fallback — the .spike/app-model.json ledger
+          // lives next to wherever `spike daemon`/`spike map` run, which lite
+          // mode (no daemon) has no access to; report simply "not present".
+          if (!daemonConnected()) { port.postMessage({ kind: 'map', present: false }); break; }
+          try {
+            const result = await sendRequest('vibe.map.get', { host: msg.host });
+            port.postMessage({ kind: 'map', ...(result || { present: false }) });
+          } catch (e) {
+            port.postMessage({ kind: 'map', present: false, error: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'coverage-get': {
+          // Same daemon-only contract as 'map-get' above.
+          if (!daemonConnected()) { port.postMessage({ kind: 'coverage', present: false }); break; }
+          try {
+            const result = await sendRequest('vibe.coverage.get', { host: msg.host });
+            port.postMessage({ kind: 'coverage', ...(result || { present: false }) });
+          } catch (e) {
+            port.postMessage({ kind: 'coverage', present: false, error: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
         case 'status': {
           // A22: surface a leftover checkpoint from a run the SW never got to
           // finish (evicted/crashed mid-run) so the panel can tell the user
@@ -747,6 +782,18 @@ const SENSITIVE_SCHEMES = ['chrome:', 'chrome-extension:', 'devtools:', 'edge:',
 
 async function attachDebugger(tabId) {
   if (attached.has(tabId)) return;
+  // activeTab-narrowed build (A15 store-rejection fallback, no <all_urls>):
+  // chrome.debugger.attach only has standing permission on the tab the user
+  // just explicitly engaged (the panel's own active tab, tracked in
+  // lastRunTabId — set from msg.tabId on every 'run' request BEFORE this is
+  // called). Refuse anything else — a freshly-created tab (ext.createTab) or
+  // an arbitrary daemon-supplied tabId (ext.attachTab) has no such grant.
+  if (MANIFEST_VARIANT === 'activetab' && tabId !== lastRunTabId) {
+    throw new Error(
+      `attachDebugger: activeTab-narrowed build refuses to attach to tab ${tabId} — ` +
+        `only the user-invoked current tab (${lastRunTabId}) is permitted without <all_urls>`,
+    );
+  }
   let url = '';
   try {
     url = (await getTab(tabId)).url || '';

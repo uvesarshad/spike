@@ -197,6 +197,15 @@ export interface QaConfig {
    * bug (a rendered-undefined total) must not slip past as a model-judged
    * pass. Set false to restore the pre-A1 evidence-only behavior. */
   strictOracles: boolean;
+  /** Email/OTP module wiring: which EmailProvider (src/email/) the driver's
+   * `wait_for_email` action polls. 'none' (default) — the action fails
+   * cleanly rather than silently no-op'ing. 'fake-local' is the only
+   * concrete provider today (dogfood/tests — see fixture/server.ts's
+   * exported fixtureEmailProvider); a real IMAP/Gmail provider is a future
+   * addition, not built here. NOTE: this field selects the provider KIND —
+   * the caller that builds LoopOptions still injects the actual EmailProvider
+   * instance (LoopOptions.emailProvider), same indirection as `vault`. */
+  emailProvider: 'none' | 'fake-local';
 }
 
 /** A36 (P1): `NODE_OPTIONS=--use-system-ca` makes the Google CLI child trust the
@@ -267,6 +276,8 @@ const DEFAULTS: QaConfig = {
   debugAgent: 'auto',
   // A1: deterministic oracles gate the verdict by default — see QaConfig.strictOracles.
   strictOracles: true,
+  // no email provider wired by default — see QaConfig.emailProvider.
+  emailProvider: 'none',
 };
 
 /** Valid enum values for env-override parsing (silently ignore garbage). */
@@ -381,6 +392,7 @@ function fromEnv(): Partial<QaConfig> {
   if (Object.keys(navigator).length) out.navigator = navigator as PlannerSelection;
   if (e.SPIKE_DEBUG_MODE === 'prompt' || e.SPIKE_DEBUG_MODE === 'auto') out.debugMode = e.SPIKE_DEBUG_MODE;
   if (e.SPIKE_DEBUG_AGENT && DEBUG_AGENTS.includes(e.SPIKE_DEBUG_AGENT as DebugAgent)) out.debugAgent = e.SPIKE_DEBUG_AGENT as DebugAgent;
+  if (e.SPIKE_EMAIL_PROVIDER === 'none' || e.SPIKE_EMAIL_PROVIDER === 'fake-local') out.emailProvider = e.SPIKE_EMAIL_PROVIDER;
   return out;
 }
 

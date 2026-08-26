@@ -8,6 +8,9 @@
 
 import './env-compat.js'; // aliases legacy QA_* env vars onto SPIKE_* — must precede any env read
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+// audit-note (A37): `npm audit` flags transitive vulns in this SDK's HTTP-transport deps.
+// We only import/use the stdio transport below (StdioServerTransport) — that code path is
+// never loaded, so those findings are unreachable at runtime. See SECURITY.md.
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { qaRun } from './engine.js';

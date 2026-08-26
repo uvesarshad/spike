@@ -16,7 +16,12 @@ import type CDP from 'chrome-remote-interface';
 import { loadConfig, type EmulationConfig, type QaConfig, type RouteRule } from './config.js';
 import { CdpBrowser } from './ports/cdp-browser.js';
 import { ExtensionBrowser } from './ports/extension-browser.js';
-import { PlaywrightBrowser } from './ports/playwright-browser.js';
+// A52 (P2): playwright-core is a large optional dependency (`--via
+// playwright` only) — type-only import here (erased at compile time, no
+// runtime module load); the real class is dynamic-`import()`ed lazily inside
+// the `cfg.via === 'playwright'` branch below, the only place a value
+// reference is needed.
+import type { PlaywrightBrowser } from './ports/playwright-browser.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { ExtensionNano } from './ports/extension-nano.js';
 import type { NanoPort } from './ports/nano-port.js';
@@ -236,6 +241,19 @@ export async function openBrowserSession(
   // setStorageState() (A6) and route() (A13) — see this file's
   // applyRouteRules/applyEmulation/captureStorageState/injectStorageState.
   if (cfg.via === 'playwright') {
+    // A52 (P2): lazy-load playwright-core (optionalDependency) only when a
+    // caller actually asks for --via playwright — everyone else (the
+    // default cdp/extension transports) never pays to resolve it. A missing
+    // playwright-core surfaces here as a clear, actionable error instead of
+    // a bare "Cannot find package 'playwright-core'" from deep inside the
+    // module graph.
+    const { PlaywrightBrowser } = await import('./ports/playwright-browser.js').catch((e: unknown) => {
+      throw new Error(
+        `install playwright-core to use --via playwright (npm install playwright-core): ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    });
     const browser = new PlaywrightBrowser({
       port: cfg.cdpPort,
       profileDir: cfg.chromeProfile,
@@ -379,8 +397,18 @@ export interface StorageState {
   origins: Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>;
 }
 
+/** A52 (P2): duck-typed, not `instanceof PlaywrightBrowser` — this helper is
+ * called from captureStorageState/injectStorageState for ANY transport
+ * (cdp/extension too), and the PlaywrightBrowser class value may never have
+ * been loaded (playwright-core is now lazy, see the `cfg.via ===
+ * 'playwright'` branch above) when those run over cdp/extension. Its two
+ * storage-state methods are unique to this port, so their presence is a
+ * reliable, load-free stand-in for the class check. */
 function asPlaywrightBrowser(browser: BrowserPort): PlaywrightBrowser | null {
-  return browser instanceof PlaywrightBrowser ? browser : null;
+  const b = browser as Partial<PlaywrightBrowser>;
+  return typeof b.storageState === 'function' && typeof b.setStorageState === 'function'
+    ? (browser as PlaywrightBrowser)
+    : null;
 }
 
 /** Capture the session's current cookies + localStorage. Prefers

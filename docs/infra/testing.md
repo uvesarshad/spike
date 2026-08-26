@@ -61,8 +61,8 @@ No external test runner is used. Tests use Node.js assert() (strict) and throw o
 **Aggregate runner (A15, 2026-08-09):** `scripts/run-tests.mjs` discovers every suite under `test/*.ts`, runs each as a standalone `tsx` child process (same house convention as always — no Jest/Vitest introduced), and prints a per-suite PASS/FAIL/SKIP tally. It exits nonzero if anything failed. It classifies every suite into exactly one of two buckets — **not** by filename pattern, but by reading each file for real Chrome/CDP usage (`CdpBrowser`, `chrome-remote-interface`, `launchChromeWithExtension`) or a real bound network socket (`BridgeServer`, the fixture HTTP server, a full `qaRun` in `cdp` mode) versus an explicit "no Chrome / offline / mock" self-description in the suite's own header comment:
 
 ```
-npm test            # fast bucket: 26 suites, pure/in-memory, pooled (concurrency ~min(4, cpus-1))
-npm run test:browser # browser bucket: 28 suites, real Chrome/sockets, run SERIALLY (fixed ports)
+npm test            # fast bucket: 42 suites, pure/in-memory, pooled (concurrency ~min(4, cpus-1))
+npm run test:browser # browser bucket: 29 suites, real Chrome/sockets, run SERIALLY (fixed ports)
 npm run test:e2e     # unchanged: tsx test/e2e.run-fixture.ts directly (the single primary oracle)
 node scripts/run-tests.mjs --list   # print the bucket assignment without running anything
 ```

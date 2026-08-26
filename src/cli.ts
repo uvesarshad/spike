@@ -53,6 +53,11 @@ function printSettings(s: QaSettings): void {
   console.log('Debugging:');
   console.log(`  debugMode:  ${s.debugMode}`);
   console.log(`  debugAgent: ${s.debugAgent}`);
+  // A1 headline feature: deterministic verdicts — Tier-0 invariants + failed
+  // assertions + metamorphic relations force fail instead of staying advisory.
+  // Read-only here (spike.config.json / SPIKE_STRICT_ORACLES env, not a
+  // SettingsStore field — `config set` has no --strict-oracles flag).
+  console.log(`Oracle strict mode: ${loadConfig().strictOracles ? 'on' : 'off'} (spike.config.json "strictOracles" / SPIKE_STRICT_ORACLES env)`);
   console.log('API keys (in encrypted vault):');
   for (const p of PROVIDERS) {
     const name = VAULT_KEY_NAMES[p];
