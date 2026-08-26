@@ -516,6 +516,14 @@ export async function runDriverLoop(
 
   let stepIndex = 0; // running index across batches, bounded by maxSteps
   let lastBatchFirstSig: string | null = null; // for loop detection
+  // A27 (P1): rolling ax.text history for the repeat detector's pre/post-
+  // action comparison — one entry pushed per outer iteration (right after
+  // that iteration's fresh snapshot), capped at 3 (the oldest is "before the
+  // 2-repeat window began", the newest is "now", i.e. after both already-
+  // executed repeats landed). A same-action 3× streak only counts as a real
+  // stall when the tree is IDENTICAL across that whole window — see the
+  // repeat-detection block below.
+  let recentTreeTexts: string[] = [];
   let lastSnapshotAx: AxSnapshot | null = null; // last tree text, for the uncertain-reason heuristic
   // A1 (P0): the FIRST tree snapshot of the run — paired with the last one as
   // a best-effort before/after Observation for the Tier-2 metamorphic gate.
@@ -807,6 +815,21 @@ export async function runDriverLoop(
     }
   }
 
+  // A26 (P1): a FIXED budget for the WHOLE run, computed ONCE from the
+  // initial goal count — deliberately NOT recomputed after a brain re-plan
+  // swaps in a fresh goals[] (escalate()'s `goals = [...goals.slice(0,
+  // currentGoal), ...gp.goals]`). Recomputing from the live goals.length
+  // would let an adversarial/misbehaving re-plan keep the bound growing in
+  // lockstep with goalTransitions (each escalation resets brainEscalations
+  // on the very next goalComplete — see that branch below — so an
+  // escalate-then-complete cycle can repeat indefinitely without ever
+  // tripping MAX_BRAIN_ESCALATIONS). MAX_BRAIN_ESCALATIONS * 12 gives room
+  // for that many escalation-driven re-plans (each capped at 12 new goals —
+  // see GoalPlanSchema) before the run is forced to end honestly regardless
+  // of how large goals has grown by then.
+  const maxGoalTransitions = goals.length + MAX_BRAIN_ESCALATIONS * 12;
+  let goalTransitions = 0;
+
   // each outer iteration = ONE navigator call → a batch of 1-3 actions (or a
   // meta-output: goalComplete / blocked) toward the current goal.
   while (stepIndex < maxSteps && !done) {
@@ -840,6 +863,10 @@ export async function runDriverLoop(
     const ax = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
     lastSnapshotAx = ax;
     firstSnapshotAx ??= ax;
+    // A27: one sample per outer iteration, capped at 3 — see recentTreeTexts's
+    // doc comment above.
+    recentTreeTexts.push(ax.text);
+    if (recentTreeTexts.length > 3) recentTreeTexts.shift();
     const batchUrl = await browser.url();
 
     if (actionCache && stepIndex < maxSteps) {
@@ -853,6 +880,25 @@ export async function runDriverLoop(
         if (!cachedAction || cachedAction.type === 'assert_visual' || cachedAction.type === 'finish' || cachedAction.type === 'wait') {
           actionCacheStats.stale++;
           continue;
+        }
+        // A20 (P1): verify BEFORE execute — a mutating cache hit must never
+        // dispatch first and check correctness after (a wrong hit is a real
+        // side effect on the app under test: submit/delete/add-to-cart…).
+        // Resolution against the CURRENT tree already happened above
+        // (actionFromCachedValue); unambiguous resolution is enforced inside
+        // it (A21 — findByCachedTarget/pickClearCacheWinner returns null on a
+        // same-role+name collision with no `nth`, which actionFromCachedValue
+        // already surfaces as `cachedAction === null` above). What's left is
+        // actionability (A19's waitForActionable) — on failure, treat this
+        // exactly like any other stale/unresolvable hit: a cache MISS that
+        // falls through to the navigator this step, never a guess.
+        if (cachedAction.type === 'click' || cachedAction.type === 'type' || cachedAction.type === 'select_option') {
+          try {
+            await browser.waitForActionable?.(cachedAction.nodeId);
+          } catch {
+            actionCacheStats.stale++;
+            continue;
+          }
         }
         const i = stepIndex++;
         stepsInGoal++;
@@ -950,11 +996,27 @@ export async function runDriverLoop(
       continue;
     }
     if (plan.goalComplete) {
+      // A26 (P1): count this transition against the FIXED whole-run budget —
+      // see maxGoalTransitions's doc comment above the outer while loop.
+      // goalComplete never touches stepIndex, so without this a run that
+      // keeps completing goals (an oversized/repeatedly-re-planned checklist)
+      // never trips maxSteps either.
+      goalTransitions++;
+      if (goalTransitions > maxGoalTransitions) {
+        verdict = 'uncertain';
+        reason = `goal transitions (${goalTransitions}) exceeded the bound (${maxGoalTransitions}) — the navigator kept completing goals without the run settling`;
+        break;
+      }
       currentGoal++;
       hint = undefined;
       stepsInGoal = 0;
       brainEscalations = 0; // completing a goal is progress
       noBrainRecoveryAttempts = 0;
+      // A27 (P1): a goal boundary invalidates the repeat detector's history —
+      // a fresh goal starting with the "same" action type as the tail of the
+      // last one is not a loop.
+      lastBatchFirstSig = null;
+      recentTreeTexts = [];
       if (currentGoal >= goals.length) {
         const outcome = await runFinishPass(`completed all ${goals.length} goals`);
         if (outcome === 'continue') continue;
@@ -985,12 +1047,23 @@ export async function runDriverLoop(
     // ---- loop detection → escalate FIRST (was: end the run) ----
     // compare the FIRST action of consecutive identical single-action batches.
     const firstSig = actions.length === 1 ? JSON.stringify(actions[0]) : null;
+    // A27 (P1): effect-blind check — a same-action 3× streak only counts as a
+    // real stall when the page tree is IDENTICAL across the whole repeated
+    // window (recentTreeTexts[0] = 2 iterations back, i.e. before the first
+    // already-executed repeat; recentTreeTexts[2] = now, i.e. after the
+    // second one landed). An action that changed the page — a stepper "+"
+    // button, a wizard "Next" — is progress, not a loop, even when the
+    // action TYPE repeats. Too little history (early in the run) can't prove
+    // a stall either way, so it defaults to "not a loop" (the safe
+    // direction — see recentTreeTexts.length === 3 below).
+    const repeatedActionHadNoEffect = recentTreeTexts.length === 3 && recentTreeTexts[0] === recentTreeTexts[2];
     if (
       firstSig !== null &&
       firstSig === lastBatchFirstSig &&
       steps.length >= 2 &&
       JSON.stringify(steps[steps.length - 1].action) === firstSig &&
-      JSON.stringify(steps[steps.length - 2].action) === firstSig
+      JSON.stringify(steps[steps.length - 2].action) === firstSig &&
+      repeatedActionHadNoEffect
     ) {
       const visibleErr = visibleErrorText(lastSnapshotAx?.text);
       const outcome = await escalate(
@@ -1227,7 +1300,9 @@ export async function runDriverLoop(
           // never hold the real value. Missing secret → step fails.
           const resolvedRun = resolveRunPlaceholders(action.text, runData).text;
           const resolved = resolveSecrets(resolvedRun, vault);
-          batchDirty = await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
+          const typeOutcome = await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
+          batchDirty = typeOutcome.batchDirty;
+          if (!typeOutcome.waited) record.description += ' [dispatched without confirming actionability — wait timed out]';
         } else if (action.type === 'extract') {
           if (action.prompt) {
             // Phase 15 — model-assisted extraction: TEXT-only, via the SAME
@@ -1285,7 +1360,16 @@ export async function runDriverLoop(
             }
           }
         } else if (action.type === 'drag_and_drop') {
-          await browser.dragAndDrop(action.sourceId, action.targetId);
+          // A28 (P1): route through the SAME stale-node retry every other
+          // nodeId-based verb gets — this used to call browser.dragAndDrop()
+          // directly, bypassing executeWithRetry's re-resolve-by-role+name
+          // recovery entirely (a source/target detached between snapshot and
+          // execution just threw, no retry). executeWithRetry also applies
+          // the A19 actionability wait to BOTH sourceId and targetId before
+          // dispatch.
+          const dragOutcome = await executeWithRetry(browser, action, ax.root);
+          batchDirty = dragOutcome.batchDirty;
+          if (!dragOutcome.waited) record.description += ' [dispatched without confirming actionability — wait timed out]';
         } else if (action.type === 'open_tab') {
           const tabId = await browser.openTab(action.url);
           // reuse the single StepTarget slot to carry the runtime tab id — the
@@ -1315,7 +1399,9 @@ export async function runDriverLoop(
             }
           }
         } else {
-          batchDirty = await executeWithRetry(browser, action, ax.root);
+          const outcome = await executeWithRetry(browser, action, ax.root);
+          batchDirty = outcome.batchDirty;
+          if (!outcome.waited) record.description += ' [dispatched without confirming actionability — wait timed out]';
         }
       } catch (e) {
         if (e instanceof RunDataNotFoundError) {
@@ -1770,41 +1856,104 @@ async function planGoalsOnce(
 
 /* ---------- execution ---------- */
 
+/** A19 (P1): result of executeWithRetry. `batchDirty` is A3's unchanged
+ * meaning (see below); `waited` is false when the pre-dispatch actionability
+ * wait (waitForActionable) was attempted but timed out — the action is still
+ * dispatched (today's pre-A19 behavior), the caller just records that the
+ * wait didn't confirm actionability first. */
+export interface ExecuteOutcome {
+  batchDirty: boolean;
+  waited: boolean;
+}
+
+/** A19 (P1): the node id(s) an action's actionability should be confirmed on
+ * before dispatch, mirroring recorder/replay.ts's `waitForActionable?.()`
+ * calls ahead of the SAME verbs (click/type/hover/select_option/upload_file/
+ * blur/drag_and_drop's two targets) — now shared by BOTH the live
+ * navigator-driven path and the action-cache execution path, since both
+ * funnel mutating single-node actions through executeWithRetry. Actions with
+ * no resolvable node target (navigate/reload/go_back/press_key/mouse/wait)
+ * are not covered — there is nothing to probe. */
+function actionabilityNodeIds(action: Action): string[] {
+  switch (action.type) {
+    case 'click':
+    case 'type':
+    case 'hover':
+    case 'select_option':
+    case 'upload_file':
+    case 'blur':
+      return [action.nodeId];
+    case 'drag_and_drop':
+      return [action.sourceId, action.targetId];
+    default:
+      return [];
+  }
+}
+
 /** Execute one action, retrying ONCE via a fresh re-snapshot if the DOM
- * shifted between the batch's snapshot and execution. Returns true when the
- * retry path fired (a fresh `browser.axTree()` was taken) — A3 (P0): that
- * fresh snapshot rebuilds the port's internal nodeId->backendDOMNodeId map
- * (see cdp-browser.ts / playwright-browser.ts), so any LATER action in the
- * same batch would resolve its (now-stale) nodeId against the WRONG node if
- * the caller kept going — ids are sequential per-snapshot, so a coincidental
- * match silently hits a different element with `ok: true`. The caller
- * (loop.ts's main batch executor) treats a `true` return as "batch dirty"
- * and discards the rest of the batch instead of risking a false-success
- * wrong-element interaction. */
-async function executeWithRetry(browser: BrowserPort, action: Action, planTree: AxNode): Promise<boolean> {
+ * shifted between the batch's snapshot and execution. `batchDirty` is true
+ * when the retry path fired (a fresh `browser.axTree()` was taken) — A3
+ * (P0): that fresh snapshot rebuilds the port's internal
+ * nodeId->backendDOMNodeId map (see cdp-browser.ts / playwright-browser.ts),
+ * so any LATER action in the same batch would resolve its (now-stale)
+ * nodeId against the WRONG node if the caller kept going — ids are
+ * sequential per-snapshot, so a coincidental match silently hits a different
+ * element with `ok: true`. The caller (loop.ts's main batch executor) treats
+ * a `true` batchDirty as "batch dirty" and discards the rest of the batch
+ * instead of risking a false-success wrong-element interaction.
+ *
+ * A19 (P1): before dispatch, waits for actionability (attached/visible/
+ * enabled/stable — see BrowserPort.waitForActionable) on every node the
+ * action touches. Best-effort: guarded by the optional method (a port/test
+ * stub without it is a silent no-op, `waited` stays true) and a timeout
+ * proceeds with the action anyway rather than failing the step outright —
+ * see ExecuteOutcome's doc comment. */
+async function executeWithRetry(browser: BrowserPort, action: Action, planTree: AxNode): Promise<ExecuteOutcome> {
+  let waited = true;
+  for (const nodeId of actionabilityNodeIds(action)) {
+    try {
+      await browser.waitForActionable?.(nodeId);
+    } catch {
+      waited = false; // timed out — proceed anyway (today's behavior); caller records this
+    }
+  }
   try {
     await executeOnce(browser, action);
-    return false;
+    return { batchDirty: false, waited };
   } catch (firstErr) {
     // DOM may have shifted between snapshot and execution: re-resolve the
-    // target by role+name in a FRESH tree and retry once
+    // target(s) by role+name in a FRESH tree and retry once
     if (
       action.type !== 'click' &&
       action.type !== 'type' &&
       action.type !== 'hover' &&
       action.type !== 'select_option' &&
       action.type !== 'upload_file' &&
-      action.type !== 'blur'
+      action.type !== 'blur' &&
+      // A28 (P1): drag_and_drop now gets the same stale-node retry every
+      // other nodeId-based verb gets, instead of throwing straight through
+      // on a single detached source/target.
+      action.type !== 'drag_and_drop'
     ) {
       throw firstErr;
     }
+    const fresh = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
+    if (action.type === 'drag_and_drop') {
+      const srcNode = findNode(planTree, action.sourceId);
+      const dstNode = findNode(planTree, action.targetId);
+      if (!srcNode || !dstNode) throw firstErr;
+      const srcMatch = findByRoleName(fresh.root, srcNode.role, srcNode.name);
+      const dstMatch = findByRoleName(fresh.root, dstNode.role, dstNode.name);
+      if (!srcMatch || !dstMatch) throw firstErr;
+      await executeOnce(browser, { ...action, sourceId: srcMatch.id, targetId: dstMatch.id });
+      return { batchDirty: true, waited };
+    }
     const target = findNode(planTree, action.nodeId);
     if (!target) throw firstErr;
-    const fresh = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
     const match = findByRoleName(fresh.root, target.role, target.name);
     if (!match) throw firstErr;
     await executeOnce(browser, { ...action, nodeId: match.id });
-    return true;
+    return { batchDirty: true, waited };
   }
 }
 
@@ -1834,6 +1983,11 @@ async function executeOnce(browser: BrowserPort, action: Action): Promise<void> 
       return browser.mouse(action.kind, action.x, action.y);
     case 'wait':
       return sleep(action.ms);
+    // A28 (P1): drag_and_drop is now dispatched through executeWithRetry
+    // (previously called browser.dragAndDrop() directly from the main
+    // executor, bypassing this function and the stale-node retry entirely).
+    case 'drag_and_drop':
+      return browser.dragAndDrop(action.sourceId, action.targetId);
     default:
       throw new Error(`executeOnce: unexpected action ${action.type}`);
   }

@@ -427,7 +427,59 @@ function makeLiteBrowserDeps(tabId) {
 
 let liteBusy = false;
 let liteAbort = null;
+/* A23 (lite path): set right before liteAbort.abort() by the chrome.debugger.
+ * onDetach handler below, so runLiteFromPanel can report a clear reason
+ * instead of whatever opaque error the lite engine surfaces for a plain
+ * aborted signal (it just says "cancelled by user", same as any other
+ * cancellation — not helpful when what actually happened is Chrome's
+ * debugging session got closed out from under it). */
+let liteAbortReason = null;
 let lastLiteBundle = null; // for a future "download report" affordance
+
+/* A22: MV3 can tear this SW down mid-run (long Nano/BYOK awaits with no
+ * chrome.* touches invite eviction) — when it restarts, liteBusy/liteAbort
+ * are gone and the panel's next status poll just gets busy:false, silently.
+ * We checkpoint {runId, startedAt, task} to chrome.storage.session (survives
+ * SW restarts, cleared on browser close — unlike storage.local) at run start
+ * and clear it on completion. On a fresh SW init (see the IIFE below) a
+ * leftover checkpoint means the PRIOR run never got to clear it — i.e. the SW
+ * was evicted/crashed mid-run — so we record it in memory as `orphanedRun`
+ * for the panel's status poll to report. */
+const LITE_RUN_CHECKPOINT_KEY = 'spikeLiteRunCheckpoint';
+/** {runId, startedAt, task} of a run whose checkpoint survived a SW restart
+ * (i.e. the SW was evicted/crashed mid-run) — null once reported and a fresh
+ * run starts, or if this SW start is a normal (non-orphaned) one. */
+let orphanedRun = null;
+
+function sessionGet(key) {
+  return new Promise((resolve) => {
+    try { chrome.storage.session.get(key, (v) => resolve(v && v[key])); }
+    catch { resolve(undefined); }
+  });
+}
+function sessionSet(obj) {
+  return new Promise((resolve) => {
+    try { chrome.storage.session.set(obj, () => resolve()); }
+    catch { resolve(); }
+  });
+}
+function sessionRemove(key) {
+  return new Promise((resolve) => {
+    try { chrome.storage.session.remove(key, () => resolve()); }
+    catch { resolve(); }
+  });
+}
+
+// SW cold-start check (runs once per SW init, including a restart after
+// eviction): a leftover checkpoint means the run it named never completed.
+(async () => {
+  const leftover = await sessionGet(LITE_RUN_CHECKPOINT_KEY);
+  if (leftover && typeof leftover === 'object' && typeof leftover.runId === 'string') {
+    orphanedRun = leftover;
+    log('orphaned lite run found on SW cold start (evicted mid-run):', leftover.runId);
+    await sessionRemove(LITE_RUN_CHECKPOINT_KEY);
+  }
+})();
 
 async function runLiteFromPanel(port, msg) {
   if (liteBusy) { port.postMessage({ kind: 'error', message: 'a run is already in progress' }); return; }
@@ -454,7 +506,15 @@ async function runLiteFromPanel(port, msg) {
   }
   liteBusy = true;
   liteAbort = new AbortController();
+  liteAbortReason = null;
   lastRunTabId = tabId;
+  // A22: this run supersedes whatever orphan report (if any) was left from a
+  // prior SW life — starting fresh work is the natural "acknowledged" point.
+  orphanedRun = null;
+  const checkpointRunId = (typeof crypto !== 'undefined' && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  await sessionSet({ [LITE_RUN_CHECKPOINT_KEY]: { runId: checkpointRunId, startedAt: Date.now(), task: msg.task } });
   port.postMessage({ kind: 'accepted' });
   try {
     await attachDebugger(tabId);
@@ -475,14 +535,24 @@ async function runLiteFromPanel(port, msg) {
       onStep: (info) => broadcastToPanels({ kind: 'step', ...info }),
       signal: liteAbort.signal,
     });
-    lastLiteBundle = result.bundle;
-    broadcastToPanels({ kind: 'done', ...result.done });
+    // A23: the engine returns a normal (not thrown) result even when its
+    // signal was aborted mid-run — it just stamps a generic "cancelled by
+    // user" reason. If OUR abort fired because the debugger detached, prefer
+    // that clear message over the generic result.
+    if (liteAbortReason) {
+      broadcastToPanels({ kind: 'error', message: liteAbortReason });
+    } else {
+      lastLiteBundle = result.bundle;
+      broadcastToPanels({ kind: 'done', ...result.done });
+    }
   } catch (e) {
-    broadcastToPanels({ kind: 'error', message: String(e && e.message ? e.message : e) });
+    broadcastToPanels({ kind: 'error', message: liteAbortReason || String(e && e.message ? e.message : e) });
   } finally {
     sendOverlayEnd(tabId);
     liteBusy = false;
     liteAbort = null;
+    liteAbortReason = null;
+    await sessionRemove(LITE_RUN_CHECKPOINT_KEY); // A22: run ended (pass/fail) — nothing to orphan
   }
 }
 
@@ -570,12 +640,15 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'status': {
-          if (!daemonConnected()) { port.postMessage({ kind: 'status', busy: liteBusy }); break; }
+          // A22: surface a leftover checkpoint from a run the SW never got to
+          // finish (evicted/crashed mid-run) so the panel can tell the user
+          // rather than staying silent about it.
+          if (!daemonConnected()) { port.postMessage({ kind: 'status', busy: liteBusy, orphanedRun }); break; }
           try {
             const result = await sendRequest('vibe.status', {});
-            port.postMessage({ kind: 'status', busy: !!(result && result.busy) });
+            port.postMessage({ kind: 'status', busy: !!(result && result.busy), orphanedRun });
           } catch (e) {
-            port.postMessage({ kind: 'status', busy: false, error: String(e && e.message ? e.message : e) });
+            port.postMessage({ kind: 'status', busy: false, error: String(e && e.message ? e.message : e), orphanedRun });
           }
           break;
         }
@@ -1165,7 +1238,15 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined) return;
   attached.delete(source.tabId);
-  emit('detached', { tabId: source.tabId, reason });
+  emit('detached', { tabId: source.tabId, reason }); // daemon path: VibeService (src/vibe/service.ts) aborts on this
+  // A23 (lite path): a mid-run detach (e.g. the user dismissed Chrome's
+  // "<ext> is debugging this browser" banner) kills the CDP connection the
+  // lite engine is driving over — abort now with a clear reason instead of
+  // letting every subsequent chrome.debugger call fail with an opaque error.
+  if (liteAbort && !liteAbort.signal.aborted && source.tabId === lastRunTabId) {
+    liteAbortReason = "Chrome's debugging session was closed";
+    liteAbort.abort(liteAbortReason);
+  }
 });
 
 // ---- WebSocket connection / reconnect loop ---------------------------------

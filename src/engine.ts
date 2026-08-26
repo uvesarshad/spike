@@ -883,6 +883,22 @@ async function runFreshAiPass(
   // comment. Guarded by the same try/close-on-failure discipline openSession
   // itself uses for nano.start(), so a bad --storage-state path or a
   // misconfigured route rule doesn't leak the session.
+  //
+  // A30 (P1): this try/catch used to end right after storage-state injection,
+  // leaving nano.warmup()/buildLadder()/ArtifactStore/FileActionCache to run
+  // AFTER the session opened but BEFORE the driver's own try/finally (which
+  // only starts once `artifacts`/`actionCache` already exist) — so a throw
+  // from any of those four (e.g. a persistent misconfigured model id) leaked
+  // the already-opened browser tab/bridge connection on every attempt.
+  // Extending this same close-on-throw block through all of session-local
+  // init closes that window without touching the driver's own try/finally.
+  let vault: Vault;
+  let adapters: ModelAdapter[];
+  let navigatorName: string | undefined;
+  let plannerName: string | undefined;
+  let router: ModelRouter;
+  let artifacts: ArtifactStore;
+  let actionCache: FileActionCache | undefined;
   try {
     await applyRouteRules(browser, cfg.routeRules);
     await applyEmulation(browser, cfg.emulation);
@@ -890,34 +906,36 @@ async function runFreshAiPass(
       await injectStorageState(browser, loadStorageStateFile(opts.storageStatePath));
       progress(`storage state loaded from ${opts.storageStatePath}`);
     }
+
+    vault = new Vault();
+    adapters = [];
+    if (nano && (await pollNanoAvailable(nano, progress)) === 'available') {
+      progress('rung 0: Gemini Nano available — warming up');
+      await nano.warmup();
+      adapters.push(new NanoAdapter(nano));
+    } else {
+      progress('rung 0: Gemini Nano not available — ladder starts at rung 1 (run `spike nano --download` to enable $0 visual checks)');
+    }
+    // The rest of the ladder + the user's two pins: navigator (plan-step, cheap) and
+    // brain (plan-goals, smart). Each leads its own ladder; fallback stays intact.
+    const built = buildLadder(cfg, vault);
+    navigatorName = built.navigatorName;
+    plannerName = built.plannerName;
+    adapters.push(...built.adapters);
+    if (navigatorName && navigatorName !== 'nano') progress(`navigator: ${navigatorName} (leads the per-step ladder; fallback intact)`);
+    if (plannerName && plannerName !== 'nano') progress(`brain: ${plannerName} (leads the plan/re-plan ladder; consulted on stuck)`);
+    router = new ModelRouter(adapters, {
+      preferFreePlanner: cfg.preferFreePlanner,
+      navigatorAdapter: navigatorName,
+      plannerAdapter: plannerName,
+    });
+
+    artifacts = new ArtifactStore(cfg.artifactsDir);
+    actionCache = cfg.actionCache ? new FileActionCache(cfg.actionCacheDir) : undefined;
   } catch (e) {
     await session.close();
     throw e;
   }
-
-  const vault = new Vault();
-  const adapters: ModelAdapter[] = [];
-  if (nano && (await pollNanoAvailable(nano, progress)) === 'available') {
-    progress('rung 0: Gemini Nano available — warming up');
-    await nano.warmup();
-    adapters.push(new NanoAdapter(nano));
-  } else {
-    progress('rung 0: Gemini Nano not available — ladder starts at rung 1 (run `spike nano --download` to enable $0 visual checks)');
-  }
-  // The rest of the ladder + the user's two pins: navigator (plan-step, cheap) and
-  // brain (plan-goals, smart). Each leads its own ladder; fallback stays intact.
-  const { adapters: ladder, navigatorName, plannerName } = buildLadder(cfg, vault);
-  adapters.push(...ladder);
-  if (navigatorName && navigatorName !== 'nano') progress(`navigator: ${navigatorName} (leads the per-step ladder; fallback intact)`);
-  if (plannerName && plannerName !== 'nano') progress(`brain: ${plannerName} (leads the plan/re-plan ladder; consulted on stuck)`);
-  const router = new ModelRouter(adapters, {
-    preferFreePlanner: cfg.preferFreePlanner,
-    navigatorAdapter: navigatorName,
-    plannerAdapter: plannerName,
-  });
-
-  const artifacts = new ArtifactStore(cfg.artifactsDir);
-  const actionCache = cfg.actionCache ? new FileActionCache(cfg.actionCacheDir) : undefined;
   progress(`run ${artifacts.runId}: "${task}" on ${url}`);
   runSpan.setAttribute('runId', artifacts.runId);
   runSpan.addEvent('session.opened', { via: cfg.via, navigator: navigatorName ?? 'nano', brain: plannerName ?? 'nano' });

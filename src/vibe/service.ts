@@ -99,6 +99,16 @@ export class VibeService {
   private fixing = false;
   /** Aborts the active qaRun (vibe.cancel). Null when no run is in flight. */
   private activeRun: AbortController | null = null;
+  /** tabId the active run is driving, when known (undefined for a create-a-tab
+   * run) — lets the A23 detach handler below match a `detached` event to the
+   * run it actually affects, rather than aborting on any stray detach. */
+  private activeRunTabId: number | null = null;
+  /** A23: set right before aborting `activeRun` because of a `detached` bridge
+   * event, so `execute()` can report a clear reason instead of whatever
+   * generic message qaRun surfaces for a plain aborted signal ("cancelled by
+   * user" — same wording as an explicit vibe.cancel, not helpful when what
+   * actually happened is Chrome's debugging session was closed). */
+  private detachAbortMessage: string | null = null;
   /** Absolute path of the clip saved by the most recent run (replay.mp4|.webm).
    * Null until a run produces one; vibe.clip serves it back to the panel. */
   private lastClipPath: string | null = null;
@@ -112,6 +122,24 @@ export class VibeService {
   }
 
   start(): void {
+    // A23: sw.js emits {event:'detached'} whenever chrome.debugger detaches
+    // from a tab (e.g. the user dismissed Chrome's "<ext> is debugging this
+    // browser" banner). Previously nothing subscribed to it — the run just
+    // kept going, hammering a dead CDP session, and failed later with an
+    // opaque error instead of a clear one. Single-run invariant means there's
+    // at most one activeRun at a time, so an unmatched tabId on the run
+    // (create-a-tab path — activeRunTabId is null) treats any detach as
+    // affecting it; a known tabId only aborts on a matching detach.
+    this.bridge.onEvent((evt) => {
+      if (evt.event !== 'detached') return;
+      if (!this.activeRun) return;
+      const params = evt.params as { tabId?: unknown };
+      const tabId = typeof params.tabId === 'number' ? params.tabId : undefined;
+      if (this.activeRunTabId !== null && tabId !== undefined && tabId !== this.activeRunTabId) return;
+      this.detachAbortMessage = "Chrome's debugging session was closed";
+      this.activeRun.abort();
+    });
+
     this.bridge.onRequest('vibe.status', async () => ({ busy: this.busy }));
     this.bridge.onRequest('vibe.run', async (params, ctx) => {
       // A3: only the paired bridge client (A2) may drive a run.
@@ -300,6 +328,8 @@ export class VibeService {
   private async execute(task: string, url: string, tabId?: number, allowHost?: string, clientId?: number): Promise<void> {
     const controller = new AbortController();
     this.activeRun = controller;
+    this.activeRunTabId = typeof tabId === 'number' ? tabId : null;
+    this.detachAbortMessage = null;
     const target = clientId !== undefined ? { clientId } : undefined;
     const progress = (line: string) => this.bridge.sendEvent('vibe.progress', { line }, target);
 
@@ -355,24 +385,34 @@ export class VibeService {
       // alongside report.json + screenshots.
       const clipPath = recording ? await this.stopAndSaveClip(report.runId, progress, target) : undefined;
 
-      // Stash a failure so the panel can offer "fix it"; clear on success.
-      this.lastFailedReport = report.verdict === 'pass' ? null : report;
-      this.bridge.sendEvent('vibe.done', {
-        ...slimReport(report),
-        plainReport: renderPlainReport(report),
-        fixPrompt: buildFixPrompt(report),
-        durationMs: report.durationMs,
-        ...(clipPath ? { clipPath } : {}),
-      }, target);
+      // A23: qaRun returns a normal (not thrown) report even when its signal
+      // was aborted mid-run — the driver just stamps a generic "cancelled by
+      // user" reason. If OUR abort fired because the debugger detached,
+      // report that clear reason instead of the generic result.
+      if (this.detachAbortMessage) {
+        this.bridge.sendEvent('vibe.error', { message: this.detachAbortMessage }, target);
+      } else {
+        // Stash a failure so the panel can offer "fix it"; clear on success.
+        this.lastFailedReport = report.verdict === 'pass' ? null : report;
+        this.bridge.sendEvent('vibe.done', {
+          ...slimReport(report),
+          plainReport: renderPlainReport(report),
+          fixPrompt: buildFixPrompt(report),
+          durationMs: report.durationMs,
+          ...(clipPath ? { clipPath } : {}),
+        }, target);
+      }
     } catch (e) {
       // A run failure must not leave a recorder running in the offscreen doc.
       if (recording) { try { await this.bridge.call('rec.stop', {}, 25_000, target); } catch { /* best effort */ } }
       this.bridge.sendEvent('vibe.error', {
-        message: e instanceof Error ? e.message : String(e),
+        message: this.detachAbortMessage ?? (e instanceof Error ? e.message : String(e)),
       }, target);
     } finally {
       this.busy = false;
       this.activeRun = null;
+      this.activeRunTabId = null;
+      this.detachAbortMessage = null;
     }
   }
 

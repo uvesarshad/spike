@@ -225,7 +225,12 @@ export const PLAN_JSON_SCHEMA = {
  * navigator, or a final `verdict` (with `reason`) when the task is done/impossible. */
 export const GoalPlanSchema = z.object({
   thought: z.string(),
-  goals: z.array(z.string()).min(1).optional(),
+  // A26 (P1): capped at 12 — an oversized goal list paired with an
+  // instant-goalComplete navigator is unbounded LLM calls that never trip
+  // maxSteps (see loop.ts's maxGoalTransitions guard, which bounds the OTHER
+  // half of this: how many goal transitions a run may consume even across
+  // brain re-plans).
+  goals: z.array(z.string()).min(1).max(12).optional(),
   hint: z.string().optional(),
   verdict: z.enum(['pass', 'fail']).optional(),
   reason: z.string().optional(),
@@ -243,7 +248,8 @@ export const GOAL_PLAN_JSON_SCHEMA = {
     goals: {
       type: 'array',
       minItems: 1,
-      description: 'ordered sub-goals for the navigator to execute one at a time',
+      maxItems: 12,
+      description: 'ordered sub-goals for the navigator to execute one at a time (max 12)',
       items: { type: 'string' },
     },
     hint: { type: 'string', description: 'a hint for the navigator instead of re-planning the goals' },

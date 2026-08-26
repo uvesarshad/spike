@@ -742,7 +742,25 @@ function findByCachedTarget(root: AxNode, target: CachedTarget): AxNode | undefi
     for (const child of node.children ?? []) walk(child);
   };
   walk(root);
-  return matches[target.nth ?? 0];
+  return pickClearCacheWinner(matches, target);
+}
+
+/** A21 (P1): port of recorder/replay.ts's `pickClearRoleWinner` collision
+ * discipline into the action cache — `matches[target.nth ?? 0]` used to pick
+ * index 0 silently whenever a page grew a second same-role+name element after
+ * the entry was cached (audit A21). `CachedTarget` carries no landmark/
+ * siblingText disambiguation hints the way `replay.ts`'s scored candidates
+ * do (only role/name/nth/qaId — see `CachedTarget`), so unlike the full
+ * scored version, an explicit `nth` is the ONLY signal available here: with
+ * one, pick that index (matching pre-A21 behavior when nth was recorded);
+ * with none and more than one match, it is an unbreakable tie — return
+ * `undefined` (a miss) rather than guess, exactly as `pickClearRoleWinner`
+ * returns null on a tie. */
+function pickClearCacheWinner(matches: AxNode[], target: CachedTarget): AxNode | undefined {
+  if (matches.length === 0) return undefined;
+  if (typeof target.nth === 'number') return matches[target.nth];
+  if (matches.length === 1) return matches[0];
+  return undefined; // ambiguous role+name, no nth to disambiguate — cache miss, not matches[0]
 }
 
 function findNode(root: AxNode, id: string): AxNode | undefined {

@@ -12,6 +12,31 @@
 import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson, withSchemaInstruction } from '../adapter.js';
 
+/* A25 — attach a typed `.retryAfterMs` hint (ms) to a 429/503 error, parsed
+ * from the HTTP `Retry-After` header (either a plain seconds count or an
+ * HTTP-date). This feeds the SAME typed-hint path model-router.ts's
+ * classifyFailure() already gives priority over its own text-sniffing (the
+ * mechanism that, today, is what picks Gemini's body-embedded `retryDelay`
+ * out of the error message) — see classifyFailure()'s step 1. Real
+ * rate-limit guidance from the server wins over blind exponential backoff. */
+function withRetryAfterHint(err: Error, res: Response): Error {
+  if (res.status !== 429 && res.status !== 503) return err;
+  const header = res.headers.get('retry-after');
+  if (!header) return err;
+  const trimmed = header.trim();
+  let ms: number | undefined;
+  if (/^\d+$/.test(trimmed)) {
+    ms = Number(trimmed) * 1000;
+  } else {
+    const dateMs = Date.parse(trimmed);
+    if (Number.isFinite(dateMs)) ms = dateMs - Date.now();
+  }
+  if (ms !== undefined && Number.isFinite(ms)) {
+    (err as Error & { retryAfterMs?: number }).retryAfterMs = Math.max(0, ms);
+  }
+  return err;
+}
+
 export interface AnthropicOptions {
   apiKey?: string;
   model: string;
@@ -73,7 +98,7 @@ export class AnthropicAdapter implements ModelAdapter {
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 120_000),
     });
     if (!res.ok) {
-      throw new Error(`anthropic api ${res.status}: ${(await res.text()).slice(0, 400)}`);
+      throw withRetryAfterHint(new Error(`anthropic api ${res.status}: ${(await res.text()).slice(0, 400)}`), res);
     }
     const body = (await res.json()) as {
       content?: { type: string; text?: string }[];
