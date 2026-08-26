@@ -102,14 +102,36 @@ export function hostOfUrl(url: string): string {
   }
 }
 
-/** True when host is exactly in allowedHosts or a subdomain of one of them.
+/** A45 (P2): matching rules for one `allowedHosts` entry against a live host —
+ * exact host or its `www.` sibling ONLY, unless the entry opts into
+ * subdomain-suffix matching by starting with a literal `.` (e.g.
+ * `.example.com` trusts `anything.example.com`). Before this, a bare
+ * `example.com` entry silently trusted EVERY subdomain — correct for a domain
+ * you own outright, but wrong for a multi-tenant host (`*.vercel.app`,
+ * `*.myshopify.com` siblings), where `evil.example.com` (someone else's
+ * tenant) got the same click/type trust as the intended target. The
+ * apex↔www pair (`mapleandsand.com` ↔ `www.mapleandsand.com`) — the one case
+ * real sites need without opting in — stays covered by the plain-entry path;
+ * broader subdomain trust is now an explicit, deliberate `.`-prefixed entry. */
+function oneHostAllowed(rawHost: string, allowed: string): boolean {
+  // Lowercase both sides — callers normally already hand this a lowercased
+  // host (hostOfUrl() below always lowercases), but comparing case-sensitively
+  // here would make correctness depend on every caller getting that right.
+  const host = rawHost.toLowerCase();
+  if (allowed.startsWith('.')) {
+    const suffix = allowed.toLowerCase();
+    const bare = suffix.slice(1);
+    return host === bare || host.endsWith(suffix);
+  }
+  const a = allowed.toLowerCase();
+  return host === a || host === `www.${a}` || `www.${host}` === a;
+}
+
+/** True when host matches an `allowedHosts` entry per `oneHostAllowed` above.
  * Mirrors driver/loop.ts's hostAllowed() so both layers of the Tier-4 guard
  * (A4) agree on what "allowed" means. */
 export function isHostAllowed(host: string, allowedHosts: string[]): boolean {
-  return allowedHosts.some((allowed) => {
-    const a = allowed.toLowerCase();
-    return host === a || host.endsWith('.' + a);
-  });
+  return allowedHosts.some((allowed) => oneHostAllowed(host, allowed));
 }
 
 /** A4 (P0) defense-in-depth: the port-layer half of the Tier-4 mutation guard.

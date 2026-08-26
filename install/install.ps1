@@ -54,9 +54,12 @@ if ($nodeMajor -lt 20) {
 Write-Ok "Node $nodeVersion"
 
 Write-Step "Installing the qa CLI globally (npm i -g $PkgName)…"
-# --use-system-ca: on machines behind TLS-intercepting AV (e.g. AVG), the system
-# CA store is what lets npm/OAuth work. Harmless elsewhere.
-$env:NODE_OPTIONS = '--use-system-ca'
+# --use-system-ca: on machines behind a TLS-intercepting antivirus or
+# corporate proxy (AVG, Zscaler, etc.), the system CA store is what lets
+# npm/OAuth work. Harmless elsewhere. Set SPIKE_NO_SYSTEM_CA=1 to skip this.
+if ($env:SPIKE_NO_SYSTEM_CA -ne '1' -and $env:SPIKE_NO_SYSTEM_CA -ne 'true') {
+  $env:NODE_OPTIONS = '--use-system-ca'
+}
 & npm install -g $PkgName
 if ($LASTEXITCODE -ne 0) {
   Write-Warn "npm install failed (exit $LASTEXITCODE)."

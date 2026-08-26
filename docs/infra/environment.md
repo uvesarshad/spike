@@ -96,8 +96,11 @@ AGENT NOTE: After 2026-06-18, the Gemini free-tier CLI is replaced by the Antigr
 SPIKE_GOOGLE_CLI_MODEL - String. Model id passed to the Google CLI. Default: 'gemini-3-flash-preview'.
 Consumed by: src/router/adapters/google-cli.ts.
 
-NODE_OPTIONS - Injected into the Google CLI child process through cfg.googleCliEnv, not the daemon itself. Set to '--use-system-ca' on machines with AVG or Zscaler TLS interception to allow the CLI's OAuth calls to succeed.
+NODE_OPTIONS - Injected into the Google CLI child process through cfg.googleCliEnv, not the daemon itself. Defaults to '--use-system-ca' so the CLI trusts the OS certificate store, which is what lets its OAuth calls succeed on machines behind a TLS-intercepting antivirus or corporate proxy (AVG, Zscaler, and similar TLS-MITM setups).
 Consumed by: src/router/adapters/google-cli.ts.
+
+SPIKE_NO_SYSTEM_CA - '1'/'true' to omit the '--use-system-ca' NODE_OPTIONS default above (A36, P1) — e.g. on a machine where trusting the OS certificate store is itself undesirable. Also honored by `spike daemon --install-service` (src/service/install-service.ts) and the install/*.sh|ps1|bat scripts, so the same opt-out applies to the auto-start service env and the one-line installer.
+Consumed by: src/config.ts (defaultGoogleCliEnv), src/service/install-service.ts (serviceEnv), install/install.sh, install/install.ps1, install/install-linux.sh, install/install-mac.command, install/install-win.bat.
 
 ## Brain and Navigator Selection
 

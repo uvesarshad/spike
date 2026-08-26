@@ -1,0 +1,38 @@
+name: Publish
+
+# Tag-triggered npm release (A35a, docs/plan/26-08-27-tasks-market-readiness.md).
+#
+# Push a `v*` tag (e.g. `v1.0.0`) to publish that commit to npm. Runs the
+# fast test bucket first (same suites CI's `test` job runs — see ci.yml and
+# docs/infra/testing.md) as a last-line gate before anything goes out the
+# door; the tag-triggered run does NOT re-run the 3-OS matrix or the browser
+# bucket — those are covered by CI on the commit before it's tagged, and
+# `npm run test:browser` remains a local, pre-release manual gate (see
+# docs/infra/testing.md) that a human runs before cutting the tag.
+#
+# Requires an `NPM_TOKEN` repo secret (an npm automation/publish token for
+# the `spike-agent` package) with npm provenance enabled for this repo.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    name: npm publish --provenance
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # required for --provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test
+      - run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

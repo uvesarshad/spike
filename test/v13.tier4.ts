@@ -259,7 +259,22 @@ console.log('\n=== v13 3/3: read-only-by-default guard ===');
   check('read-only: step budget not burned (ended immediately)', report.steps.length === 0);
 }
 
-/* ----- subdomain-of an allowed host IS allowed ----- */
+/* ----- subdomain-of an allowed host: A45 (P2) tightened this to opt-in only —
+ * a bare entry ('localhost') no longer trusts every subdomain (that was too
+ * broad for multi-tenant hosts like *.vercel.app); a '.'-prefixed entry
+ * ('.localhost') still does. ----- */
+{
+  const browser = new FakeBrowser('http://app.localhost:3000/');
+  const router = new ModelRouter([
+    scriptedPlanner([{ thought: 'x', actions: [{ type: 'click', nodeId: 'n2' }] }]),
+  ]);
+  const report = await runDriverLoop(browser, router, tmpArtifacts(), 'x', 'http://app.localhost:3000/', {
+    maxSteps: 4,
+    allowedHosts: ['localhost'],
+  });
+  check('A45: a bare allowedHosts entry no longer trusts a subdomain (click blocked)', browser.clicked.length === 0);
+  check('A45: the bare-entry subdomain run tripped the read-only/host guard', /read-only mode/.test(report.reason));
+}
 {
   const browser = new FakeBrowser('http://app.localhost:3000/');
   const router = new ModelRouter([
@@ -270,10 +285,10 @@ console.log('\n=== v13 3/3: read-only-by-default guard ===');
   ]);
   const report = await runDriverLoop(browser, router, tmpArtifacts(), 'x', 'http://app.localhost:3000/', {
     maxSteps: 4,
-    allowedHosts: ['localhost'],
+    allowedHosts: ['.localhost'],
   });
-  check('subdomain of an allowed host is permitted (click ran)', browser.clicked.length === 1);
-  check('subdomain run did not trip the read-only guard', !/read-only mode/.test(report.reason));
+  check('A45: a "."-prefixed entry still permits a subdomain (click ran)', browser.clicked.length === 1);
+  check('A45: the opted-in subdomain run did not trip the read-only guard', !/read-only mode/.test(report.reason));
 }
 
 /* ----- abort signal ----- */

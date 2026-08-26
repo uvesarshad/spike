@@ -5,8 +5,19 @@
  * — a vision-capable model (default llama3.2-vision) does visual verdicts and
  * planning alike. */
 
-import type { Capability, JsonRequest, ModelAdapter } from '../adapter.js';
+import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson } from '../adapter.js';
+
+/** A50 (P2): ~4 chars/token is the standard rough English-text estimator —
+ * good enough for cost-accounting VISIBILITY (so this rung isn't silently
+ * zero in report.model_trace / the dashboard), not for billing precision.
+ * Always flagged `estimated: true` so a consumer never mistakes it for an
+ * API-reported exact count. */
+export function estimateUsage(promptChars: number, outputChars: number): AdapterUsage {
+  const promptTokens = Math.ceil(promptChars / 4);
+  const outputTokens = Math.ceil(outputChars / 4);
+  return { promptTokens, outputTokens, totalTokens: promptTokens + outputTokens, estimated: true };
+}
 
 export interface OllamaOptions {
   /** Vision-capable model tag (must be pulled into Ollama). */
@@ -23,6 +34,11 @@ export class OllamaAdapter implements ModelAdapter {
   private readonly model: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  /** A50 (P2): Ollama's /api/chat response carries no token-usage fields at
+   * all (unlike the HTTP BYOK adapters), so this rung silently zeroed out
+   * cost accounting in report.model_trace. Estimated from character counts —
+   * see estimateUsage's doc comment for why that's flagged, not exact. */
+  lastUsage?: AdapterUsage;
 
   constructor(opts: OllamaOptions = {}) {
     this.model = opts.model ?? 'llama3.2-vision';
@@ -77,9 +93,18 @@ export class OllamaAdapter implements ModelAdapter {
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {
-      throw new Error(`ollama ${res.status}: ${(await res.text()).slice(0, 400)}`);
+      // A50 (P2): "api status" is deliberate — model-router.ts's
+      // STATUS_IN_MESSAGE_RE now requires an HTTP-context word near the 3
+      // digits before it will classify them as a status code at all (see its
+      // doc comment); this keeps Ollama's 429/503 transient-retry detection
+      // working under that stricter regex.
+      throw new Error(`ollama api status ${res.status}: ${(await res.text()).slice(0, 400)}`);
     }
     const body = (await res.json()) as { message?: { content?: string } };
-    return extractJson(body.message?.content ?? '');
+    const content = body.message?.content ?? '';
+    // A50 (P2): the router reads adapter.lastUsage immediately after THIS
+    // call resolves, so it must be set before returning.
+    this.lastUsage = estimateUsage(req.prompt.length, content.length);
+    return extractJson(content);
   }
 }

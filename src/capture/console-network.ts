@@ -12,6 +12,17 @@ import type { ConsoleEntry, NetworkEntry } from '../ports/browser-port.js';
 export interface CaptureBuffers {
   drainConsole(): ConsoleEntry[];
   drainNetwork(): NetworkEntry[];
+  /** A49 (P2): drop in-flight requests the browser never resolved (no
+   * `responseReceived`/`loadingFailed` ever arrived — a request whose CDP
+   * events got lost, or a long-poll/SSE connection the page itself never
+   * closes) once they're older than `maxAgeMs`. Before this, `pending` only
+   * ever shrank on a matching settle event, so a long-running session (the
+   * daemon, a long suite run) leaked one Map entry per never-settled request
+   * forever. Each dropped entry is still recorded as evidence — pushed into
+   * the network buffer as a synthetic failed entry (`errorText: 'stale'`) —
+   * rather than silently discarded. The CALLER decides when to sweep (see
+   * cdp-browser.ts's periodic timer); this module has no timer of its own. */
+  sweepStalePending(maxAgeMs: number, now?: number): void;
 }
 
 /* A18 (P2): `NetworkEntry.failed` is deliberately narrow — 5xx + transport
@@ -94,6 +105,20 @@ export async function attachCapture(client: CDP.Client): Promise<CaptureBuffers>
       const out = networkBuf;
       networkBuf = [];
       return out;
+    },
+    sweepStalePending(maxAgeMs: number, now = Date.now()) {
+      for (const [requestId, req] of pending) {
+        if (now - req.ts < maxAgeMs) continue;
+        pending.delete(requestId);
+        networkBuf.push({
+          ts: req.ts,
+          method: req.method,
+          url: req.url,
+          ms: now - req.ts,
+          failed: true,
+          errorText: 'stale',
+        });
+      }
     },
   };
 }

@@ -13,9 +13,12 @@
  *   - Linux   : a systemd --user unit (falls back to a clear message if systemd
  *               user units aren't available — e.g. inside a bare container).
  *
- * We never require elevation: everything is per-user. The machine-specific AVG
- * TLS workaround (NODE_OPTIONS=--use-system-ca) is baked into the service env so
- * the daemon's own CLI child calls don't hit OAuth/TLS exit 41 (see CLAUDE.md).
+ * We never require elevation: everything is per-user. The TLS-intercepting-
+ * antivirus/corporate-proxy workaround (NODE_OPTIONS=--use-system-ca — needed
+ * behind AVG, Zscaler, and similar TLS-MITM setups) is baked into the service
+ * env by default so the daemon's own CLI child calls don't hit OAuth/TLS exit
+ * 41 (see CLAUDE.md). A36 (P1): set SPIKE_NO_SYSTEM_CA=1 before running
+ * --install-service to omit it.
  */
 
 import fs from 'node:fs';
@@ -47,7 +50,7 @@ const TASK_NAME = 'Spike Core'; // Windows Scheduled Task display name
 export interface InstallServiceOptions {
   /** Bridge port the daemon listens on; embedded into the service command. */
   bridgePort: number;
-  /** Extra env baked into the service (merged over the AVG TLS default). */
+  /** Extra env baked into the service (merged over the system-CA default; see serviceEnv()). */
   env?: Record<string, string>;
 }
 
@@ -70,12 +73,19 @@ function resolveSelf(): { node: string; cli: string } {
   return { node, cli };
 }
 
-/** The env every platform bakes in: the AVG/TLS fix, plus any caller extras. */
+/** The env every platform bakes in: the TLS-intercepting-AV/proxy fix (unless
+ * opted out via SPIKE_NO_SYSTEM_CA), plus any caller extras. */
 function serviceEnv(extra?: Record<string, string>): Record<string, string> {
+  const base: Record<string, string> = {};
+  // A36 (P1): honor SPIKE_NO_SYSTEM_CA=1 to omit the flag entirely. Otherwise
+  // prefer the system CA store so a TLS-intercepting antivirus or corporate
+  // proxy (AVG, Zscaler, …) doesn't break the daemon's OAuth calls — harmless
+  // on machines that don't need it.
+  if (process.env.SPIKE_NO_SYSTEM_CA !== '1' && process.env.SPIKE_NO_SYSTEM_CA !== 'true') {
+    base.NODE_OPTIONS = '--use-system-ca';
+  }
   return {
-    // machine-specific but harmless elsewhere: prefer the system CA store so
-    // corporate TLS interception (AVG here) doesn't break the daemon's OAuth.
-    NODE_OPTIONS: '--use-system-ca',
+    ...base,
     ...(extra || {}),
   };
 }
@@ -106,7 +116,8 @@ function installWindows(opts: InstallServiceOptions): ServiceResult {
   // schtasks /TR must be a single string; quote the exe + args. The task runs
   // `cmd /c set ...&& node cli.js daemon --bridge-port <n>` at logon of the
   // current user, with the env prefix baking in serviceEnv() (NODE_OPTIONS=
-  // --use-system-ca) the same way installMac()/installLinux() already do.
+  // --use-system-ca, unless SPIKE_NO_SYSTEM_CA=1) the same way
+  // installMac()/installLinux() already do.
   const envPrefix = cmdEnvPrefix(serviceEnv(opts.env));
   const tr = `cmd /c ${envPrefix} "${node}" "${cli}" daemon --bridge-port ${opts.bridgePort}`;
   // Scope the task to THIS user (/RU) so the ONLOGON trigger doesn't need the

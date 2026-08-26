@@ -29,9 +29,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
-import type { Capability, JsonRequest, ModelAdapter } from '../adapter.js';
+import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson, withSchemaInstruction } from '../adapter.js';
 import { isSafeModelId } from '../../vibe/settings.js';
+
+/** A50 (P2): ~4 chars/token — the standard rough English-text estimator, good
+ * enough to make this rung's cost visible in report.model_trace (it was
+ * silently zero before), not for billing precision. Always flagged
+ * `estimated: true` — see AdapterUsage's doc comment (adapter.ts). */
+export function estimateUsage(promptChars: number, outputChars: number): AdapterUsage {
+  const promptTokens = Math.ceil(promptChars / 4);
+  const outputTokens = Math.ceil(outputChars / 4);
+  return { promptTokens, outputTokens, totalTokens: promptTokens + outputTokens, estimated: true };
+}
 
 /** A24 (P1): kill the REAL CLI process (and anything it spawned), not just the
  * `shell:true` wrapper — a plain `child.kill()` only signals /bin/sh (or
@@ -85,6 +95,10 @@ export class CliPlannerAdapter implements ModelAdapter {
   private static readonly AVAIL_TTL_MS = 30_000;
   private workDirCache: string | null = null;
   private callSeq = 0;
+  /** A50 (P2): the CLI's stdout carries no token-usage envelope, so this rung
+   * silently zeroed out cost accounting in report.model_trace. Estimated
+   * from character counts — see estimateUsage's doc comment above. */
+  lastUsage?: AdapterUsage;
 
   constructor(private readonly opts: CliPlannerOptions) {
     this.name = `cli(${opts.bin}${opts.model ? `:${opts.model}` : ''})`;
@@ -166,6 +180,9 @@ export class CliPlannerAdapter implements ModelAdapter {
     }
 
     const stdout = await this.run(args, prompt, cwd);
+    // A50 (P2): the router reads adapter.lastUsage immediately after THIS
+    // call resolves, so it must be set before returning (either branch below).
+    this.lastUsage = estimateUsage(prompt.length, stdout.length);
     // claude --output-format json → { ..., result: "<assistant text>" }; unwrap it.
     try {
       const env = JSON.parse(stdout.trim()) as { result?: unknown };

@@ -65,6 +65,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import { Vault } from '../vault/vault.js';
+import { INFRA_ERROR_EXIT_CODE } from '../cli-exit-codes.js';
 
 export const DEFAULT_BRIDGE_PORT = 9410;
 /** Loopback-only by default (A1) — the WS server used to omit `host`
@@ -129,6 +130,25 @@ export class BridgeServer {
     private readonly host: string = DEFAULT_BRIDGE_HOST,
   ) {
     this.wss = new WebSocketServer({ port: this.port, host: this.host });
+    // A48 (P2): the WebSocketServer used to have no 'error' listener at all —
+    // an EADDRINUSE from the underlying net.Server (the common case: the
+    // auto-start service already owns this port and the user ran `spike
+    // daemon` again by hand) is an EventEmitter 'error' with no listener,
+    // which Node treats as fatal and throws synchronously, killing the
+    // process with a raw stack trace instead of a message that tells the
+    // user what actually happened and how to fix it. Exit 3 matches A47's
+    // infra/tool-error contract (this is never a verdict).
+    this.wss.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(
+          `bridge port ${this.port} is already in use — is Spike Core already running? ` +
+            `(spike daemon --uninstall-service to remove the autostart)`,
+        );
+        process.exit(INFRA_ERROR_EXIT_CODE);
+      }
+      console.error(`bridge server error: ${err.message}`);
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    });
     try {
       this.pairingToken = new Vault().get(PAIRING_TOKEN_VAULT_KEY) ?? null;
     } catch {

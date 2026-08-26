@@ -86,6 +86,15 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
  * quickly rather than hang the run. */
 const CDP_CALL_TIMEOUT_MS = 15_000;
 
+/** A49 (P2): how old an unresolved network request must be before the
+ * periodic sweep drops it as stale — see CaptureBuffers.sweepStalePending's
+ * doc comment (console-network.ts) for why this exists at all. */
+const STALE_PENDING_MAX_AGE_MS = 120_000;
+/** A49 (P2): how often the sweep runs. Well under STALE_PENDING_MAX_AGE_MS so
+ * a stale entry is caught within one interval of crossing the age threshold,
+ * without adding meaningful CPU/wakeup overhead to a long session. */
+const STALE_PENDING_SWEEP_INTERVAL_MS = 30_000;
+
 /** True when two consecutive probe reads describe the SAME box, within a
  * small epsilon (sub-pixel layout jitter between two genuinely-static reads
  * is possible; a real reflow moves by whole pixels). */
@@ -123,6 +132,21 @@ export class CdpBrowser implements BrowserPort {
    * (see recorder/script.ts's tabIndexFor / recorder/replay.ts). */
   private openOrder: string[] = [];
 
+  /** A49 (P2): set once `Inspector.targetCrashed` fires on the active tab (a
+   * renderer crash — OOM, a native-code bug the page's own JS triggered, GPU
+   * process death). Checked in the `c` getter below, which every single
+   * BrowserPort primitive routes through — one flag check there means every
+   * subsequent call (click/type/axTree/screenshot/…) fails IMMEDIATELY with a
+   * clear message instead of hanging, or throwing an opaque "session closed"
+   * CDP error, which is what actually happens against a crashed target.
+   * loop.ts's own A6 crash-safety wrapper turns that throw into a persisted
+   * `uncertain` report — this only needs to make the throw clear, not catch it. */
+  private crashed: string | null = null;
+  /** A49 (P2): periodic sweep of the active tab's stale network `pending`
+   * entries — see STALE_PENDING_MAX_AGE_MS / CaptureBuffers.sweepStalePending's
+   * doc comment. Started in launch(), stopped in close(). */
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+
   /** allowedHosts (A4, P0 defense-in-depth): hosts the driver may click/type
    * on, re-checked here independent of driver/loop.ts's own Tier-4 guard.
    * Omitted → no additional port-level restriction (see browser-port.ts's
@@ -131,6 +155,10 @@ export class CdpBrowser implements BrowserPort {
   constructor(private readonly opts: LaunchOptions & { allowedHosts?: string[] }) {}
 
   private get c(): CDP.Client {
+    // A49 (P2): fail every subsequent call clearly once the target has
+    // crashed — see the `crashed` field's doc comment above for why this one
+    // check covers the whole port.
+    if (this.crashed) throw new Error(this.crashed);
     if (!this.client) throw new Error('CdpBrowser: launch() first');
     return this.client;
   }
@@ -178,10 +206,25 @@ export class CdpBrowser implements BrowserPort {
       this.client.Debugger.enable(),
       this.client.DOM.enable(),
       this.client.Accessibility.enable(),
+      this.client.Inspector.enable(),
     ]);
+    // A49 (P2): a renderer crash on the main tab must abort the run with a
+    // clear message rather than hang the next CDP call or surface an opaque
+    // "session closed" error — see the `crashed` field's doc comment.
+    this.client.Inspector.targetCrashed(() => {
+      this.crashed = 'Chrome tab crashed (Inspector.targetCrashed) — the page is gone; aborting this run';
+    });
     // capture must attach before the first navigation so nothing is missed
     this.capture = await attachCapture(this.client);
     this.idle = createNetworkIdleTracker(this.client);
+    // A49 (P2): periodic stale-pending-request sweep for the ACTIVE tab's
+    // capture — deliberately reads `this.capture` on every tick (not the
+    // reference captured here) so it always sweeps whichever tab is
+    // currently active after a switchTab(), not just the tab launch() opened.
+    this.sweepTimer = setInterval(() => {
+      this.capture?.sweepStalePending(STALE_PENDING_MAX_AGE_MS);
+    }, STALE_PENDING_SWEEP_INTERVAL_MS);
+    this.sweepTimer.unref?.(); // never keep the process alive on its own
   }
 
   /** A4 (P0): resolves once Network has been quiet for `networkQuietMs` (or
@@ -787,6 +830,10 @@ export class CdpBrowser implements BrowserPort {
   }
 
   async close(): Promise<void> {
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
     for (const [id, tab] of this.otherTabs) {
       try { await tab.client.close(); } catch { /* already closed */ }
       try { await CDP.Close({ port: this.opts.port, id }); } catch { /* gone */ }
@@ -804,5 +851,6 @@ export class CdpBrowser implements BrowserPort {
     this.capture = null;
     this.idle = null;
     this.nodeMap.clear();
+    this.crashed = null;
   }
 }

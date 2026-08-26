@@ -52,9 +52,12 @@ fi
 ok "Node $NODE_VERSION"
 
 step "Installing the qa CLI globally (npm i -g $PKG_NAME)…"
-# --use-system-ca: on machines behind TLS-intercepting AV, the system CA store is
-# what lets npm/OAuth work. Harmless elsewhere.
-export NODE_OPTIONS='--use-system-ca'
+# --use-system-ca: on machines behind a TLS-intercepting antivirus or corporate
+# proxy (AVG, Zscaler, etc.), the system CA store is what lets npm/OAuth work.
+# Harmless elsewhere. Set SPIKE_NO_SYSTEM_CA=1 to skip this.
+if [ "${SPIKE_NO_SYSTEM_CA:-}" != "1" ] && [ "${SPIKE_NO_SYSTEM_CA:-}" != "true" ]; then
+  export NODE_OPTIONS='--use-system-ca'
+fi
 if ! npm install -g "$PKG_NAME"; then
   warn 'npm install failed.'
   echo '  If this is a permissions error (EACCES), see:'

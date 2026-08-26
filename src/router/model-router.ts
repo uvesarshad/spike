@@ -66,7 +66,16 @@ export interface FailureClassification {
 const TRANSIENT_STATUS = new Set([429, 502, 503, 504]);
 const NETWORK_ERROR_RE =
   /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|EPIPE|ENOTFOUND|socket hang up|network error|fetch failed/i;
-const STATUS_IN_MESSAGE_RE = /\b(\d{3})\s*:/;
+/** A50 (P2): require an HTTP-context word ("status", "http", "code" — the
+ * finding's own list — plus "api", the word every real adapter message
+ * actually carries: "<label> api <status>: <body>", e.g. "openai api 429:
+ * rate limited") to appear within a short window BEFORE the 3-digit number,
+ * not just a trailing colon. The bare `\b(\d{3})\s*:` this replaces matched
+ * ANYWHERE in a thrown error's message — including CLI stderr noise with no
+ * HTTP status in it at all (a `file.js:429:12` stack-trace line:column, a
+ * package/build line that happens to end in "<3 digits>:"), silently
+ * misclassifying an unrelated CLI/tool failure as a retryable 429/503. */
+const STATUS_IN_MESSAGE_RE = /\b(?:status|http|code|api)\b[^\d]{0,24}(\d{3})\s*:/i;
 const RETRY_AFTER_IN_MESSAGE_RE = /retry[-_ ]?(?:after|delay)["\s:]*"?(\d+(?:\.\d+)?)\s*s?/i;
 
 /** Classify a thrown adapter error as transient (worth retrying) or not. Never
@@ -122,6 +131,20 @@ export function classifyFailure(err: unknown): FailureClassification {
   }
 
   return { transient: false, reason: 'non-transient' };
+}
+
+/** A50 (P2): true when the thrown error is a schema/JSON-parse failure — a
+ * one-off "the model didn't emit valid JSON this time" hiccup, not a real
+ * HTTP/network failure. `classifyFailure`'s `transient` deliberately does NOT
+ * cover this case (retrying with backoff/jitter is the wrong tool for a parse
+ * error — there's nothing to wait out), but immediately falling to a
+ * DIFFERENT — possibly worse or more expensive — rung on the model's first
+ * malformed reply is wasteful when a bare retry of the exact same call very
+ * often just works. Matches adapter.ts's `extractJson()` throw text, the one
+ * place in this codebase that raises this specific failure. */
+function isSchemaParseError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /model output contained no parseable JSON/i.test(message);
 }
 
 function extractRetryAfterFromText(message: string): number | undefined {
@@ -512,40 +535,64 @@ export class ModelRouter {
     let lastError: Error | null = null;
     let escalatedFrom: string | undefined;
     for (const adapter of ladder) {
-      const t0 = Date.now();
-      const attempts = { count: 0 };
-      try {
-        const result = await callWithRetry(
-          () => this.traceCall(cap, adapter, step, () => adapter.generateJson({ prompt, schema })),
-          this.retryPolicy,
-          attempts,
-        );
-        this.trace.push({
-          step,
-          capability: cap,
-          rung: adapter.rung,
-          adapter: adapter.name,
-          ms: Date.now() - t0,
-          escalatedFrom,
-          usage: adapter.lastUsage,
-          attempts: attempts.count > 1 ? attempts.count : undefined,
-          retried: attempts.count > 1 ? true : undefined,
-        });
-        return result;
-      } catch (e) {
-        lastError = e instanceof Error ? e : new Error(String(e));
-        this.trace.push({
-          step,
-          capability: cap,
-          rung: adapter.rung,
-          adapter: adapter.name,
-          ms: Date.now() - t0,
-          escalatedFrom,
-          note: `error → escalate: ${lastError.message.slice(0, 120)}`,
-          attempts: attempts.count > 1 ? attempts.count : undefined,
-          retried: attempts.count > 1 ? true : undefined,
-        });
-        escalatedFrom = adapter.name;
+      // A50 (P2): a schema/JSON-parse failure (the model's reply just didn't
+      // parse THIS time) gets ONE same-rung retry before this adapter is
+      // abandoned for the next rung down — see isSchemaParseError's doc
+      // comment for why that's a different failure class than the
+      // transient-HTTP retry callWithRetry already handles internally.
+      let schemaRetried = false;
+      for (;;) {
+        const t0 = Date.now();
+        const attempts = { count: 0 };
+        try {
+          const result = await callWithRetry(
+            () => this.traceCall(cap, adapter, step, () => adapter.generateJson({ prompt, schema })),
+            this.retryPolicy,
+            attempts,
+          );
+          this.trace.push({
+            step,
+            capability: cap,
+            rung: adapter.rung,
+            adapter: adapter.name,
+            ms: Date.now() - t0,
+            escalatedFrom,
+            usage: adapter.lastUsage,
+            attempts: attempts.count > 1 ? attempts.count : undefined,
+            retried: attempts.count > 1 ? true : undefined,
+          });
+          return result;
+        } catch (e) {
+          lastError = e instanceof Error ? e : new Error(String(e));
+          if (!schemaRetried && isSchemaParseError(lastError)) {
+            schemaRetried = true;
+            this.trace.push({
+              step,
+              capability: cap,
+              rung: adapter.rung,
+              adapter: adapter.name,
+              ms: Date.now() - t0,
+              escalatedFrom,
+              note: `schema/parse error → same-rung retry: ${lastError.message.slice(0, 120)}`,
+              attempts: attempts.count > 1 ? attempts.count : undefined,
+              retried: attempts.count > 1 ? true : undefined,
+            });
+            continue; // one more attempt against the SAME adapter, not the next rung
+          }
+          this.trace.push({
+            step,
+            capability: cap,
+            rung: adapter.rung,
+            adapter: adapter.name,
+            ms: Date.now() - t0,
+            escalatedFrom,
+            note: `error → escalate: ${lastError.message.slice(0, 120)}`,
+            attempts: attempts.count > 1 ? attempts.count : undefined,
+            retried: attempts.count > 1 ? true : undefined,
+          });
+          escalatedFrom = adapter.name;
+          break; // fall through to the next adapter in the ladder
+        }
       }
     }
     throw new Error(`all planner adapters failed: ${lastError?.message}`);

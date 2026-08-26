@@ -94,8 +94,19 @@ const png = Buffer.from('fakepng');
   check('503 is transient', c.transient === true);
 }
 {
-  const c = classifyFailure(new Error('ollama 502: bad gateway'));
+  // A50 (P2): STATUS_IN_MESSAGE_RE now requires an HTTP-context word near the
+  // 3 digits — this mirrors ollama.ts's real (post-A50) error text, "ollama
+  // api status <n>: <body>".
+  const c = classifyFailure(new Error('ollama api status 502: bad gateway'));
   check('502 is transient', c.transient === true);
+}
+{
+  // A50 (P2): the exact bug this finding calls out — a bare 3-digit number
+  // followed by a colon with NO HTTP context (e.g. CLI stderr noise like a
+  // `file.js:429:12` stack-trace line:column) must NOT be misparsed as an
+  // HTTP status.
+  const c = classifyFailure(new Error('claude exit 1: at file.js:429:12 unexpected token'));
+  check('an unrelated 3-digit:colon in CLI stderr is NOT treated as an HTTP status', c.transient === false);
 }
 {
   const c = classifyFailure(new Error('gpt api 504: gateway timeout'));
@@ -241,15 +252,19 @@ const png = Buffer.from('fakepng');
 }
 
 {
-  // Schema/validation error — never retried, immediate fall-through.
+  // A50 (P2): schema/validation error — the router now retries the SAME rung
+  // ONCE (a one-off "model didn't emit valid JSON that time" hiccup often
+  // just works on a bare retry) before falling through — see
+  // v62.router-bookkeeping.ts for the dedicated same-rung-retry coverage.
+  // Two consecutive failures still falls through, same as before.
   const badJson = fake('bad-json', 1, ['plan-step'], () => {
     throw new Error('model output contained no parseable JSON: not json at all');
   });
   const good = fake('backup4', 2, ['plan-step'], () => ({ action: 'ok' }));
   const router = new ModelRouter([badJson, good], ROUTER_OPTS);
   const result = (await router.planJson('do it', {}, 1)) as { action: string };
-  check('schema error falls through to next rung', result.action === 'ok');
-  check('schema error was never retried', badJson.calls === 1);
+  check('schema error (twice) falls through to next rung', result.action === 'ok');
+  check('schema error gets exactly one same-rung retry before escalating (A50)', badJson.calls === 2);
 }
 
 {

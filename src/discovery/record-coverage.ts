@@ -19,7 +19,7 @@
 
 import { normalizeUrlForActionCache } from '../cache/action-cache.js';
 import type { StepRecord } from '../report/report.js';
-import { loadAppModel, markElementTouched, markRouteExercised, saveAppModel, type AppModel } from './app-model.js';
+import { loadAppModel, markElementTouched, markRouteExercised, saveAppModel, type AppModel, type AppModelElement, type AppModelRoute, type AppModelState } from './app-model.js';
 
 export interface CoverageWriteResult {
   /** False when there is no ledger yet — the normal state before `spike map`. */
@@ -51,6 +51,60 @@ function sameName(a: string | undefined, b: string | undefined): boolean {
   return (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase();
 }
 
+/** A51 (P2): one same-role+name candidate for element-touch attribution,
+ * mirroring recorder/replay.ts's RoleMatch — `index` is the 0-based position
+ * among matches, in the same DISCOVERY order (state-then-element, which
+ * mirrors document order — see mergeElements in app-model.ts) that a
+ * recorded `nth` (StepTarget.nth, set by the driver the same way replay's
+ * `nth` locator hint is) refers to. */
+interface ElementCandidate {
+  state: AppModelState;
+  element: AppModelElement;
+  index: number;
+}
+
+/** All (state, element) pairs across a route's ENTIRE state history whose
+ * role+name (case-insensitive) matches — not just the FIRST state that
+ * happens to contain one. Before this, `applyRunToModel` walked
+ * `route.states` and stopped at the first state with a matching element,
+ * silently mis-attributing a touch to the WRONG structural state whenever
+ * more than one state shares that role+name — the common case for anything
+ * present both logged-in and logged-out, or before/after a redesign the
+ * ledger kept history for (see app-model.ts's file header on why states
+ * accumulate rather than get overwritten). */
+function collectElementCandidates(route: AppModelRoute, role: string, name: string | undefined): ElementCandidate[] {
+  const out: ElementCandidate[] = [];
+  let index = 0;
+  for (const state of route.states) {
+    for (const element of state.elements) {
+      if (element.role !== role || !sameName(element.name, name)) continue;
+      out.push({ state, element, index: index++ });
+    }
+  }
+  return out;
+}
+
+/** Pick ONE candidate for attribution — mirrors recorder/replay.ts's
+ * pickClearRoleWinner: score by closeness to a recorded `nth` (document-order
+ * index), same `Math.max(0, 10 - |index - nth|)` shape. With no `nth` hint, or
+ * no clear winner by it, fall back to the MOST RECENTLY SEEN state (the run
+ * happening now is more likely to be on the newest known structural state
+ * than an old one still kept for history) — a strictly better default than
+ * the previous "whichever state was inserted first" behavior, though still
+ * a best-effort approximation, not a guarantee, when the ledger genuinely
+ * cannot tell two states apart. */
+function pickElementCandidate(candidates: ElementCandidate[], nth: number | undefined): ElementCandidate | null {
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+  if (typeof nth === 'number') {
+    const scored = candidates
+      .map((c) => ({ c, score: Math.max(0, 10 - Math.abs(c.index - nth)) }))
+      .sort((a, b) => b.score - a.score);
+    if (scored[0].score > 0 && (!scored[1] || scored[1].score < scored[0].score)) return scored[0].c;
+  }
+  return [...candidates].sort((a, b) => b.state.lastSeenAt.localeCompare(a.state.lastSeenAt))[0];
+}
+
 /** Pure core: apply a run's steps to a model. Exported for testing without touching disk. */
 export function applyRunToModel(model: AppModel, steps: StepRecord[], scriptName: string): CoverageWriteResult {
   const routesMarked = new Set<string>();
@@ -70,26 +124,32 @@ export function applyRunToModel(model: AppModel, steps: StepRecord[], scriptName
       routesMarked.add(route);
     }
     if (!step.target) continue;
-    // The element is attributed to whichever recorded state of this route
-    // actually lists it — the run does not carry the structural signature of
-    // the page it was on, and re-deriving one here would need a snapshot we no
-    // longer have. Matching by role+name across the route's known states is
-    // the honest approximation, and it is exact whenever the route has a
-    // single state (the common case).
+    // A51 (P2): the element is attributed to the BEST-MATCHING state across
+    // the route's entire state history, not just the first one that happens
+    // to contain a same-role+name element (see collectElementCandidates /
+    // pickElementCandidate above for why that used to mis-attribute shared
+    // elements across states). The run does not carry the structural
+    // signature of the page it was on, so `step.target.nth` — the same
+    // document-order disambiguator the recorder/replay path already relies
+    // on — is the best signal available to resolve genuine ties; it is exact
+    // whenever the route has a single matching candidate (the common case).
     const r = model.routes.find((x) => x.route === route);
-    for (const state of r?.states ?? []) {
-      const hit = state.elements.find(
-        (e) => e.role === step.target!.role && sameName(e.name, step.target!.name),
-      );
-      if (!hit) continue;
-      // Pass the LEDGER's name, not the step's: markElementTouched matches
-      // exactly, so handing it the AX spelling ("Email") would fail to find the
-      // crawler's entry ("email") and silently mark nothing — the fuzzy match
-      // has to be resolved to a concrete stored element before writing.
-      markElementTouched(model, route, state.structuralSignature, { role: hit.role, ...(hit.name && { name: hit.name }) }, scriptName);
-      elementsMarked++;
-      break;
-    }
+    if (!r) continue;
+    const candidates = collectElementCandidates(r, step.target.role, step.target.name);
+    const hit = pickElementCandidate(candidates, step.target.nth);
+    if (!hit) continue;
+    // Pass the LEDGER's name, not the step's: markElementTouched matches
+    // exactly, so handing it the AX spelling ("Email") would fail to find the
+    // crawler's entry ("email") and silently mark nothing — the fuzzy match
+    // has to be resolved to a concrete stored element before writing.
+    markElementTouched(
+      model,
+      route,
+      hit.state.structuralSignature,
+      { role: hit.element.role, ...(hit.element.name && { name: hit.element.name }) },
+      scriptName,
+    );
+    elementsMarked++;
   }
 
   return {

@@ -8,6 +8,7 @@ import http from 'node:http';
 import { Command } from 'commander';
 import os from 'node:os';
 import { loadConfig, type QaConfig } from './config.js';
+import { exitCodeForVerdict, INFRA_ERROR_EXIT_CODE } from './cli-exit-codes.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { allocateIsolatedSession, isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
 import { slimReport, type Report } from './report/report.js';
@@ -89,12 +90,12 @@ function mergeConfig(
 
 program
   .command('run')
-  .description('run a QA task against a URL; exit 0 pass / 1 fail / 2 uncertain')
+  .description('run a QA task against a URL; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra or tool error (A47)')
   .argument('<task>', 'what to test, in plain English')
   .requiredOption('--url <url>', 'page to start on')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
-  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically', collectRepeatable, [])
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain (A45)', collectRepeatable, [])
   .option('--action-cache', 'enable the verified file-backed action cache for this run')
   .option('--no-action-cache', 'bypass the verified action cache for this run')
   .option('--no-record', 'do not record a passing run to generated-tests/')
@@ -130,7 +131,8 @@ program
       : await qaRun(task, opts.url, qaRunOpts);
     console.log(JSON.stringify(slimReport(report), null, 2));
     if (!opts.json) console.log(`full report: ${report.evidence_paths[0]}`);
-    process.exit(report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
+    // A47 (P2): 0 pass / 1 verdict fail / 2 uncertain — see cli-exit-codes.ts.
+    process.exit(exitCodeForVerdict(report.verdict));
   });
 
 /* A23/A25: discovery + coverage. `map` answers "what does this app contain?"
@@ -360,12 +362,12 @@ program
 
 program
   .command('replay')
-  .description('replay recorded scripts deterministically — no planner, $0; exit 0 pass / 1 fail / 2 uncertain')
+  .description('replay recorded scripts deterministically — no planner, $0; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra or tool error (A47)')
   .argument('[name]', 'script name (or path to a generated-tests/*.json)')
   .option('--all', 'replay the suite (spike.suite.json if present, else every script in generated-tests/, sorted)', false)
   .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
-  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically', collectRepeatable, [])
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain (A45)', collectRepeatable, [])
   .option('--json', 'print slim JSON verdicts only', false)
   .option('--workers <n>', 'with --all: concurrent scripts in flight (default 1 — today\'s serial behaviour). With --via playwright this is the cheap path (one shared Chrome, one isolated BrowserContext per script); otherwise each concurrent script gets its OWN fully isolated Chrome (A3)', (v) => parseInt(v, 10))
   .option('--tag <tag>', 'with --all + spike.suite.json: run only entries tagged with this (repeatable, OR match)', collectRepeatable, [])
@@ -419,7 +421,8 @@ program
         });
         const out = { script: name, healed: report.healed, ...slimReport(report) };
         console.log(JSON.stringify(out, null, 2));
-        process.exit(report.verdict === 'pass' ? 0 : report.verdict === 'fail' ? 1 : 2);
+        // A47 (P2): 0 pass / 1 verdict fail / 2 uncertain — see cli-exit-codes.ts.
+        process.exit(exitCodeForVerdict(report.verdict));
       }
 
       // --all: the suite runner (A12/A15) — ordering (config or sorted
@@ -920,5 +923,10 @@ function startDashboard(artifactsDir: string, port: number): void {
 
 program.parseAsync().catch((e) => {
   console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
+  // A47 (P2): anything that escapes an action handler unhandled here is an
+  // infra/tool failure (Chrome didn't launch, a config file was unreadable, a
+  // bug) — never a verdict. Exit 3 keeps that distinguishable from exit 1
+  // (verdict fail) and exit 2 (verdict uncertain), both of which already
+  // exit directly from inside their action before ever reaching this catch.
+  process.exit(INFRA_ERROR_EXIT_CODE);
 });

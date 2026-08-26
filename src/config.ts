@@ -118,7 +118,10 @@ export interface QaConfig {
   googleCliModel: string;
   /** Rung-2 BYOK Gemini API key (absent → rung 2 unavailable). */
   geminiApiKey?: string;
-  /** Extra env for the Google CLI child process (e.g. NODE_OPTIONS=--use-system-ca behind AVG TLS interception). */
+  /** Extra env for the Google CLI child process (e.g. NODE_OPTIONS=--use-system-ca
+   * behind a TLS-intercepting antivirus or corporate proxy — AVG, Zscaler, etc.).
+   * A36: set SPIKE_NO_SYSTEM_CA=1 to omit that flag from the default (see
+   * defaultGoogleCliEnv() below). */
   googleCliEnv: Record<string, string>;
   /** Where run artifacts (report.json, screenshots) are written. */
   artifactsDir: string;
@@ -196,6 +199,21 @@ export interface QaConfig {
   strictOracles: boolean;
 }
 
+/** A36 (P1): `NODE_OPTIONS=--use-system-ca` makes the Google CLI child trust the
+ * OS certificate store instead of Node's bundled one — needed on machines
+ * behind a TLS-intercepting antivirus or corporate proxy (AVG, Zscaler, …)
+ * that MITMs outbound TLS with its own cert, otherwise the CLI's OAuth calls
+ * fail (exit 41). Baked in by default since it's harmless where it isn't
+ * needed and this workaround exists precisely for that audience; set
+ * SPIKE_NO_SYSTEM_CA=1 to omit it entirely. Exported so tests can exercise the
+ * gating logic directly without needing to reload this module (DEFAULTS below
+ * calls this once at import time, same as chromeProfile's LOCALAPPDATA/HOME
+ * read). */
+export function defaultGoogleCliEnv(): Record<string, string> {
+  if (process.env.SPIKE_NO_SYSTEM_CA === '1' || process.env.SPIKE_NO_SYSTEM_CA === 'true') return {};
+  return { NODE_OPTIONS: '--use-system-ca' };
+}
+
 const DEFAULTS: QaConfig = {
   via: 'cdp',
   bridgePort: 9410,
@@ -213,7 +231,7 @@ const DEFAULTS: QaConfig = {
   routeRules: [],
   googleCliBin: 'gemini',
   googleCliModel: 'gemini-3-flash-preview',
-  googleCliEnv: { NODE_OPTIONS: '--use-system-ca' },
+  googleCliEnv: defaultGoogleCliEnv(),
   artifactsDir: path.resolve('artifacts'),
   actionCache: true,
   actionCacheDir: path.resolve('.spike-action-cache'),

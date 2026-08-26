@@ -16,48 +16,45 @@
  *        {cdpPort, runnerPort, chromeProfile} triple per call — the "own
  *        profile dir when it must launch its own Chrome" primitive `replay
  *        --all --workers N` uses for the `via !== 'playwright'` case.
- *     3. `ensureChrome()`'s concurrency dedupe (chrome/launch.ts): N
- *        concurrent callers on a COLD port must not race two `spawn()`s /
- *        throw — the exact hazard the audit calls out. REAL Chrome, one
- *        check, dedicated freshly-allocated port.
- *     4. the Nano runner's shared HTTP server is now refcounted
+ *     3. the Nano runner's shared HTTP server is now refcounted
  *        (nano-runner-page.ts's `acquireRunnerServer`/`releaseRunnerServer`)
  *        instead of every `NanoRunnerPage.start()` unconditionally binding —
  *        the literal EADDRINUSE crash the audit names by finding number.
- *     5. `withNanoLock()` (nano-runner-page.ts) serializes concurrent
+ *     4. `withNanoLock()` (nano-runner-page.ts) serializes concurrent
  *        Runtime.evaluate calls into ONE shared Nano tab per cdpPort, so two
  *        overlapping qaReplay calls (`via: 'playwright'` + `--workers N`,
  *        sharing one Chrome) can't interleave into the page's single
  *        Prompt-API session.
  *
  *   A7 — headless / Nano split:
- *     6. `resolveNanoLaunchOpts()` (engine.ts) — the full decision matrix:
+ *     5. `resolveNanoLaunchOpts()` (engine.ts) — the full decision matrix:
  *        headless=false shares cfg.cdpPort/runnerPort/chromeProfile exactly
  *        as before this finding; headless=true splits Nano onto its own
  *        headed Chrome, either a pinned `nanoCdpPort` or a freshly allocated
  *        one, always its own profile dir (two Chromes can never share a
  *        --user-data-dir).
- *     7. `config.ts`: `headless` defaults false; `via` accepts 'playwright';
+ *     6. `config.ts`: `headless` defaults false; `via` accepts 'playwright';
  *        `SPIKE_HEADLESS`/`SPIKE_NANO_CDP_PORT` env overrides.
  *
  *   A13 — network interception + emulation:
- *     8. `globToRegExp()` (engine.ts) — the CDP-glob-to-RegExp translation
+ *     7. `globToRegExp()` (engine.ts) — the CDP-glob-to-RegExp translation
  *        `applyRouteRules` dispatches `Fetch.requestPaused` events through.
- *     9. `config.ts`: `SPIKE_ROUTE_RULES` (JSON) / `SPIKE_BLOCK_HOSTS`
+ *     8. `config.ts`: `SPIKE_ROUTE_RULES` (JSON) / `SPIKE_BLOCK_HOSTS`
  *        (comma list) / `SPIKE_VIEWPORT` / `SPIKE_NETWORK_THROTTLE` env
  *        parsing into `routeRules`/`emulation`.
  *
  *   A6 — storage state:
- *     10. `saveStorageStateFile`/`loadStorageStateFile` (engine.ts) round-trip
- *         a captured session through disk, including directory creation.
+ *     9. `saveStorageStateFile`/`loadStorageStateFile` (engine.ts) round-trip
+ *        a captured session through disk, including directory creation.
  *
- * All pure/unit-level except #3, which needs a REAL Chrome (the whole point
- * is proving a live concurrency race doesn't crash) — run on a freshly
- * `allocateFreePort()`-ed CDP port + a throwaway temp profile dir, so it can
- * never collide with the daemon's 9322, any other suite's fixed port, or a
- * sibling agent's concurrently-running suite. Chrome is deliberately left
- * running afterward (detached) — the same convention every other suite in
- * this repo follows; see chrome/launch.ts's ensureChrome doc comment.
+ * (A31, 2026-08-27): `ensureChrome()`'s concurrency dedupe test — the one
+ * check in this finding's original scope that needs a REAL Chrome — has been
+ * split out to `test/v49b.ensure-chrome.ts` and moved to
+ * `scripts/run-tests.mjs`'s BROWSER_SUITES list, so this suite (v49) is now
+ * entirely pure/in-memory and safe for the fast bucket (`npm test`) on a
+ * machine with no Chrome installed at all. Everything below is pure/unit-
+ * level: ephemeral `mkdtemp`/random ports only, no `ensureChrome`/`CdpBrowser`
+ * launch of any kind.
  *
  * Run: npx tsx test/v49.parallel-session.ts
  */
@@ -66,7 +63,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { allocateFreePort, cdpAlive, ensureChrome } from '../src/chrome/launch.js';
+import { allocateFreePort } from '../src/chrome/launch.js';
 import { loadConfig, type QaConfig } from '../src/config.js';
 import {
   allocateIsolatedSession,
@@ -108,7 +105,7 @@ async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Pr
 
 async function main(): Promise<void> {
   /* ===================== 1: allocateFreePort ===================== */
-  console.log('=== v49 1/10: allocateFreePort (chrome/launch.ts) ===');
+  console.log('=== v49 1/9: allocateFreePort (chrome/launch.ts) ===');
   {
     const p1 = await allocateFreePort();
     const p2 = await allocateFreePort();
@@ -125,7 +122,7 @@ async function main(): Promise<void> {
   }
 
   /* ===================== 2: config resolution (A7/A13 defaults + env) ===================== */
-  console.log('=== v49 2/10: config.ts — headless/via/nanoCdpPort/routeRules/emulation ===');
+  console.log('=== v49 2/9: config.ts — headless/via/nanoCdpPort/routeRules/emulation ===');
   {
     const defaults = loadConfig({});
     check('headless defaults to false (backward compatible)', defaults.headless === false);
@@ -176,7 +173,7 @@ async function main(): Promise<void> {
   }
 
   /* ===================== 3: globToRegExp (A13 route-rule matching) ===================== */
-  console.log('=== v49 3/10: globToRegExp — CDP-glob-to-RegExp translation ===');
+  console.log('=== v49 3/9: globToRegExp — CDP-glob-to-RegExp translation ===');
   {
     const analytics = globToRegExp('*://*.doubleclick.net/*');
     check('block-pattern glob matches a real analytics URL', analytics.test('https://ads.doubleclick.net/pixel'));
@@ -195,7 +192,7 @@ async function main(): Promise<void> {
   }
 
   /* ===================== 4: resolveNanoLaunchOpts (A7 headless/Nano split) ===================== */
-  console.log('=== v49 4/10: resolveNanoLaunchOpts — where Nano attaches ===');
+  console.log('=== v49 4/9: resolveNanoLaunchOpts — where Nano attaches ===');
   {
     const shared = await resolveNanoLaunchOpts(loadConfig({ cdpPort: 5001, runnerPort: 5002, chromeProfile: '/tmp/spike-prof', headless: false }));
     check('headless=false: Nano shares cfg.cdpPort/runnerPort/chromeProfile (unchanged default behavior)', shared.cdpPort === 5001 && shared.runnerPort === 5002 && shared.profileDir === '/tmp/spike-prof');
@@ -214,7 +211,7 @@ async function main(): Promise<void> {
   }
 
   /* ===================== 5: storage-state file round-trip (A6) ===================== */
-  console.log('=== v49 5/10: storage-state file round-trip ===');
+  console.log('=== v49 5/9: storage-state file round-trip ===');
   {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'v49-storage-'));
     const file = path.join(dir, 'nested', 'state.json'); // nested: proves mkdir -p
@@ -230,7 +227,7 @@ async function main(): Promise<void> {
   }
 
   /* ===================== 6: allocateIsolatedSession (A3) ===================== */
-  console.log('=== v49 6/10: allocateIsolatedSession — the expensive full-Chrome-per-call path ===');
+  console.log('=== v49 6/9: allocateIsolatedSession — the expensive full-Chrome-per-call path ===');
   {
     const base = path.join(os.tmpdir(), 'v49-base-profile');
     const s1 = await allocateIsolatedSession(base);
@@ -242,7 +239,7 @@ async function main(): Promise<void> {
   }
 
   /* ===================== 7: Nano runner HTTP server refcounting (A3) ===================== */
-  console.log('=== v49 7/10: NanoRunnerPage shared HTTP server refcounting ===');
+  console.log('=== v49 7/9: NanoRunnerPage shared HTTP server refcounting ===');
   {
     const port = await allocateFreePort();
     const s1 = await acquireRunnerServer(port);
@@ -268,7 +265,7 @@ async function main(): Promise<void> {
   }
 
   /* ===================== 8: withNanoLock serialization (A3) ===================== */
-  console.log('=== v49 8/10: withNanoLock — serializing concurrent calls into one Nano tab ===');
+  console.log('=== v49 8/9: withNanoLock — serializing concurrent calls into one Nano tab ===');
   {
     const key = 949001;
     const events: string[] = [];
@@ -315,29 +312,8 @@ async function main(): Promise<void> {
     check('a DIFFERENT lock key (distinct cdpPort) runs independently, never waiting on an unrelated key\'s queue', events2.indexOf('B-end') < events2.indexOf('A-end'));
   }
 
-  /* ===================== 9: ensureChrome concurrency dedupe (REAL Chrome) ===================== */
-  console.log('=== v49 9/10: ensureChrome concurrency dedupe (REAL Chrome, dedicated port) ===');
-  {
-    const port = await allocateFreePort();
-    const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), 'v49-chrome-'));
-    const results = await Promise.allSettled([
-      ensureChrome({ port, profileDir, headless: true }),
-      ensureChrome({ port, profileDir, headless: true }),
-      ensureChrome({ port, profileDir, headless: true }),
-    ]);
-    check(
-      'three concurrent ensureChrome() calls on a COLD port all resolve without throwing (no double-spawn race)',
-      results.every((r) => r.status === 'fulfilled'),
-    );
-    check('the port is genuinely alive (CDP responds) once the race settles', await cdpAlive(port));
-    // Chrome is intentionally left running detached — see this file's header
-    // comment; every other suite in this repo (e.g. v45) follows the same
-    // convention rather than killing a process this codebase never tracks a
-    // PID for.
-  }
-
-  /* ===================== 10: QaConfig via/RouteRule/EmulationConfig types compile ===================== */
-  console.log('=== v49 10/10: QaConfig surface — via/RouteRule/EmulationConfig ===');
+  /* ===================== 9: QaConfig via/RouteRule/EmulationConfig types compile ===================== */
+  console.log('=== v49 9/9: QaConfig surface — via/RouteRule/EmulationConfig ===');
   {
     // Purely a type + shape sanity check: a config object declaring every new
     // A13 field the way a suite's spike.config.json would resolves cleanly

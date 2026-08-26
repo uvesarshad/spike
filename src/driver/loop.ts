@@ -17,6 +17,7 @@
  * one confirmation visual before accepting; finish:fail → trusted. */
 
 import type { AxNode, AxSnapshot, BrowserPort } from '../ports/browser-port.js';
+import { isHostAllowed } from '../ports/browser-port.js';
 import { firstError } from '../capture/console-network.js';
 import type { ModelRouter } from '../router/model-router.js';
 import type { ArtifactStore } from '../report/artifacts.js';
@@ -143,13 +144,11 @@ function hostOf(url: string): string {
   }
 }
 
-/** True when host is exactly in allowedHosts or a subdomain of one of them. */
-function hostAllowed(host: string, allowedHosts: string[]): boolean {
-  return allowedHosts.some((allowed) => {
-    const a = allowed.toLowerCase();
-    return host === a || host.endsWith('.' + a);
-  });
-}
+/** A45 (P2): delegates to browser-port.ts's isHostAllowed so both layers of
+ * the Tier-4 guard share one matching rule (exact/www-only, `.`-prefixed
+ * entries opt into subdomain-suffix trust) instead of two hand-copies that
+ * can silently drift apart. */
+const hostAllowed = isHostAllowed;
 
 /** Step-progress callback shape — VibeService forwards these verbatim to the UI. */
 export type StepKind =

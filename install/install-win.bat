@@ -32,9 +32,13 @@ if %NODE_MAJOR% LSS 20 (
 echo [OK] Node %NODE_VER%
 
 echo ==^> Installing the qa CLI globally ^(npm i -g spike-agent^)...
-REM --use-system-ca: on machines behind TLS-intercepting AV, the system CA store
-REM is what lets npm work. Harmless elsewhere.
+REM --use-system-ca: on machines behind a TLS-intercepting antivirus or
+REM corporate proxy (AVG, Zscaler, etc.), the system CA store is what lets npm
+REM work. Harmless elsewhere. Set SPIKE_NO_SYSTEM_CA=1 to skip this.
+if /I "%SPIKE_NO_SYSTEM_CA%"=="1" goto :skip_system_ca
+if /I "%SPIKE_NO_SYSTEM_CA%"=="true" goto :skip_system_ca
 set "NODE_OPTIONS=--use-system-ca"
+:skip_system_ca
 call npm install -g spike-agent
 if errorlevel 1 (
   echo [!] npm install failed.

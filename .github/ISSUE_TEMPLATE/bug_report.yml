@@ -1,0 +1,94 @@
+name: Bug report
+description: Report a problem with a Spike run (CLI, MCP tool, or extension).
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Spike's runs are reproducible by design —
+        the more of the fields below you fill in, the faster this can be
+        triaged (ideally with `artifacts/<runId>/report.json` attached).
+
+  - type: input
+    id: target-url
+    attributes:
+      label: Target URL tested
+      description: The URL passed to `--url` (or the `qa_run` tool call) when the bug occurred.
+      placeholder: "http://localhost:9401/login"
+    validations:
+      required: true
+
+  - type: textarea
+    id: task-string
+    attributes:
+      label: Task string used
+      description: The exact task text passed to `spike run "<task>"` / `qa_run(task, url)`.
+      placeholder: "log in as test@test.com with password pw and complete checkout"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      description: Which BrowserPort transport was driving the browser?
+      options:
+        - cdp (default daemon-owned Chrome via --remote-debugging-port)
+        - extension (vibe mode / MV3 extension via chrome.debugger)
+        - playwright (--via playwright)
+        - not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected the run to do / the verdict to be.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What actually happened — the verdict you got, an error, a crash, incorrect evidence, etc.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, Chrome version, and which model ladder rung(s) were in play (Nano / CLI planner / BYOK provider / Ollama).
+      placeholder: |
+        OS: macOS 15
+        Node: v20.x
+        Chrome: 138.x
+        Planner: claude:cli / navigator: nano:ondevice
+    validations:
+      required: false
+
+  - type: textarea
+    id: report-json
+    attributes:
+      label: report.json and evidence
+      description: |
+        Please attach `artifacts/<runId>/report.json` from the failing run
+        (drag and drop the file into this box), plus any relevant
+        screenshots from `artifacts/<runId>/screenshots/`. The `runId` is
+        printed at the end of the CLI run, or returned by `spike fix
+        <runId>`. Redact secrets first if the target site required them.
+      placeholder: Drag and drop report.json (and screenshots) here.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant console/terminal output
+      description: Any CLI/daemon stderr output, stack traces, or console errors surfaced in the run.
+      render: shell
+    validations:
+      required: false

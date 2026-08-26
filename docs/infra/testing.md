@@ -9,7 +9,7 @@
 
 Testing is layered: contract tests (m1, m2, m4, m5, m6 — note there is no m3; the ExtensionBrowser contract test is numbered v3, see below) verify interface boundaries without exercising the full stack; e2e tests (e2e.*.ts) run the full engine against the fixture app; numbered integration spikes and focused regressions (v1-v46) document specific capabilities. No test framework like Jest or Vitest is used; suites run directly with tsx and assert() / throw.
 
-As of 2026-08-09 (A15) there is also a CI gate and an aggregate runner — see "Running Tests" and "Continuous Integration" below.
+As of 2026-08-09 (A15) there is also a CI gate and an aggregate runner — see "Running Tests" and "Continuous Integration" below. As of 2026-08-27 (A31/A32/A33) the fast bucket is genuinely Chrome-free (the one real-Chrome check that used to live there, `ensureChrome()` concurrency dedupe, moved to the browser bucket as `test/v49b.ensure-chrome.ts`), CI runs that bucket on a 3-OS matrix (Linux/macOS/Windows), and the phantom `browser-suites` CI job (which ran on `ubuntu-latest` with none of the prerequisites it needed) has been removed — **`npm run test:browser` is a LOCAL, pre-release manual gate only; it is not run by CI in any form, scheduled or manual.** That is the single source of truth on this — anything elsewhere that implies otherwise is stale.
 
 AGENT OWNER: test/
 
@@ -37,7 +37,6 @@ test/port-contract.ts - Shared BrowserPort interface assertions imported by m1 a
 
 test/v1-v33 (*.ts) - Numbered integration spikes and focused regressions (gaps and suffixed variants exist, e.g. v17b, v20b; v3 is the ExtensionBrowser contract test documented above, not a generic spike). These document capabilities such as clip recording, CDP logpoints, Nano availability probing, assertion policy, runtime data, action cache, telemetry redaction, gateway helpers, video assertion script handling, the secure script runner, and per-adapter telemetry spans. They are reference code, not imported by the main test suites.
 
-test/v26.assertion-policy.ts - Mock-only visual assertion policy coverage. Verifies single-ladder passthrough, fail-on-disagreement consensus behavior, and arbiter-on-disagreement routing without Chrome or model calls.
 
 test/v27.run-data.ts - Offline unit coverage for runtime `{{run.*}}` placeholder generation/resolution, extraction state helpers, and FakeLocalEmailProvider OTP lookup.
 
@@ -96,10 +95,10 @@ AGENT NOTE: `test/port-contract.ts` is excluded from both buckets — it's a sha
 
 ## Continuous Integration
 
-`.github/workflows/ci.yml`, added 2026-08-09 (A15), has two jobs:
+`.github/workflows/ci.yml`, added 2026-08-09 (A15), has one job as of 2026-08-27 (A31/A32/A33):
 
-- **`test`** runs on every push and PR: `npm ci` → `npm run typecheck` → `npm run build` → `npm test` (the fast bucket only). This is a real gate — a regression in any of the 26 fast suites fails the build.
-- **`browser-suites`** is `workflow_dispatch`-only (manual trigger, never on push/PR). It runs `npm run test:browser`. It is deliberately NOT part of the default gate: a stock GitHub-hosted runner has Chromium, not branded Chrome (several paths — extension dev-loading, Gemini Nano's Prompt API — are branded-Chrome-specific); Nano needs a ~2GB model plus 22GB free already provisioned, which nothing can trigger unattended in CI; `e2e.autofix-real.ts`/`v10.batching.ts`/`v20b.measure.ts` need live model/agent credentials; and the fixed-port suites need to run alone on a machine, which a shared CI fleet doesn't guarantee. The workflow file documents each of these inline. Treat `browser-suites` as a human-triggered smoke test on a machine that mirrors a real dev setup, not as a CI gate — a green `test` job does NOT mean the Chrome-driving half of the suite passed.
+- **`test`** runs on every push and PR, on a 3-OS matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`): `npm ci` → `npm run typecheck` → `npm run build` → `npm test` (the fast bucket only). This is a real gate — a regression in any fast-bucket suite fails the build, on all three OSes. The `ubuntu-latest` leg also packs the extension zip (`npm run pack:extension`) and uploads it as a build artifact.
+- **There is no CI job for the browser bucket.** A prior `browser-suites` job existed (`workflow_dispatch`-only) but ran on a plain `ubuntu-latest` runner that had none of what those suites need — no branded Chrome, no provisioned Nano model, no live model/agent credentials, no guarantee of exclusive-machine access for the fixed-port suites — so it was a phantom gate that could only ever fail, never a real one (A32). It has been removed rather than fixed, because fixing it means standing up and maintaining a self-hosted runner mirroring a real dev machine, which is a real infra commitment, not a workflow tweak. **`npm run test:browser` is a LOCAL, pre-release manual gate only — run it by hand on a dev machine with a real Chrome + Nano model + model credentials before cutting a release. It is not run by CI in any form (push, PR, manual dispatch, or schedule).** A green `test` job on GitHub Actions says nothing about whether a real Chrome run still works — that assurance only comes from actually running `npm run test:browser` locally.
 
 **History worth knowing:** `test/e2e.run-fixture.ts` and `test/e2e.recorder.ts` were both failing silently for some time before 2026-08-09, because `config.readOnly` defaults to `true` (a safety posture for driving arbitrary user-owned sites) and neither suite opted out — so every type/click against the fixture app they start themselves was silently a no-op. `e2e.run-fixture.ts` could never log in, so both its "expect pass" and "expect a captured error" branches were unreachable; `e2e.recorder.ts` never got a script into `generated-tests/`, so the whole record→replay→heal chain it exists to prove died at the first `loadScript()`. Both now explicitly pass `{ ...cfg, readOnly: false }` (see the `A1` comments in each file). Neither suite was wired into any CI, so this went unnoticed — exactly the class of bug a real CI gate exists to catch, which is the practical case for A15 beyond "it'd be nice to have a green badge."
 
@@ -115,11 +114,11 @@ AGENT AVOID: Do not randomize the fixture app's behavior. The e2e tests assert s
 
 ## What is NOT Tested
 
-- **On every push/PR (the default `test` CI job):** none of the 28 browser-bucket suites run — that's the entire real-Chrome, real-extension-bridge, real-Nano, and live-model-call surface of the project (m1, m2, m5, m6, v1, v3, v5, v6, v7, v8, v9, v10, v11, v14–v19, v20b, v21, v22, v24, v45, and all three `e2e.*` suites, including the primary oracle `e2e.run-fixture.ts`). A green push/PR check means the ~26 pure/unit suites pass and the project builds and typechecks — it says nothing about whether a real Chrome run still works. Run `npm run test:browser` locally, or trigger the manual `browser-suites` GitHub Actions job, to actually exercise that surface.
+- **On every push/PR (the `test` CI job):** none of the browser-bucket suites run — that's the entire real-Chrome, real-extension-bridge, real-Nano, and live-model-call surface of the project (m1, m2, m5, m6, v1, v3, v5, v6, v7, v8, v9, v10, v11, v14–v19, v20b, v21, v22, v24, v45, v49b, and all three `e2e.*` suites, including the primary oracle `e2e.run-fixture.ts`). A green push/PR check means the fast-bucket pure/unit suites pass and the project builds and typechecks on all three OSes — it says nothing about whether a real Chrome run still works. There is no CI job, manual or scheduled, that runs `npm run test:browser` — that command must be run locally, by hand, before a release.
 - The extension side panel UI (panel.js, overlay.js): manual testing only; see docs/vibe-panel-manual-test.md.
-- The auto-fix loop on CI: requires a real coding agent CLI on PATH (`e2e.autofix-real.ts` self-gates behind `SPIKE_REAL_AGENT_E2E=1` for this reason and is excluded from the automated `browser-suites` job's normal env).
+- The auto-fix loop on CI: requires a real coding agent CLI on PATH (`e2e.autofix-real.ts` self-gates behind `SPIKE_REAL_AGENT_E2E=1` for this reason, and isn't run by CI at all — see above).
 - Multi-Chrome concurrent runs: manual / ad hoc only.
-- Whether the browser-bucket suites still pass at all, on any schedule — `browser-suites` is manual-trigger only, so nothing runs it unless a human remembers to. There is no scheduled (`cron`) run of it.
+- Whether the browser-bucket suites still pass at all, on any schedule — nothing runs them automatically. Run `npm run test:browser` locally before every release; there is no scheduled (`cron`) or CI-triggered run of it.
 
 ## Update Triggers
 

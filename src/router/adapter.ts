@@ -27,6 +27,14 @@ export interface AdapterUsage {
   outputTokens?: number;
   totalTokens?: number;
   cachedTokens?: number;
+  /** A50 (P2): true when these counts are a rough estimate (prompt/response
+   * character count ÷ 4) rather than an API-reported exact figure — set by
+   * adapters with no real usage endpoint (the CLI planners, Ollama). Absent
+   * (or false) means the count came from the provider itself. A consumer
+   * that cares about cost precision (billing, not just "is this rung
+   * accounted for at all") should treat an estimated count differently from
+   * a real one. */
+  estimated?: boolean;
 }
 
 export interface ModelAdapter {

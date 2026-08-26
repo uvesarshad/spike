@@ -82,6 +82,7 @@ const BROWSER_SUITES = [
   'v22.clip-share.ts', // real BridgeServer socket
   'v24.multiplex.ts', // launchChromeWithExtension, two real Chromes on one bridge
   'v45.playwright-port.ts', // real CDP + fixture server, PlaywrightPort transport
+  'v49b.ensure-chrome.ts', // real ensureChrome() concurrency dedupe on a dedicated freshly-allocated port (split out of v49, A31)
   'e2e.run-fixture.ts', // full-stack qaRun against the fixture, the primary oracle
   'e2e.recorder.ts', // full-stack qaRun + qaReplay against the fixture
   'e2e.autofix-real.ts', // real `claude` CLI + real qaRun; gated behind SPIKE_REAL_AGENT_E2E=1

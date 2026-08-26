@@ -4,6 +4,7 @@ spike.config.json
 qa.config.json
 artifacts/
 generated-tests/
+.spike/
 .spike-action-cache/
 .qa-action-cache/
 *.log
