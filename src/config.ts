@@ -420,6 +420,7 @@ function fromSettings(): Partial<QaConfig> {
     // readOnly/spendCapUsd must never clobber DEFAULTS with a defaulted read.
     if (typeof raw.readOnly === 'boolean') out.readOnly = raw.readOnly;
     if (typeof raw.spendCapUsd === 'number') out.spendCapUsd = raw.spendCapUsd;
+    if (typeof raw.strictOracles === 'boolean') out.strictOracles = raw.strictOracles;
     return out;
   } catch {
     return {};

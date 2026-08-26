@@ -57,6 +57,14 @@ export interface QaSettings {
    * 'uncertain' and reason "spend cap reached". Non-secret, so it lives in the
    * store. Mirrors config.spendCapUsd / SPIKE_SPEND_CAP_USD; env still wins. */
   spendCapUsd?: number;
+  /** A1 (P0) headline "deterministic verdicts" feature: when true, a Tier-0
+   * invariant violation, a failed assert_* step, or a metamorphic-relation
+   * violation forces the final verdict to 'fail' regardless of what the model
+   * itself concluded — the model can't hallucinate a pass. Defaults to TRUE
+   * (safe/strict by default, matching DEFAULT_SETTINGS.readOnly's philosophy).
+   * Non-secret, so it lives in the store. Mirrors config.strictOracles /
+   * SPIKE_STRICT_ORACLES; env still wins. */
+  strictOracles?: boolean;
 }
 
 export const DEFAULT_SETTINGS: QaSettings = {
@@ -90,6 +98,8 @@ export const DEFAULT_SETTINGS: QaSettings = {
   readOnly: true,
   // spendCapUsd intentionally absent here — undefined/OFF is the default; the
   // user opts in with an explicit positive USD figure.
+  // A1: deterministic verdicts on by default, same "safe by default" stance as readOnly.
+  strictOracles: true,
 };
 
 /** NAVIGATOR (cheap) default model per provider+mode. Called on EVERY step, so

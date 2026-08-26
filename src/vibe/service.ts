@@ -325,6 +325,8 @@ export class VibeService {
         // undefined (OFF) unless the user set one.
         readOnly: settings.readOnly ?? true,
         spendCapUsd: settings.spendCapUsd,
+        // A1 headline feature: deterministic verdicts, safe-by-default true.
+        strictOracles: settings.strictOracles ?? true,
         providers,
       };
     });
@@ -368,6 +370,8 @@ export class VibeService {
         const n = Number(p.spendCapUsd);
         patch.spendCapUsd = Number.isFinite(n) && n > 0 ? n : undefined;
       }
+      // A1: dry-run toggle — same plain boolean coercion as readOnly/videoAssertions.
+      if (p.strictOracles !== undefined) patch.strictOracles = Boolean(p.strictOracles);
       return new SettingsStore().write(patch);
     });
 

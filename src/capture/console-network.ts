@@ -35,6 +35,25 @@ export interface CaptureBuffers {
  * on `.failed` before this fix). `clientError` on NetworkEntry
  * (src/ports/browser-port.ts) is the separate, non-fatal signal for that. */
 
+/** A49 (P2): hard cap on each buffer's length between drains. A single
+ * navigator/brain LLM call can run for up to LLM_CALL_TIMEOUT_MS
+ * (driver/loop.ts) before its step boundary finally calls drainConsole()/
+ * drainNetwork() — a page spewing console noise or firing requests the whole
+ * time would otherwise grow these arrays unboundedly for that entire wait.
+ * Dropping OLDEST-first (not newest) keeps the entries closest to whatever
+ * happens at the end of the wait — the ones most likely to explain a failure
+ * discovered right after it — and a single synthetic marker entry replaces
+ * the drop so truncation is visible evidence, not a silent gap. */
+const MAX_BUFFER_ENTRIES = 500;
+
+function pushBounded<T>(buf: T[], entry: T, marker: () => T): void {
+  buf.push(entry);
+  if (buf.length > MAX_BUFFER_ENTRIES) {
+    const dropped = buf.length - MAX_BUFFER_ENTRIES;
+    buf.splice(0, dropped, marker());
+  }
+}
+
 export async function attachCapture(client: CDP.Client): Promise<CaptureBuffers> {
   let consoleBuf: ConsoleEntry[] = [];
   let networkBuf: NetworkEntry[] = [];
@@ -42,12 +61,30 @@ export async function attachCapture(client: CDP.Client): Promise<CaptureBuffers>
 
   await client.Network.enable({});
 
+  const consoleOverflowMarker = (): ConsoleEntry => ({
+    ts: Date.now(),
+    level: 'page-error',
+    text: `[CAPTURE-TRUNCATED] earlier console entries dropped — buffer exceeded ${MAX_BUFFER_ENTRIES} entries during a long wait`,
+  });
+  const networkOverflowMarker = (): NetworkEntry => ({
+    ts: Date.now(),
+    method: 'GET',
+    url: '(truncated)',
+    ms: 0,
+    failed: false,
+    errorText: `earlier network entries dropped — buffer exceeded ${MAX_BUFFER_ENTRIES} entries during a long wait`,
+  });
+
   client.Runtime.consoleAPICalled(({ type, args }) => {
-    consoleBuf.push({
-      ts: Date.now(),
-      level: type,
-      text: args.map((a) => a.value ?? a.description ?? '').join(' '),
-    });
+    pushBounded(
+      consoleBuf,
+      {
+        ts: Date.now(),
+        level: type,
+        text: args.map((a) => a.value ?? a.description ?? '').join(' '),
+      },
+      consoleOverflowMarker,
+    );
   });
 
   client.Runtime.exceptionThrown(({ exceptionDetails }) => {
@@ -55,7 +92,7 @@ export async function attachCapture(client: CDP.Client): Promise<CaptureBuffers>
       exceptionDetails.exception?.description ??
       exceptionDetails.text ??
       'unknown page error';
-    consoleBuf.push({ ts: Date.now(), level: 'page-error', text: `[PAGE-ERROR] ${desc}` });
+    pushBounded(consoleBuf, { ts: Date.now(), level: 'page-error', text: `[PAGE-ERROR] ${desc}` }, consoleOverflowMarker);
   });
 
   client.Network.requestWillBeSent(({ requestId, request }) => {
@@ -78,21 +115,25 @@ export async function attachCapture(client: CDP.Client): Promise<CaptureBuffers>
       failed: response.status >= 500,
       clientError: response.status >= 400 && response.status < 500,
     };
-    networkBuf.push(entry);
+    pushBounded(networkBuf, entry, networkOverflowMarker);
   });
 
   client.Network.loadingFailed(({ requestId, errorText }) => {
     const req = pending.get(requestId);
     if (!req) return;
     pending.delete(requestId);
-    networkBuf.push({
-      ts: req.ts,
-      method: req.method,
-      url: req.url,
-      ms: Date.now() - req.ts,
-      failed: true,
-      errorText,
-    });
+    pushBounded(
+      networkBuf,
+      {
+        ts: req.ts,
+        method: req.method,
+        url: req.url,
+        ms: Date.now() - req.ts,
+        failed: true,
+        errorText,
+      },
+      networkOverflowMarker,
+    );
   });
 
   return {

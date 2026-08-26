@@ -368,6 +368,8 @@ async function getSettings() {
     // safety guardrails: read-only defaults ON (first runs never mutate); spend cap OFF (undefined) unless set.
     readOnly: Boolean(s.readOnly ?? DEFAULT_SETTINGS.readOnly),
     spendCapUsd: typeof s.spendCapUsd === 'number' && s.spendCapUsd > 0 ? s.spendCapUsd : undefined,
+    // A1: deterministic-verdicts toggle, safe-by-default true (mirrors readOnly).
+    strictOracles: Boolean(s.strictOracles ?? DEFAULT_SETTINGS.strictOracles),
   };
 }
 async function liteSetKey(provider, key) {
@@ -401,6 +403,8 @@ async function liteSetSettings(patch) {
       patch.spendCapUsd !== undefined
         ? (typeof patch.spendCapUsd === 'number' && patch.spendCapUsd > 0 ? patch.spendCapUsd : undefined)
         : cur.spendCapUsd,
+    strictOracles:
+      patch.strictOracles !== undefined ? Boolean(patch.strictOracles) : Boolean(cur.strictOracles),
     planner: { ...cur.planner, ...(patch.planner || {}) },        // BRAIN role
     navigator: { ...cur.navigator, ...(patch.navigator || {}) },  // NAVIGATOR role
   };
@@ -541,6 +545,7 @@ async function runLiteFromPanel(port, msg) {
       nanoDeps: liteNanoDeps,
       readOnly: settings.readOnly,        // safety: skip mutating actions when ON (default)
       spendCapUsd: settings.spendCapUsd,  // safety: abort if estimated paid spend exceeds this
+      strictOracles: settings.strictOracles, // A1: deterministic verdicts, safe-by-default ON
       onProgress: (line) => broadcastToPanels({ kind: 'progress', line }),
       onStep: (info) => broadcastToPanels({ kind: 'step', ...info }),
       signal: liteAbort.signal,

@@ -67,6 +67,9 @@ export interface LiteRunOptions {
   /** A5a (P1) safety: optional per-run spend cap in USD — forwarded to
    * LoopOptions. undefined/absent = no cap. */
   spendCapUsd?: number;
+  /** A1 (P0) headline feature: deterministic verdicts — forwarded to
+   * LoopOptions. Mirrors readOnly's forwarding shape; product default true. */
+  strictOracles?: boolean;
   /** chrome.debugger transport + lifecycle, injected by the SW. */
   browserDeps: LiteBrowserDeps;
   /** Nano (rung 0) callbacks; omit to skip the on-device visual rung. */
@@ -193,6 +196,8 @@ export function buildLiteConfig(keys: LiteKeys, settings: QaSettings): Record<st
     // A5b/A5a (P1 safety) — same shape as the daemon's vibe.config.get.
     readOnly: settings.readOnly ?? true,
     spendCapUsd: settings.spendCapUsd,
+    // A1 headline feature — same shape as the daemon's vibe.config.get.
+    strictOracles: settings.strictOracles ?? true,
     providers,
     mode: 'lite',
   };
@@ -236,6 +241,8 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       // A5b/A5a (P1 safety) — see LiteRunOptions.readOnly/spendCapUsd above.
       readOnly: opts.readOnly,
       spendCapUsd: opts.spendCapUsd,
+      // A1 (P0) — see LiteRunOptions.strictOracles above.
+      strictOracles: opts.strictOracles,
       // no vault in lite mode — a {{secret:NAME}} placeholder fails its step.
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);

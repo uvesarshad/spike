@@ -141,6 +141,7 @@ const setAutoFix = $('setAutoFix');
 const setVideoAssert = $('setVideoAssert');
 const setReadOnly = $('setReadOnly');
 const setSpendCap = $('setSpendCap');
+const setStrictOracles = $('setStrictOracles');
 const setAutoFixNote = $('setAutoFixNote');
 const setAutoFixNoteText = $('setAutoFixNoteText');
 const connectApp = $('connectApp');
@@ -1402,6 +1403,9 @@ function renderSettings(cfg) {
   if (setReadOnly) setReadOnly.checked = cfg.readOnly !== false;
   if (setSpendCap) setSpendCap.value = typeof cfg.spendCapUsd === 'number' ? String(cfg.spendCapUsd) : '';
 
+  // A1: deterministic verdicts default ON when unset
+  if (setStrictOracles) setStrictOracles.checked = cfg.strictOracles !== false;
+
   // debug agent
   if (cfg.debugAgent) setDebugAgent.value = cfg.debugAgent;
 
@@ -1575,6 +1579,7 @@ settingsSave.addEventListener('click', () => {
       setSpendCap && setSpendCap.value.trim() !== '' && Number(setSpendCap.value) > 0
         ? Number(setSpendCap.value)
         : undefined,
+    strictOracles: Boolean(setStrictOracles && setStrictOracles.checked),
   });
   closeSettings();
 });

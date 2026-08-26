@@ -5553,21 +5553,46 @@ function isHostAllowed(host, allowedHosts) {
 
 // src/capture/console-network.ts
 init_buffer_shim();
+var MAX_BUFFER_ENTRIES = 500;
+function pushBounded(buf, entry, marker) {
+  buf.push(entry);
+  if (buf.length > MAX_BUFFER_ENTRIES) {
+    const dropped = buf.length - MAX_BUFFER_ENTRIES;
+    buf.splice(0, dropped, marker());
+  }
+}
 async function attachCapture(client) {
   let consoleBuf = [];
   let networkBuf = [];
   const pending = /* @__PURE__ */ new Map();
   await client.Network.enable({});
+  const consoleOverflowMarker = () => ({
+    ts: Date.now(),
+    level: "page-error",
+    text: `[CAPTURE-TRUNCATED] earlier console entries dropped \u2014 buffer exceeded ${MAX_BUFFER_ENTRIES} entries during a long wait`
+  });
+  const networkOverflowMarker = () => ({
+    ts: Date.now(),
+    method: "GET",
+    url: "(truncated)",
+    ms: 0,
+    failed: false,
+    errorText: `earlier network entries dropped \u2014 buffer exceeded ${MAX_BUFFER_ENTRIES} entries during a long wait`
+  });
   client.Runtime.consoleAPICalled(({ type, args }) => {
-    consoleBuf.push({
-      ts: Date.now(),
-      level: type,
-      text: args.map((a) => a.value ?? a.description ?? "").join(" ")
-    });
+    pushBounded(
+      consoleBuf,
+      {
+        ts: Date.now(),
+        level: type,
+        text: args.map((a) => a.value ?? a.description ?? "").join(" ")
+      },
+      consoleOverflowMarker
+    );
   });
   client.Runtime.exceptionThrown(({ exceptionDetails }) => {
     const desc = exceptionDetails.exception?.description ?? exceptionDetails.text ?? "unknown page error";
-    consoleBuf.push({ ts: Date.now(), level: "page-error", text: `[PAGE-ERROR] ${desc}` });
+    pushBounded(consoleBuf, { ts: Date.now(), level: "page-error", text: `[PAGE-ERROR] ${desc}` }, consoleOverflowMarker);
   });
   client.Network.requestWillBeSent(({ requestId, request }) => {
     pending.set(requestId, { ts: Date.now(), method: request.method, url: request.url });
@@ -5585,20 +5610,24 @@ async function attachCapture(client) {
       failed: response.status >= 500,
       clientError: response.status >= 400 && response.status < 500
     };
-    networkBuf.push(entry);
+    pushBounded(networkBuf, entry, networkOverflowMarker);
   });
   client.Network.loadingFailed(({ requestId, errorText }) => {
     const req = pending.get(requestId);
     if (!req) return;
     pending.delete(requestId);
-    networkBuf.push({
-      ts: req.ts,
-      method: req.method,
-      url: req.url,
-      ms: Date.now() - req.ts,
-      failed: true,
-      errorText
-    });
+    pushBounded(
+      networkBuf,
+      {
+        ts: req.ts,
+        method: req.method,
+        url: req.url,
+        ms: Date.now() - req.ts,
+        failed: true,
+        errorText
+      },
+      networkOverflowMarker
+    );
   });
   return {
     drainConsole() {
@@ -14681,9 +14710,11 @@ var DEFAULT_SETTINGS = {
   videoAssertions: false,
   // A5b: safe by default — first runs must not click/type until the user
   // explicitly opts in (panel toggle / SPIKE_READ_ONLY=0).
-  readOnly: true
+  readOnly: true,
   // spendCapUsd intentionally absent here — undefined/OFF is the default; the
   // user opts in with an explicit positive USD figure.
+  // A1: deterministic verdicts on by default, same "safe by default" stance as readOnly.
+  strictOracles: true
 };
 var NAVIGATOR_MODELS = {
   "gemini:api": "gemini-3-flash-preview",
@@ -15034,6 +15065,8 @@ function buildLiteConfig(keys, settings) {
     // A5b/A5a (P1 safety) — same shape as the daemon's vibe.config.get.
     readOnly: settings.readOnly ?? true,
     spendCapUsd: settings.spendCapUsd,
+    // A1 headline feature — same shape as the daemon's vibe.config.get.
+    strictOracles: settings.strictOracles ?? true,
     providers,
     mode: "lite"
   };
@@ -15070,7 +15103,9 @@ async function runLite(opts) {
       signal: opts.signal,
       // A5b/A5a (P1 safety) — see LiteRunOptions.readOnly/spendCapUsd above.
       readOnly: opts.readOnly,
-      spendCapUsd: opts.spendCapUsd
+      spendCapUsd: opts.spendCapUsd,
+      // A1 (P0) — see LiteRunOptions.strictOracles above.
+      strictOracles: opts.strictOracles
       // no vault in lite mode — a {{secret:NAME}} placeholder fails its step.
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1e3)}s)`);

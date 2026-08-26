@@ -207,6 +207,17 @@
               </span>
             </label>
 
+            <label class="settings-toggle-row" for="setStrictOracles">
+              <span class="settings-toggle-copy">
+                <span class="settings-toggle-label">Deterministic verdicts (strict oracle mode)</span>
+                <span class="settings-toggle-sub">On (recommended): a broken invariant, a failed assertion, or a metamorphic-relation mismatch forces the verdict to fail — the model can't hallucinate a pass. Off: the model's own judgment always wins.</span>
+              </span>
+              <span class="switch">
+                <input id="setStrictOracles" class="switch-input" type="checkbox" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </span>
+            </label>
+
             <label class="settings-toggle-row" for="setSpendCap">
               <span class="settings-toggle-copy">
                 <span class="settings-toggle-label">Spend cap (USD)</span>
