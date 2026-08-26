@@ -144,14 +144,17 @@ export class VibeService {
     });
 
     // vibe.fix — hand the last failed run's fix prompt to a CLI coding agent.
-    this.bridge.onRequest('vibe.fix', async (_params, ctx) => {
+    this.bridge.onRequest('vibe.fix', async (params, ctx) => {
       // A3: only the paired bridge client (A2) may dispatch an auto-fix.
       if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.fix: unauthenticated client');
       if (!this.lastFailedReport) throw new Error('vibe.fix: no failed run to fix yet');
       if (this.fixing) throw new Error('vibe.fix: a fix is already in progress');
       this.fixing = true;
       const report = this.lastFailedReport;
-      void this.dispatch(report, ctx?.clientId);
+      // A16: the panel's explicit "confirm auto-fix" control is the only way
+      // a bridge caller vouches for the one-time per-project consent gate.
+      const confirmed = (params as { confirmed?: boolean } | undefined)?.confirmed === true;
+      void this.dispatch(report, ctx?.clientId, confirmed);
       return { accepted: true };
     });
 
@@ -409,11 +412,12 @@ export class VibeService {
     }
   }
 
-  private async dispatch(report: Report, clientId?: number): Promise<void> {
+  private async dispatch(report: Report, clientId?: number, confirmed?: boolean): Promise<void> {
     const target = clientId !== undefined ? { clientId } : undefined;
     try {
       const res = await dispatchFix(report, {
         onProgress: (line) => this.bridge.sendEvent('vibe.fix-progress', { line }, target),
+        confirmed,
       });
       this.bridge.sendEvent('vibe.fix-done', { ok: res.ok, agent: res.agent }, target);
     } catch (e) {

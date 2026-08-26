@@ -20,7 +20,11 @@ export async function startMcpServer(): Promise<void> {
     'qa_run',
     'Run an autonomous browser QA test: a cheap-model ladder drives a real Chrome against the URL, ' +
       'performs the task, and returns a compact verdict with evidence file paths. ' +
-      'Use it to verify UI changes actually work (login flows, forms, checkouts, rendering).',
+      'Use it to verify UI changes actually work (login flows, forms, checkouts, rendering). ' +
+      "Security note: naming a URL here grants real click/type authority on it for this run — the URL's host " +
+      '(plus its www./bare-domain sibling) is automatically trusted for mutation with no further confirmation. ' +
+      'Other hosts (ad iframes, OAuth redirects, surprise 3rd-party redirects) default-deny mutation unless ' +
+      'separately allow-listed via the allowHost config option or the SPIKE_ALLOWED_HOSTS env var.',
     {
       task: z.string().describe('what to test, in plain English (e.g. "log in as x@y.z / pw and complete checkout")'),
       url: z.string().url().describe('page to start on'),

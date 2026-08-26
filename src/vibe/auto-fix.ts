@@ -21,11 +21,13 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import type { QaConfig } from '../config.js';
 import { loadConfig } from '../config.js';
 import { qaRun, type QaRunOptions, type QaRunResult } from '../engine.js';
 import { buildFixPrompt } from './fix-prompt.js';
+import { SettingsStore, type QaSettings } from './settings.js';
 import type { Report } from '../report/report.js';
 
 /** Placeholder token inside fixAgentArgs that gets replaced with the prompt
@@ -38,6 +40,129 @@ const STDIN_POINTER = 'Apply the fix described on stdin.';
 
 /** 15-minute ceiling on a single fix dispatch (a coding agent can churn). */
 const FIX_TIMEOUT_MS = 15 * 60_000;
+
+/* ---- A16: one-time per-project consent gate before an unattended edit ------
+ *
+ * dispatchFix hands the fix prompt to a coding agent running WITH edit
+ * permissions (`claude -p --permission-mode acceptEdits`, `gemini
+ * --approval-mode auto_edit`, …) — it edits files on disk with nobody
+ * reviewing the diff first. The FIRST time that happens for a given project
+ * directory, we require an explicit human confirmation:
+ *   - interactive TTY (stdin+stdout both TTYs — the common case for
+ *     `spike run --fix` / `spike fix --apply` typed at a terminal): ask y/N.
+ *   - non-TTY (CI, a daemon child, a script): refuse unless the caller already
+ *     vouches for consent via `yesAutoFix` (intended for a CLI `--yes-auto-fix`
+ *     flag) or `confirmed` (intended for an explicit panel/bridge confirm —
+ *     `vibe.fix { confirmed: true }`). Neither flag is wired into cli.ts /
+ *     service.ts yet (out of scope here — see auto-fix.ts's module header);
+ *     this gate is the enforcement point they need to call into once they are.
+ * Acceptance is remembered per PROJECT DIRECTORY (not per run) in the
+ * SettingsStore, so it's asked at most once per project. QaSettings
+ * (settings-data.ts) doesn't declare this field — out of scope to edit here —
+ * so it's read/written through an explicit cast, isolated to this block. */
+
+interface AutoFixSettingsExt {
+  /** Absolute project directories that have already confirmed 'auto' mode. */
+  autoFixAcceptedDirs?: string[];
+}
+
+function projectKey(cwd: string): string {
+  return path.resolve(cwd);
+}
+
+function readAcceptedDirs(store: SettingsStore): string[] {
+  const raw = store.readRaw() as unknown as AutoFixSettingsExt;
+  return Array.isArray(raw.autoFixAcceptedDirs) ? raw.autoFixAcceptedDirs : [];
+}
+
+function isAutoFixAccepted(store: SettingsStore, cwd: string): boolean {
+  return readAcceptedDirs(store).includes(projectKey(cwd));
+}
+
+function recordAutoFixAcceptance(store: SettingsStore, cwd: string): void {
+  const key = projectKey(cwd);
+  const dirs = new Set(readAcceptedDirs(store));
+  if (dirs.has(key)) return;
+  dirs.add(key);
+  store.write({ autoFixAcceptedDirs: Array.from(dirs) } as unknown as Partial<QaSettings>);
+}
+
+/** Real interactive y/N prompt against process.stdin/stdout (only reached when
+ * both are TTYs). Test seam: pass `promptFn` in AutoFixConfirmOptions instead. */
+function defaultPromptFn(question: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(/^y(es)?$/i.test(answer.trim()));
+    });
+  });
+}
+
+export interface AutoFixConfirmOptions {
+  /** Project directory this dispatch edits — the confirmation is remembered
+   * per directory. Defaults to cfg.fixAgentCwd ?? process.cwd(). */
+  cwd?: string;
+  /** CLI: --yes-auto-fix — pre-accept for a non-interactive invocation. */
+  yesAutoFix?: boolean;
+  /** Bridge/panel: the human already confirmed via an explicit UI control. */
+  confirmed?: boolean;
+  /** Test seam: an injected SettingsStore instead of the default per-machine one. */
+  settingsStore?: SettingsStore;
+  /** Test seam: replace the interactive y/N prompt. */
+  promptFn?: (question: string) => Promise<boolean>;
+  /** Test seam: override the real `stdin/stdout are TTYs` detection so the TTY
+   * and non-TTY branches are deterministically testable regardless of how the
+   * test runner itself is invoked. Undefined (the default) uses the real check. */
+  interactive?: boolean;
+}
+
+/** Thrown when 'auto' mode can't proceed without a human confirming first
+ * (declined, or non-interactive with no consent flag). */
+export class AutoFixNotConfirmedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AutoFixNotConfirmedError';
+  }
+}
+
+/**
+ * Gate an unattended file-editing dispatch behind one-time-per-project human
+ * consent. Resolves silently once consent is established (a prior acceptance
+ * already on file, a fresh y/N accept, or an explicit `confirmed`/`yesAutoFix`
+ * flag); throws AutoFixNotConfirmedError when consent can't be obtained.
+ */
+export async function ensureAutoFixConfirmed(opts: AutoFixConfirmOptions = {}): Promise<void> {
+  const cwd = opts.cwd ?? process.cwd();
+  const store = opts.settingsStore ?? new SettingsStore();
+
+  if (isAutoFixAccepted(store, cwd)) return;
+
+  if (opts.confirmed === true || opts.yesAutoFix === true) {
+    recordAutoFixAcceptance(store, cwd);
+    return;
+  }
+
+  const interactive = opts.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (interactive) {
+    const ask = opts.promptFn ?? defaultPromptFn;
+    const accepted = await ask(
+      `\nspike auto-fix will let a coding agent edit files in ${cwd} without further confirmation ` +
+        `(asked once per project). Continue? [y/N] `,
+    );
+    if (accepted) {
+      recordAutoFixAcceptance(store, cwd);
+      return;
+    }
+    throw new AutoFixNotConfirmedError(`auto-fix declined for ${cwd}`);
+  }
+
+  throw new AutoFixNotConfirmedError(
+    `auto-fix needs a one-time confirmation for ${cwd} (non-interactive session, so no y/N prompt is possible) — ` +
+      'pass --yes-auto-fix (CLI) or confirmed:true (panel/bridge) once to accept it, ' +
+      'or run the fix interactively (a real terminal) once first.',
+  );
+}
 
 interface AgentSpec {
   bin: string;
@@ -104,6 +229,14 @@ export interface DispatchResult {
 export interface DispatchOptions {
   config?: Partial<QaConfig>;
   onProgress?: (line: string) => void;
+  /** A16 one-time-per-project consent gate — see ensureAutoFixConfirmed.
+   * `confirmed`/`yesAutoFix` are the two ways a caller can vouch for consent
+   * in a non-interactive session; `settingsStore`/`promptFn` are test seams. */
+  confirmed?: boolean;
+  yesAutoFix?: boolean;
+  settingsStore?: SettingsStore;
+  promptFn?: (question: string) => Promise<boolean>;
+  interactive?: boolean;
 }
 
 /**
@@ -113,6 +246,12 @@ export interface DispatchOptions {
  * Agent resolution: cfg.fixAgentBin (explicit override) wins; otherwise
  * detectFixAgent() probes PATH; if neither yields a bin we throw an actionable
  * error naming the config field + env var to set.
+ *
+ * Before any of that: ensureAutoFixConfirmed() gates the whole dispatch behind
+ * one-time-per-project human consent (A16) — this is the single choke point
+ * where files actually get edited unattended, so every caller (the `--fix`
+ * loop below, `spike fix --apply`, the panel's auto-fix button) goes through
+ * it, throwing AutoFixNotConfirmedError rather than spawning anything.
  */
 export async function dispatchFix(report: Report, opts: DispatchOptions = {}): Promise<DispatchResult> {
   const prompt = buildFixPrompt(report);
@@ -122,6 +261,15 @@ export async function dispatchFix(report: Report, opts: DispatchOptions = {}): P
 
   const cfg = loadConfig(opts.config ?? {});
   const onProgress = opts.onProgress ?? (() => {});
+
+  await ensureAutoFixConfirmed({
+    cwd: cfg.fixAgentCwd ?? process.cwd(),
+    confirmed: opts.confirmed,
+    yesAutoFix: opts.yesAutoFix,
+    settingsStore: opts.settingsStore,
+    promptFn: opts.promptFn,
+    interactive: opts.interactive,
+  });
 
   // Agent resolution precedence (most specific wins):
   //   1. cfg.fixAgentBin — an explicit override (bin + optional args); always wins.
@@ -280,6 +428,13 @@ export interface RunWithAutoFixOptions {
   /** Injectable runner — defaults to the real qaRun. The v12 test drives it
    * with a fake (fail → pass) to assert the loop sequence with no Chrome. */
   runFn?: RunFn;
+  /** A16 consent-gate passthrough for the dispatchFix call each failed attempt
+   * makes — see ensureAutoFixConfirmed. */
+  confirmed?: boolean;
+  yesAutoFix?: boolean;
+  settingsStore?: SettingsStore;
+  promptFn?: (question: string) => Promise<boolean>;
+  interactive?: boolean;
 }
 
 export interface AutoFixAttempt {
@@ -332,7 +487,15 @@ export async function runWithAutoFix(
     let agentLabel = 'fix agent';
     try {
       onProgress(`attempt ${attempt}: ${report.verdict} → dispatching fix…`);
-      const res = await dispatchFix(report, { config: opts.config, onProgress });
+      const res = await dispatchFix(report, {
+        config: opts.config,
+        onProgress,
+        confirmed: opts.confirmed,
+        yesAutoFix: opts.yesAutoFix,
+        settingsStore: opts.settingsStore,
+        promptFn: opts.promptFn,
+        interactive: opts.interactive,
+      });
       agentLabel = res.agent;
       onProgress(`attempt ${attempt}: ${agentLabel} ${res.ok ? 'finished' : 'exited non-zero'} — re-running test`);
       attempts.push({ verdict: report.verdict, fixed: true });

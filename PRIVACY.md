@@ -1,7 +1,8 @@
 # Privacy Policy
 
-**Effective date:** [EFFECTIVE DATE — e.g. 2026-06-20]
-**Applies to:** the Spike CLI/Spike Core daemon and the Spike Chrome extension ("the Software"), provided by [LEGAL ENTITY / PRODUCT NAME] ("we", "us").
+**Effective date:** 2026-08-27
+**Applies to:** the Spike CLI/Spike Core daemon and the Spike Chrome extension ("the Software"), provided by [Owner Name], an individual developer ("we", "us").
+<!-- OWNER: confirm entity/jurisdiction wording -->
 
 > This document is the source text for the privacy policy page published on our
 > website. Replace every `[BRACKETED]` value before publishing. It describes how
@@ -33,13 +34,14 @@ The Software uses a configurable "ladder" of AI models. The data that leaves you
 | Rung | Model | Data leaves your machine? |
 |---|---|---|
 | 0 | **Gemini Nano** (on‑device, in Chrome) | **No.** Runs entirely locally; no network calls. |
-| 1 | **Google Gemini CLI** (free quota) | Yes — page text/screenshots sent to **Google**. |
+| 1 | **Claude Code CLI / Codex CLI** (your own logged‑in CLI) | Yes — page text/screenshots sent to **Anthropic** or **OpenAI**, authenticated with your existing CLI session. |
 | 2 | **BYOK** — Gemini API, Anthropic, OpenAI, OpenRouter, **GLM / z.ai** | Yes — sent to **the provider you configured**, authenticated with your key. |
 | 3 | **Ollama** (local) | **No.** Runs on your own machine/network. |
 
 Notes:
 
 - **You control the rung.** Pin an on‑device/local model (Gemini Nano or Ollama) to keep all data on your machine. Pick a cloud provider and the relevant page content is transmitted to that provider to generate the next action or verdict.
+- **Google's free Gemini CLI tier was discontinued on 2026‑06‑18** and is no longer a data destination. If you have an older configuration that still points at it, update it — see the project README for current rung options.
 - **Screenshots** are only sent to providers that accept image input. Text‑only models — including **GLM‑5.2 (z.ai)** — receive only the a11y‑tree text and your task description, **never screenshots**.
 - When a step is uncertain or a provider is unavailable, the Software may **escalate to the next rung**, sending that step's data to the next configured provider. Every such hop is recorded locally in the run's `model_trace`.
 
@@ -47,9 +49,9 @@ Notes:
 
 When you choose a cloud provider, your use of it is governed by **that provider's** privacy policy and terms, not ours. Review them before sending sensitive data:
 
-- **Google (Gemini / Gemini CLI):** https://ai.google.dev/gemini-api/terms and https://policies.google.com/privacy
-- **Anthropic (Claude API):** https://www.anthropic.com/legal/privacy
-- **OpenAI (GPT API):** https://openai.com/policies/privacy-policy
+- **Google (Gemini API):** https://ai.google.dev/gemini-api/terms and https://policies.google.com/privacy
+- **Anthropic (Claude API / Claude Code CLI):** https://www.anthropic.com/legal/privacy
+- **OpenAI (GPT API / Codex CLI):** https://openai.com/policies/privacy-policy
 - **OpenRouter:** https://openrouter.ai/privacy
 - **z.ai (GLM‑5.2):** https://z.ai/ — see the z.ai terms and privacy policy and the API docs at https://docs.z.ai/
 - **Ollama:** runs locally; no third‑party transmission.
@@ -78,7 +80,7 @@ The Chrome extension requests the `debugger` permission to drive the page under 
 
 ## Children
 
-The Software is a developer tool and is **not directed to children** under [13/16 — per your jurisdiction]. We do not knowingly collect personal information from children.
+The Software is a developer tool and is **not directed to children** under 16. We do not knowingly collect personal information from children.
 
 ## Changes to this policy
 
@@ -86,4 +88,5 @@ We may update this policy as the Software evolves (for example, when a new model
 
 ## Contact
 
-Questions about this policy or the Software's data handling: **[CONTACT EMAIL]** ([COMPANY/PRODUCT NAME], [JURISDICTION/ADDRESS if required]).
+Questions about this policy or the Software's data handling: **uveskhan234@gmail.com** (Spike, operated by [Owner Name] as an individual developer, [JURISDICTION/ADDRESS if required]).
+<!-- OWNER: confirm entity/jurisdiction wording -->

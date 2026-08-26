@@ -28,6 +28,7 @@ import {
   __resetDetectCache,
   type RunFn,
 } from '../src/vibe/auto-fix.js';
+import { SettingsStore } from '../src/vibe/settings.js';
 import type { Report } from '../src/report/report.js';
 import type { QaRunResult } from '../src/engine.js';
 
@@ -82,6 +83,9 @@ function cannedFailingReport(): Report {
 
 /** A throwaway dir for the stub script + its marker file. */
 const work = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-v12-'));
+// A16: isolated settings file so the auto-fix consent gate never touches the
+// real user config/vault during this offline test.
+const settingsStore = new SettingsStore(path.join(work, 'settings.json'));
 const stubPath = path.join(work, 'stub.js');
 const markerPath = path.join(work, 'marker.txt');
 
@@ -141,6 +145,7 @@ async function dispatchTests(): Promise<void> {
       fixAgentArgs: [stubPath, '{prompt}'],
       fixAgentCwd: work,
     },
+    confirmed: true, settingsStore, // A16: test exercises the automated dispatch path directly, not the consent gate
     onProgress: (l) => progress.push(l),
   });
 
@@ -158,7 +163,10 @@ async function dispatchTests(): Promise<void> {
   // pass verdict → dispatchFix refuses (nothing to fix)
   let refused = false;
   try {
-    await dispatchFix({ ...cannedFailingReport(), verdict: 'pass', console_error: null, failing_step: null });
+    await dispatchFix(
+      { ...cannedFailingReport(), verdict: 'pass', console_error: null, failing_step: null },
+      { confirmed: true, settingsStore },
+    );
   } catch {
     refused = true;
   }
@@ -202,6 +210,7 @@ async function loopTests(): Promise<void> {
     maxAttempts: 2,
     runFn: fakeRun,
     config: { fixAgentBin: 'node', fixAgentArgs: [stubPath, '{prompt}'], fixAgentCwd: work },
+    confirmed: true, settingsStore, // A16: test exercises the automated loop directly, not the consent gate
     onProgress: (l) => progress.push(l),
   });
 
@@ -223,6 +232,7 @@ async function loopTests(): Promise<void> {
     maxAttempts: 2,
     runFn: alwaysFail,
     config: { fixAgentBin: 'node', fixAgentArgs: [stubPath, '{prompt}'], fixAgentCwd: work },
+    confirmed: true, settingsStore, // A16: test exercises the automated loop directly, not the consent gate
   });
   check('always-fail loop ran exactly maxAttempts (2) cycles', stuckCalls === 2);
   check('always-fail loop final verdict is fail', stuck.finalReport.verdict === 'fail');

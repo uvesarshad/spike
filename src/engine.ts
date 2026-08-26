@@ -722,7 +722,7 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; n
 }
 
 /** The host of `url` plus its www./bare-domain sibling (apex↔www redirects are
- * common — e.g. mapleandsand.com → www.mapleandsand.com — and the guard's
+ * common — e.g. a bare domain → its www. subdomain — and the guard's
  * subdomain check only covers one direction). '' / unparseable url → []. */
 function targetHostCandidates(url: string): string[] {
   let host: string;

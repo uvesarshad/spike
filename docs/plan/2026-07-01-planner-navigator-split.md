@@ -76,7 +76,7 @@ New shape (reuses all existing execute/drain/evidence/secret/read-only-guard/aud
 - `NanoPort` gains a `navStep(prompt, schema)` method (Prompt API structured output over the a11y text — same JSON-constraint mechanism Spike A proved for verdicts; text-only, no image needed to pick a nodeId).
 - `NanoAdapter.supports('plan-step')` → true once `navStep` exists; still throws for `plan-goals`.
 - Lite: extend `LiteNanoDeps` with `navStep`; wire it in `sw.js` via the existing offscreen/runner plumbing.
-- **Spike first** (`spikes/nano-nav/`): can Nano reliably pick a correct action from a real a11y tree + sub-goal on `https://mapleandsand.com/` and the fixture? Exit criteria: ≥N correct single-step picks, latency acceptable. **If it fails**, Nano-navigator ships behind an "Experimental (free, may be unreliable)" label and the default navigator falls back to a cheap cloud model — the rest of the plan is unaffected.
+- **Spike first** (`spikes/nano-nav/`): can Nano reliably pick a correct action from a real a11y tree + sub-goal on a live production marketing site (domain withheld) and the fixture? Exit criteria: ≥N correct single-step picks, latency acceptable. **If it fails**, Nano-navigator ships behind an "Experimental (free, may be unreliable)" label and the default navigator falls back to a cheap cloud model — the rest of the plan is unaffected.
 
 ### 8. Cost accounting — `src/driver/loop.ts` `computeTokens` + `src/report/report.ts`
 - `model_trace` already carries `capability`; extend `ReportTokens` with per-role splits: `{ navigatorTokens, brainTokens, visualCalls, brainCalls, navigatorCalls, ... }` derived by grouping the trace on `capability`.
@@ -106,6 +106,6 @@ New shape (reuses all existing execute/drain/evidence/secret/read-only-guard/aud
 ## Verification
 - `npm run typecheck` + `npm run build` (both tsup targets) clean; grep-gate the lite bundle for `require(`/`node:`.
 - `npm run test:e2e` (fixture, both bug modes) still passes end-to-end.
-- **Cost proof:** run the dogfood task on `https://mapleandsand.com/` and the fixture; confirm `model_trace` shows **1–few brain calls** vs **many navigator calls**, and `report.tokens` per-role split reflects it — brain calls must NOT scale with step count.
+- **Cost proof:** run the dogfood task on a live production marketing site (domain withheld) and the fixture; confirm `model_trace` shows **1–few brain calls** vs **many navigator calls**, and `report.tokens` per-role split reflects it — brain calls must NOT scale with step count.
 - **Robustness:** force a stuck state (e.g. a goal the navigator can't satisfy) → confirm exactly one brain escalation re-plans and the run recovers or fails honestly.
-- **Lite UI:** in the extension with only pasted keys, set Navigator=Gemini Flash + Brain=Claude Sonnet (or Nano navigator if Phase A GO), run against mapleandsand.com → live feed, correct verdict, per-role cost shown, graceful "add your Brain key" when the brain key is missing.
+- **Lite UI:** in the extension with only pasted keys, set Navigator=Gemini Flash + Brain=Claude Sonnet (or Nano navigator if Phase A GO), run against a live production marketing site (domain withheld) → live feed, correct verdict, per-role cost shown, graceful "add your Brain key" when the brain key is missing.

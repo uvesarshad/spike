@@ -104,8 +104,9 @@ program
   .option('--save-storage-state <path>', 'on a PASSING run, save cookies + localStorage to this file')
   .option('--fix', 'on failure, hand the fix prompt to your coding agent (claude/codex/gemini) and re-test', false)
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
+  .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent (A16) for this non-interactive run', false)
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; json: boolean }) => {
+  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
     const onProgress = opts.json ? undefined : (l: string) => console.log(l);
     const config = mergeConfig(opts.via, opts.allowHost, opts.actionCache);
     const qaRunOpts = {
@@ -124,6 +125,7 @@ program
           config: qaRunOpts.config,
           onProgress,
           qaRunOpts,
+          yesAutoFix: opts.yesAutoFix,
         })).finalReport
       : await qaRun(task, opts.url, qaRunOpts);
     console.log(JSON.stringify(slimReport(report), null, 2));
@@ -585,7 +587,8 @@ program
   .description('print the fix prompt for a finished run — or with --apply, hand it to your coding agent headlessly')
   .argument('<runIdOrPath>', 'a runId under artifacts/, or a path to a report.json')
   .option('--apply', 'dispatch the prompt to the configured coding agent (claude/codex/gemini auto-detected)', false)
-  .action(async (runIdOrPath: string, opts: { apply: boolean }) => {
+  .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent (A16) for this non-interactive run', false)
+  .action(async (runIdOrPath: string, opts: { apply: boolean; yesAutoFix: boolean }) => {
     const cfg = loadConfig();
     const candidates = [
       runIdOrPath,
@@ -612,7 +615,7 @@ program
       return;
     }
     if (opts.apply) {
-      const result = await dispatchFix(report, { onProgress: (l) => console.log(l) });
+      const result = await dispatchFix(report, { onProgress: (l) => console.log(l), yesAutoFix: opts.yesAutoFix });
       console.log(result.ok ? `fix applied by ${result.agent} — re-run the test to verify` : `fix agent failed`);
       process.exit(result.ok ? 0 : 1);
     }
