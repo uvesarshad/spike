@@ -72,6 +72,14 @@ export interface RelationViolation {
   relation: string;
   detail: string;
   evidence?: Record<string, unknown>;
+  /** A1 (P0): true when this "violation" is actually a missing-data report
+   * (the Observation didn't carry the field the relation needed) rather than
+   * a genuine contradiction — e.g. makeCountDeltaRelation's before/after
+   * counter absent. Callers that GATE a verdict on relation violations
+   * (driver/loop.ts's strictOracles) must treat these as "no evidence
+   * either way", never as a fail — only a set `insufficientData` on a
+   * REAL mismatch would be a false positive gate. */
+  insufficientData?: boolean;
 }
 
 export interface RelationParams {
@@ -147,6 +155,7 @@ function makeCountDeltaRelation(id: string, label: string, defaultDelta: number,
           relation: id,
           detail: `Observation is missing the "${key}" count needed to check this relation.`,
           evidence: { beforeCount: b, afterCount: a },
+          insufficientData: true,
         };
       }
       const expected = b + delta;
@@ -419,4 +428,33 @@ export function detectRelationCandidates(ax: AxSnapshot): RelationProposal[] {
   }
 
   return proposals;
+}
+
+// ---------------------------------------------------------------------------
+// A1 (P0): observation extraction — the wiring checkRelation() actually needs
+// ---------------------------------------------------------------------------
+
+/** Best-effort Observation extraction from an AxSnapshot, for driver/loop.ts's
+ * post-run metamorphic gate. Only the cart-badge count is generically
+ * extractable without app-specific knowledge — the SAME cart-node heuristic
+ * detectRelationCandidates() uses to PROPOSE the relation in the first place,
+ * reused here to actually observe it. `items`/`state` are deliberately left
+ * undefined: a relation that needs them (sortPreservesSet, filterIsSubset,
+ * paginationPagesDisjoint, loginLogoutLoginReturnsToSameState,
+ * sameUrlTwiceSameState) then compares two empty/undefined sides, which
+ * every one of those predicates' set/state-equality checks treats as equal —
+ * "no evidence either way" from a signal this function couldn't actually
+ * observe, never a false trigger. */
+export function axToObservation(ax: AxSnapshot, url?: string): Observation {
+  const nodes = collectAxNodes(ax);
+  const cartNode = nodes.find((n) => CART_RE.test(nodeText(n)) && DIGIT_RE.test(nodeText(n)));
+  const counts: Record<string, number> = {};
+  if (cartNode) {
+    const m = nodeText(cartNode).match(/\d+/);
+    if (m) counts.cart = Number(m[0]);
+  }
+  return {
+    ...(Object.keys(counts).length && { counts }),
+    ...(url !== undefined && { url }),
+  };
 }

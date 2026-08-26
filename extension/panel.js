@@ -574,8 +574,18 @@ function isLocalHost(host) {
     host === '[::1]' || /^localhost:/.test(host) || /^127\.0\.0\.1:/.test(host);
 }
 
-/** Default-checked for every testable host; third-party (non-localhost) hosts
- * keep the box checked but get an amber "interacts as you" note. */
+// (tab, host) pair the consent checkbox was last initialized for. Only when
+// this pair changes do we touch consentToggle.checked again — that's how a
+// user's explicit opt-out survives repeated renderTabCard() calls (favicon
+// load, title change, etc.) triggered by tabs.onUpdated for the same page.
+let consentInitTabId = null;
+let consentInitHost = null;
+
+/** Default-checked the first time we see a given (tab, host) pair; third-party
+ * (non-localhost) hosts keep the box checked but get an amber "interacts as
+ * you" note. Once initialized for the current pair, never programmatically
+ * change consentToggle.checked again — the user's toggle for that host stands
+ * until the tab or host actually changes. */
 function refreshConsent() {
   const testable = activeTab && isTestableUrl(activeTab.url);
   if (!testable) {
@@ -583,8 +593,15 @@ function refreshConsent() {
     return;
   }
   const host = hostOf(activeTab.url);
-  // default checked (set once per tab render; the user can still uncheck)
-  consentToggle.checked = true;
+  const tabId = activeTab.id;
+  if (tabId !== consentInitTabId || host !== consentInitHost) {
+    // New (tab, host) pair — (re)default to checked. This does NOT run on a
+    // same-page re-render (e.g. favicon/title-only tabs.onUpdated events),
+    // so a prior explicit uncheck for this pair is preserved.
+    consentInitTabId = tabId;
+    consentInitHost = host;
+    consentToggle.checked = true;
+  }
   if (isLocalHost(host)) {
     consentNote.hidden = true;
   } else {

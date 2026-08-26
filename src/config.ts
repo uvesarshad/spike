@@ -73,6 +73,15 @@ export interface QaConfig {
   fixturePort: number;
   /** Chrome profile dir — must live on a volume with 22 GB+ free (Gemini Nano storage gate). */
   chromeProfile: string;
+  /** A10 (P0): explicit Chrome/Chromium executable override, for any
+   * install off the standard-locations candidate list (Linux distros,
+   * Chromium/snap/flatpak/Chrome-for-Testing, non-default install dirs).
+   * Unset (default) → chrome/launch.ts's findChrome() falls back to the
+   * hardcoded per-OS candidates. The SPIKE_CHROME_PATH env var (checked
+   * directly inside findChrome) always wins over this field, matching this
+   * file's env-beats-config resolution order. Not yet threaded through every
+   * ensureChrome() call site — see chrome/launch.ts's LaunchOptions.chromePath. */
+  chromePath?: string;
   /** A7 (P1): run the QA browser's Chrome headless. Default false (unchanged
    * behavior) — every product call site used to hardcode `headless: false`.
    * Gemini Nano's availability in headless is undocumented/unproven
@@ -178,6 +187,13 @@ export interface QaConfig {
   debugMode: DebugMode;
   /** Which coding agent runs the automated fix ('auto' = detect on PATH). */
   debugAgent: DebugAgent;
+  /** A1 (P0): let the deterministic oracle layer (Tier-0 invariants, the
+   * precise assert_* verbs, Tier-2 metamorphic relations) GATE the final
+   * verdict instead of merely informing it — see driver/loop.ts's
+   * findStrictOracleViolation. Default TRUE: the product's own flagship demo
+   * bug (a rendered-undefined total) must not slip past as a model-judged
+   * pass. Set false to restore the pre-A1 evidence-only behavior. */
+  strictOracles: boolean;
 }
 
 const DEFAULTS: QaConfig = {
@@ -231,6 +247,8 @@ const DEFAULTS: QaConfig = {
   navigator: { provider: 'nano', mode: 'ondevice' },
   debugMode: 'prompt',
   debugAgent: 'auto',
+  // A1: deterministic oracles gate the verdict by default — see QaConfig.strictOracles.
+  strictOracles: true,
 };
 
 /** Valid enum values for env-override parsing (silently ignore garbage). */
@@ -263,6 +281,11 @@ function fromEnv(): Partial<QaConfig> {
   if (e.SPIKE_RUNNER_PORT) out.runnerPort = Number(e.SPIKE_RUNNER_PORT);
   if (e.SPIKE_FIXTURE_PORT) out.fixturePort = Number(e.SPIKE_FIXTURE_PORT);
   if (e.SPIKE_CHROME_PROFILE) out.chromeProfile = e.SPIKE_CHROME_PROFILE;
+  // A10: SPIKE_CHROME_PATH is also checked directly inside chrome/launch.ts's
+  // findChrome() (env always wins there too) — reading it into config as
+  // well lets a resolved QaConfig.chromePath be threaded through explicitly
+  // by callers that build LaunchOptions from config.
+  if (e.SPIKE_CHROME_PATH) out.chromePath = e.SPIKE_CHROME_PATH;
   // A7
   if (e.SPIKE_HEADLESS) out.headless = e.SPIKE_HEADLESS !== '0' && e.SPIKE_HEADLESS !== 'false';
   if (e.SPIKE_NANO_CDP_PORT) out.nanoCdpPort = Number(e.SPIKE_NANO_CDP_PORT);
@@ -319,6 +342,8 @@ function fromEnv(): Partial<QaConfig> {
   if (e.SPIKE_VIDEO_ASSERTIONS) out.videoAssertions = e.SPIKE_VIDEO_ASSERTIONS !== '0' && e.SPIKE_VIDEO_ASSERTIONS !== 'false';
   if (e.SPIKE_DIFFERENTIAL) out.differential = e.SPIKE_DIFFERENTIAL !== '0' && e.SPIKE_DIFFERENTIAL !== 'false';
   if (e.SPIKE_READ_ONLY) out.readOnly = e.SPIKE_READ_ONLY !== '0' && e.SPIKE_READ_ONLY !== 'false';
+  // A1: default is true (DEFAULTS.strictOracles) — only an explicit '0'/'false' opts out.
+  if (e.SPIKE_STRICT_ORACLES) out.strictOracles = e.SPIKE_STRICT_ORACLES !== '0' && e.SPIKE_STRICT_ORACLES !== 'false';
   if (e.SPIKE_SPEND_CAP_USD) {
     const n = Number(e.SPIKE_SPEND_CAP_USD);
     if (Number.isFinite(n) && n > 0) out.spendCapUsd = n; // 0/garbage → leave unset (no cap)

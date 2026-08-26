@@ -36,8 +36,9 @@ import {
 import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
 import type { Vault } from '../vault/vault.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
-import { checkDrainInvariants, checkProbeInvariants } from '../assertions/invariants.js';
+import { checkDrainInvariants, checkProbeInvariants, type InvariantViolation } from '../assertions/invariants.js';
 import { evaluateAssertion, type AssertionSpec } from '../assertions/dom-assertions.js';
+import { axToObservation, checkRelation, detectRelationCandidates } from '../assertions/metamorphic.js';
 import { validateScriptSteps, runScriptSteps } from './script-runner/index.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders, RunDataNotFoundError } from '../run-data/index.js';
 import {
@@ -101,6 +102,13 @@ const DEFAULT_PER_GOAL_STEPS = 12;
 /** Consecutive brain escalations with NO navigator progress before we give up
  * and end honestly — bounds brain cost when the page truly can't be driven. */
 const MAX_BRAIN_ESCALATIONS = 2;
+/** A2 (P0): navigator-only mode (no plan-goals adapter configured) has nobody
+ * to ask when stuck, so escalate() retries once per stuck event with a fresh
+ * look at the page instead of ending the run immediately (see escalate()'s
+ * `!brainAvailable` branch). This is the terminal cap for THAT retry loop —
+ * deliberately a different, slightly higher number than MAX_BRAIN_ESCALATIONS
+ * since there is no brain to burn cost on, only wall-clock/step budget. */
+const MAX_NAVIGATOR_ONLY_RECOVERY_ATTEMPTS = 3;
 
 /** {{secret:NAME}} — NAME is [a-zA-Z0-9_-]+. Resolved AT EXECUTE TIME ONLY; the
  * placeholder is what lives in every recorded/reported/logged surface. */
@@ -211,6 +219,13 @@ export interface LoopOptions {
    * see estimatedPaidSpendUsd for the approximation this makes — there is no
    * real per-adapter USD pricing available here. */
   spendCapUsd?: number;
+  /** A1 (P0): let the deterministic oracle layer GATE the final verdict
+   * instead of merely informing it — see findStrictOracleViolation. Defaults
+   * to true here (mirrors QaConfig.strictOracles's default) so a direct
+   * caller that never threads the config value through still gets the safe
+   * default rather than silently falling back to pre-A1 evidence-only
+   * behavior. */
+  strictOracles?: boolean;
 }
 
 /** Map an action to its onStep kind. */
@@ -479,11 +494,22 @@ export async function runDriverLoop(
   // A5a (P1 safety): undefined/0/negative all mean "no cap" (config.ts/service.ts
   // already normalize a set value to a positive finite number before it gets here).
   const spendCapUsd = opts.spendCapUsd && opts.spendCapUsd > 0 ? opts.spendCapUsd : undefined;
+  // A1 (P0): default true — see LoopOptions.strictOracles's doc comment.
+  const strictOracles = opts.strictOracles ?? true;
   const assertionTrace: AssertionTraceEntry[] = [];
   const runData = createRunDataState();
   const actionCache = opts.actionCache;
   const actionCacheStats = { enabled: Boolean(actionCache), hits: 0, misses: 0, stale: 0, stored: 0 };
 
+  // A6 (P0): everything the run can throw from here on (dropped CDP
+  // connections, a hung page mid-escalate(), etc.) is wrapped in the
+  // try/catch right below runMain's declaration, so a crash still yields a
+  // persisted, evidence-bearing report instead of a bare rejected promise.
+  // runMain is a closure (not a separate function) specifically so it can
+  // read/mutate every `let` declared in this outer scope (steps, verdict,
+  // reason, failingStep, …) without threading them through a return value —
+  // whatever got mutated before a throw is exactly "whatever accumulated".
+  const runMain = async (): Promise<void> => {
   await browser.navigate(url);
   browser.drainConsole();
   browser.drainNetwork(); // initial page load noise is not step evidence
@@ -491,6 +517,9 @@ export async function runDriverLoop(
   let stepIndex = 0; // running index across batches, bounded by maxSteps
   let lastBatchFirstSig: string | null = null; // for loop detection
   let lastSnapshotAx: AxSnapshot | null = null; // last tree text, for the uncertain-reason heuristic
+  // A1 (P0): the FIRST tree snapshot of the run — paired with the last one as
+  // a best-effort before/after Observation for the Tier-2 metamorphic gate.
+  let firstSnapshotAx: AxSnapshot | null = null;
   /** A32: role+name of the most recent successfully-acted-on target — the
    * anchor for a focused re-serialization when the tree overflows its budget. */
   let lastTouchedTarget: { role: string; name?: string } | undefined;
@@ -507,6 +536,11 @@ export async function runDriverLoop(
   // Bounds brain cost when the navigator can't recover: N consecutive escalations
   // that yield no navigator progress → end honestly instead of looping forever.
   let brainEscalations = 0;
+  // A2 (P0): navigator-only mode's analogue of brainEscalations — how many
+  // consecutive "stuck" events escalate() has retried (fresh snapshot, no
+  // brain to ask) without navigator progress. Reset on the same progress
+  // signals as brainEscalations (goal completion, a real action landing).
+  let noBrainRecoveryAttempts = 0;
   // Whether a BRAIN (plan-goals) adapter is configured at all. Set from the router
   // just before the initial plan. When false the run degrades to navigator-only:
   // one implicit goal = the task, and escalate() ends honestly (no brain to ask).
@@ -517,21 +551,49 @@ export async function runDriverLoop(
    *  - replacement goals (completed ones kept) → keep navigating the new plan;
    *  - a hint → feed it to the next navigator call;
    *  - nothing useful, or the escalation cap is hit → end honestly (uncertain).
-   * Returns 'continue' to keep the outer loop going, 'end' to stop it. */
-  const escalate = async (failure: string): Promise<'continue' | 'end'> => {
+   * Returns 'continue' to keep the outer loop going, 'end' to stop it.
+   *
+   * `kind` (A2, P0) distinguishes ONLY how the no-brain branch below reacts:
+   * 'per-goal-overflow' is not a stuck signal in navigator-only mode — global
+   * maxSteps is the only cap there — everything else ('stuck', the default:
+   * blocked / 3×-repeat / invalid navigator JSON / no actions returned) gets
+   * one retry with a fresh look at the page before the local recovery cap
+   * ends the run honestly. Brain-available behavior is UNCHANGED by `kind`. */
+  const escalate = async (failure: string, kind: 'per-goal-overflow' | 'stuck' = 'stuck'): Promise<'continue' | 'end'> => {
     if (signal?.aborted) {
       reason = 'cancelled by user';
       return 'end';
     }
-    // navigator-only mode (no brain configured): there is nobody to ask — end
-    // honestly with the failure reason (mirrors the old single-model behaviour).
+    // navigator-only mode (no brain configured): there is nobody to ask, but
+    // that no longer means "give up immediately" (A2 — see the doc comment
+    // above and docs/plan/26-08-27-audit-market-readiness.md A2).
     if (!brainAvailable) {
-      const visibleErr = visibleErrorText(lastSnapshotAx?.text);
-      verdict = 'uncertain';
-      reason =
-        `stuck: ${failure}` +
-        (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : '');
-      return 'end';
+      if (kind === 'per-goal-overflow') {
+        // global maxSteps is the only cap in navigator-only mode; the caller
+        // already resets stepsInGoal on any 'continue' outcome.
+        return 'continue';
+      }
+      if (noBrainRecoveryAttempts >= MAX_NAVIGATOR_ONLY_RECOVERY_ATTEMPTS) {
+        const visibleErr = visibleErrorText(lastSnapshotAx?.text);
+        verdict = 'uncertain';
+        reason =
+          `stuck: ${failure}` +
+          (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : '') +
+          ' — could not recover without a planner';
+        return 'end';
+      }
+      noBrainRecoveryAttempts++;
+      // retry once with a fresh look — the next outer-loop iteration always
+      // re-fetches browser.axTree() before planning, so no extra CDP call is
+      // needed here; just reset loop-detection so the retry isn't immediately
+      // re-tripped by stale history.
+      lastBatchFirstSig = null;
+      onStep({
+        index: stepIndex,
+        kind: 'plan',
+        text: `Stuck (${failure.slice(0, 80)}) — retrying with a fresh look at the page (no planner configured, attempt ${noBrainRecoveryAttempts}/${MAX_NAVIGATOR_ONLY_RECOVERY_ATTEMPTS}).`,
+      });
+      return 'continue';
     }
     if (brainEscalations >= MAX_BRAIN_ESCALATIONS) {
       const visibleErr = visibleErrorText(lastSnapshotAx?.text);
@@ -707,6 +769,7 @@ export async function runDriverLoop(
   } else {
     const ax = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
     lastSnapshotAx = ax;
+    firstSnapshotAx ??= ax;
     const planUrl = await browser.url();
     onStep({ index: stepIndex, kind: 'plan', text: 'Planning goals…' });
     try {
@@ -776,6 +839,7 @@ export async function runDriverLoop(
 
     const ax = await withTimeout(browser.axTree(), CDP_CALL_TIMEOUT_MS, 'axTree');
     lastSnapshotAx = ax;
+    firstSnapshotAx ??= ax;
     const batchUrl = await browser.url();
 
     if (actionCache && stepIndex < maxSteps) {
@@ -890,6 +954,7 @@ export async function runDriverLoop(
       hint = undefined;
       stepsInGoal = 0;
       brainEscalations = 0; // completing a goal is progress
+      noBrainRecoveryAttempts = 0;
       if (currentGoal >= goals.length) {
         const outcome = await runFinishPass(`completed all ${goals.length} goals`);
         if (outcome === 'continue') continue;
@@ -1056,6 +1121,12 @@ export async function runDriverLoop(
       // below) sees a normal-shaped, already-"succeeded" step and needs no
       // special-casing of its own.
       let skippedReadOnly = false;
+      // A3 (P0): set true when executeWithRetry recovers via a FRESH
+      // browser.axTree() re-snapshot — that rebuilds the port's internal
+      // nodeId->backendDOMNodeId map, so any LATER action in this same batch
+      // would resolve its (now-stale) nodeId against the WRONG node if the
+      // batch kept going. Checked below to discard the rest of the batch.
+      let batchDirty = false;
       try {
         if (readOnly && isMutatingAction(action)) {
           skippedReadOnly = true;
@@ -1156,7 +1227,7 @@ export async function runDriverLoop(
           // never hold the real value. Missing secret → step fails.
           const resolvedRun = resolveRunPlaceholders(action.text, runData).text;
           const resolved = resolveSecrets(resolvedRun, vault);
-          await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
+          batchDirty = await executeWithRetry(browser, { ...action, text: resolved }, ax.root);
         } else if (action.type === 'extract') {
           if (action.prompt) {
             // Phase 15 — model-assisted extraction: TEXT-only, via the SAME
@@ -1244,7 +1315,7 @@ export async function runDriverLoop(
             }
           }
         } else {
-          await executeWithRetry(browser, action, ax.root);
+          batchDirty = await executeWithRetry(browser, action, ax.root);
         }
       } catch (e) {
         if (e instanceof RunDataNotFoundError) {
@@ -1344,6 +1415,7 @@ export async function runDriverLoop(
         )
       ) {
         brainEscalations = 0;
+        noBrainRecoveryAttempts = 0;
       }
 
       // a finish or a settled verdict ends the whole run — UNLESS the brain
@@ -1359,6 +1431,11 @@ export async function runDriverLoop(
       if (a < actions.length - 1) {
         if (!record.ok) break;
         if (drainHasPageError(record.console, record.network)) break;
+        // A3 (P0): a mid-batch retry re-snapshot rebuilt the port's nodeMap —
+        // any remaining action in this batch would resolve its nodeId against
+        // the WRONG node (ids are sequential and per-snapshot). Discard the
+        // rest of the batch; it re-plans against the fresh tree next step.
+        if (batchDirty) break;
         // navigate-like actions AND a tab switch end the batch — the a11y tree
         // captured at batch start (`ax`) no longer describes the active page.
         if (
@@ -1389,11 +1466,87 @@ export async function runDriverLoop(
 
     // ---- per-goal budget: a goal grinding on without completing → ask the brain ----
     if (!done && !finishReplan && stepsInGoal >= perGoalMaxSteps) {
-      const outcome = await escalate(`goal "${goals[currentGoal]}" ran ${stepsInGoal} steps without completing`);
+      const outcome = await escalate(`goal "${goals[currentGoal]}" ran ${stepsInGoal} steps without completing`, 'per-goal-overflow');
       if (outcome === 'end') break;
       stepsInGoal = 0; // fresh budget for the (possibly re-planned) goal
     }
   }
+
+  // ---- A1 (P0): Tier-2 metamorphic relations — best-effort, single-run
+  // before/after (see assertions/metamorphic.ts's axToObservation doc: only
+  // cart-count is generically extractable without app-specific knowledge;
+  // relations needing items/state degrade to "no evidence either way", never
+  // a false trigger, since both sides are then empty/undefined and every
+  // relation's set/state-equality check treats that as equal). Folded onto
+  // the LAST step's `invariants` (same InvariantViolation shape Tier-0 already
+  // uses) so it flows through the existing evidence/report path with no new
+  // Report field, and so findStrictOracleViolation below picks it up for
+  // free via the SAME error-severity scan Tier-0 invariants already get. ----
+  if (firstSnapshotAx && lastSnapshotAx && steps.length) {
+    const candidates = detectRelationCandidates(lastSnapshotAx);
+    if (candidates.length) {
+      const before = axToObservation(firstSnapshotAx);
+      const after = axToObservation(lastSnapshotAx, url);
+      const relationEvidence: InvariantViolation[] = [];
+      for (const c of candidates) {
+        const violation = checkRelation(c.relation, before, after, c.params);
+        if (!violation) continue;
+        // only a RELIABLE-confidence relation with sufficient data can gate
+        // strictOracles (error); a speculative relation, or a reliable one
+        // that simply had no data to observe, is evidence only (warn) — see
+        // metamorphic.ts's confidence doc comment: "worth a look", not
+        // "definitely a regression".
+        const gates = c.relation.confidence === 'reliable' && !violation.insufficientData;
+        relationEvidence.push({
+          rule: `metamorphic:${violation.relation}`,
+          severity: gates ? 'error' : 'warn',
+          detail: violation.detail,
+          ...(violation.evidence && { evidence: JSON.stringify(violation.evidence).slice(0, 200) }),
+        });
+      }
+      if (relationEvidence.length) {
+        const last = steps[steps.length - 1];
+        last.invariants = [...(last.invariants ?? []), ...relationEvidence];
+      }
+    }
+  }
+
+  // ---- A1 (P0): strictOracles — deterministic oracles GATE the verdict
+  // instead of merely informing it. Off (strictOracles:false) restores the
+  // pre-A1 evidence-only behavior: the model's own verdict stands untouched. ----
+  if (strictOracles) {
+    const oracle = findStrictOracleViolation(steps);
+    if (oracle) {
+      if (verdict !== 'fail') {
+        verdict = 'fail';
+        reason = oracle.reason;
+        failingStep = { index: oracle.index, action: oracle.action, description: oracle.description };
+      } else if (!failingStep) {
+        failingStep = { index: oracle.index, action: oracle.action, description: oracle.description };
+      }
+    }
+  }
+  };
+
+  try {
+    await runMain();
+  } catch (e) {
+    // A6 (P0): genuine cancellation propagates as a rejection — everything
+    // else (a dropped CDP connection, an unguarded browser.url()/axTree()
+    // call inside escalate() while recovering from a broken page, …) still
+    // yields a persisted, evidence-bearing 'uncertain' report instead of a
+    // bare rejected promise. Whatever accumulated in `steps` before the
+    // throw is exactly the evidence this report carries.
+    if (signal?.aborted || (e instanceof Error && e.name === 'AbortError')) throw e;
+    verdict = 'uncertain';
+    reason = `run crashed: ${e instanceof Error ? e.message : String(e)}`;
+  }
+  // TS's control-flow narrowing can't see through the `runMain()` closure
+  // call above (it may have reassigned `verdict` to 'pass'/'fail' inside),
+  // so it otherwise narrows `verdict`'s type here to just 'uncertain' (its
+  // last DIRECTLY-visible assignment) and flags the `=== 'fail'` check below
+  // as an impossible comparison. Widen it back to the full declared union.
+  verdict = verdict as RunVerdict;
 
   // ---- final evidence ----
   const lastStep = steps[steps.length - 1];
@@ -1617,9 +1770,21 @@ async function planGoalsOnce(
 
 /* ---------- execution ---------- */
 
-async function executeWithRetry(browser: BrowserPort, action: Action, planTree: AxNode): Promise<void> {
+/** Execute one action, retrying ONCE via a fresh re-snapshot if the DOM
+ * shifted between the batch's snapshot and execution. Returns true when the
+ * retry path fired (a fresh `browser.axTree()` was taken) — A3 (P0): that
+ * fresh snapshot rebuilds the port's internal nodeId->backendDOMNodeId map
+ * (see cdp-browser.ts / playwright-browser.ts), so any LATER action in the
+ * same batch would resolve its (now-stale) nodeId against the WRONG node if
+ * the caller kept going — ids are sequential per-snapshot, so a coincidental
+ * match silently hits a different element with `ok: true`. The caller
+ * (loop.ts's main batch executor) treats a `true` return as "batch dirty"
+ * and discards the rest of the batch instead of risking a false-success
+ * wrong-element interaction. */
+async function executeWithRetry(browser: BrowserPort, action: Action, planTree: AxNode): Promise<boolean> {
   try {
     await executeOnce(browser, action);
+    return false;
   } catch (firstErr) {
     // DOM may have shifted between snapshot and execution: re-resolve the
     // target by role+name in a FRESH tree and retry once
@@ -1639,6 +1804,7 @@ async function executeWithRetry(browser: BrowserPort, action: Action, planTree: 
     const match = findByRoleName(fresh.root, target.role, target.name);
     if (!match) throw firstErr;
     await executeOnce(browser, { ...action, nodeId: match.id });
+    return true;
   }
 }
 
@@ -1843,6 +2009,54 @@ function auditTarget(action: Action, target?: { role: string; name?: string }): 
   if (action.type === 'go_back') return 'go_back';
   if (action.type === 'extract') return action.key;
   return undefined;
+}
+
+/** A1 (P0): scan a finished run's steps for a deterministic oracle violation
+ * that should GATE the verdict under strictOracles (see LoopOptions.strictOracles).
+ * Priority, most to least reliable signal:
+ *  (a) any step carrying an error-severity `invariants` entry — Tier-0
+ *      page-health facts (rendered undefined/NaN, broken image, same-origin
+ *      5xx…) plus any Tier-2 metamorphic relation folded in as 'error' by the
+ *      caller. First occurrence wins; there is no "retry clears it" concept
+ *      here, these are per-step facts, not assertions.
+ *  (b) a failed deterministic assertion verb (assert_text/count/url/state/
+ *      network — assert_dom is deliberately excluded, see
+ *      DETERMINISTIC_ASSERTIONS's doc comment), deduped by exact action
+ *      signature so a LATER successful retry of the identical assertion
+ *      clears an earlier failure of it.
+ * Returns null when nothing qualifies. */
+function findStrictOracleViolation(
+  steps: StepRecord[],
+): { index: number; action: Action; description: string; reason: string } | null {
+  for (const s of steps) {
+    const err = s.invariants?.find((v) => v.severity === 'error');
+    if (err) {
+      return {
+        index: s.index,
+        action: s.action,
+        description: s.description,
+        reason: `deterministic oracle: ${err.detail}${err.evidence ? ` (${err.evidence})` : ''}`,
+      };
+    }
+  }
+  // last-outcome-per-signature: a later successful retry of the SAME
+  // assertion (identical action object) clears an earlier failure of it.
+  const lastBySignature = new Map<string, StepRecord>();
+  for (const s of steps) {
+    if (!isDeterministicAssertion(s.action)) continue;
+    lastBySignature.set(JSON.stringify(s.action), s);
+  }
+  for (const s of lastBySignature.values()) {
+    if (s.ok === false) {
+      return {
+        index: s.index,
+        action: s.action,
+        description: s.description,
+        reason: `deterministic oracle: ${s.description} failed${s.error ? ` — ${s.error}` : ''}`,
+      };
+    }
+  }
+  return null;
 }
 
 function lastInteraction(steps: StepRecord[]): FailingStep | null {

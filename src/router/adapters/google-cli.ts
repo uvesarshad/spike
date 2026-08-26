@@ -18,10 +18,32 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import type { AdapterUsage, Capability, JsonRequest, ModelAdapter } from '../adapter.js';
 import { extractJson } from '../adapter.js';
 import { isSafeModelId } from '../../vibe/settings.js';
+
+/** A24 (P1): kill the REAL CLI process (and anything it spawned), not just the
+ * `shell:true` wrapper — a plain `child.kill()` only signals /bin/sh (or
+ * cmd.exe), leaving the actual `gemini`/`antigravity` binary running and
+ * still able to read the screenshot the caller's `finally` deletes right
+ * after this settles. POSIX: `detached: true` on spawn (see run()) makes
+ * `child` the leader of its own process group, so a NEGATIVE pid signals the
+ * whole group. Windows has no process-group signal; `taskkill /T` walks the
+ * process tree instead. */
+export function killProcessGroup(child: ChildProcess): void {
+  if (process.platform === 'win32') {
+    if (child.pid) spawn('taskkill', ['/pid', String(child.pid), '/T', '/F']);
+    return;
+  }
+  try {
+    if (child.pid) process.kill(-child.pid, 'SIGKILL');
+  } catch {
+    // group already gone, or never formed (pid raced the spawn) — fall back
+    // to signalling the child directly rather than leaving it running.
+    child.kill('SIGKILL');
+  }
+}
 
 /** The per-model token block in the -o json envelope:
  * stats.models[<model>].tokens = { input, prompt, candidates, total, cached, thoughts }. */
@@ -64,6 +86,11 @@ export interface GoogleCliOptions {
   model: string;
   env: Record<string, string>;
   timeoutMs?: number;
+  /** A4 (P0): timeout for the `--version` availability probe. Defaults to
+   * 5000ms — overridable so a fast test can exercise the hung-probe path
+   * without a real 5s wait. See available()'s doc comment for why an
+   * unbounded probe is a whole-router deadlock, not just a slow call. */
+  availabilityProbeTimeoutMs?: number;
 }
 
 export class GoogleCliAdapter implements ModelAdapter {
@@ -100,8 +127,26 @@ export class GoogleCliAdapter implements ModelAdapter {
     if (cached && Date.now() - cached.at < GoogleCliAdapter.AVAIL_TTL_MS) return cached.value;
     const value = await new Promise<boolean>((resolve) => {
       const child = spawn(`${this.opts.bin} --version`, { shell: true, stdio: 'ignore' });
-      child.once('error', () => resolve(false));
-      child.once('exit', (code) => resolve(code === 0));
+      let settled = false;
+      const finish = (v: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(v);
+      };
+      // A4 (P0): a hung `--version` spawn (dead PATH entry, a shim that never
+      // exits) must not deadlock the whole router — `availableCache` is only
+      // written once THIS promise settles, so an unbounded probe here means
+      // every later plan-step/plan-goals call across the whole run also hangs
+      // forever waiting on the same unresolved probe. Force a negative result
+      // (which the TTL cache then absorbs, same as any other failed probe)
+      // after a bounded wait, and kill the wedged child so it doesn't linger.
+      const timer = setTimeout(() => {
+        child.kill();
+        finish(false);
+      }, this.opts.availabilityProbeTimeoutMs ?? 5000);
+      child.once('error', () => finish(false));
+      child.once('exit', (code) => finish(code === 0));
     });
     this.availableCache = { value, at: Date.now() };
     return value;
@@ -161,6 +206,10 @@ export class GoogleCliAdapter implements ModelAdapter {
       const child = spawn(command, {
         shell: true,
         cwd,
+        // A24 (P1): leader of its own process group on POSIX — see
+        // killProcessGroup()'s doc comment for why a plain child.kill() isn't
+        // enough under shell:true.
+        detached: process.platform !== 'win32',
         env: {
           ...process.env,
           GEMINI_CLI_TRUST_WORKSPACE: 'true',
@@ -169,12 +218,31 @@ export class GoogleCliAdapter implements ModelAdapter {
       });
       let stdout = '';
       let stderr = '';
+      let timedOut = false;
       child.stdout.on('data', (d) => (stdout += d));
       child.stderr.on('data', (d) => (stderr += d));
+      // A5 (P0): an unhandled 'error' on a writable stream is fatal to the
+      // WHOLE Node process, not just this call — if the CLI exits before (or
+      // while) we write the prompt, `.end()` raises EPIPE/ERR_STREAM_WRITE_AFTER_END,
+      // and with nothing listening that crashes the daemon (every connected
+      // panel's session with it). The 'exit' handler below still classifies
+      // the real failure from the exit code/stderr; this only stops the write
+      // error itself from being fatal. Non-stdin errors are folded into
+      // stderr rather than silently dropped, so the exit-code path can still
+      // surface them.
+      child.stdin.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code !== 'EPIPE' && err.code !== 'ERR_STREAM_WRITE_AFTER_END') {
+          stderr += `\n[stdin write error] ${err.message}`;
+        }
+      });
       child.stdin.end(stdinText);
       const timer = setTimeout(() => {
-        child.kill();
-        reject(new Error(`${this.opts.bin} timed out after ${this.opts.timeoutMs ?? 120_000}ms`));
+        timedOut = true;
+        // A24 (P1): kill the process GROUP, and wait for the real 'exit' below
+        // before this promise settles — the caller's `finally` deletes the temp
+        // screenshot right after this resolves/rejects, and that must not race
+        // a still-alive child that could still be reading it.
+        killProcessGroup(child);
       }, this.opts.timeoutMs ?? 120_000);
       child.once('error', (e) => {
         clearTimeout(timer);
@@ -182,6 +250,9 @@ export class GoogleCliAdapter implements ModelAdapter {
       });
       child.once('exit', (code) => {
         clearTimeout(timer);
+        if (timedOut) {
+          return reject(new Error(`${this.opts.bin} timed out after ${this.opts.timeoutMs ?? 120_000}ms`));
+        }
         if (code === 0) return resolve(stdout);
         if (code === 41) {
           return reject(

@@ -241,6 +241,7 @@ export async function openBrowserSession(
       profileDir: cfg.chromeProfile,
       headless: cfg.headless, // A7 — default false, unchanged behavior
       allowedHosts: deps.allowedHosts,
+      chromePath: cfg.chromePath,
     });
     await browser.launch();
     return {
@@ -258,6 +259,7 @@ export async function openBrowserSession(
     profileDir: cfg.chromeProfile,
     headless: cfg.headless, // A7 — default false, unchanged (headed: Nano lives here, and this window is the future "watch the robot" show)
     allowedHosts: deps.allowedHosts,
+    chromePath: cfg.chromePath,
   });
   await browser.launch();
   return {
@@ -956,6 +958,7 @@ async function runFreshAiPass(
         videoAssertions: cfg.videoAssertions,
         readOnly: cfg.readOnly,
         spendCapUsd: cfg.spendCapUsd,
+        strictOracles: cfg.strictOracles,
       }),
     );
     if (clip) {

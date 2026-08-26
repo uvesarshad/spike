@@ -55,6 +55,37 @@ interface ActionableProbeResult {
   rect: { x: number; y: number; width: number; height: number };
 }
 
+/** A4 (P0): throwing timeout wrapper — mirrors driver/loop.ts's own
+ * `withTimeout` (same reject-with-timer shape), kept local here rather than
+ * imported to avoid a driver→port circular dependency. `raceTimeout` above
+ * (browser-port.ts) resolves to a FALLBACK instead of rejecting, which is
+ * right for the actionability poll loop but wrong here: `assertMutationAllowed`
+ * and `url()` need a real rejection so the driver's per-action catch (loop.ts,
+ * ~line 1249) classifies it as a failed step, not a silently-swallowed no-op
+ * that lets a mutation through unchecked. Used for calls with no other bound —
+ * a page stuck in a synchronous JS loop (the exact bug class this tool exists
+ * to catch) would otherwise wedge Runtime.evaluate forever. */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`CdpBrowser.${label} timed out after ${ms}ms`)), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
+/** A4 (P0): matches driver/loop.ts's own CDP_CALL_TIMEOUT_MS — a dropped
+ * debugger connection or a page wedged in a synchronous loop should surface
+ * quickly rather than hang the run. */
+const CDP_CALL_TIMEOUT_MS = 15_000;
+
 /** True when two consecutive probe reads describe the SAME box, within a
  * small epsilon (sub-pixel layout jitter between two genuinely-static reads
  * is possible; a real reflow moves by whole pixels). */
@@ -113,8 +144,20 @@ export class CdpBrowser implements BrowserPort {
    * comment for why this isn't defaulted to localhost-only automatically). */
   private async assertMutationAllowed(what: string): Promise<void> {
     if (!this.opts.allowedHosts) return;
-    const host = hostOfUrl(await this.url());
-    assertMutationHostAllowed(host, this.opts.allowedHosts, what);
+    // A4 (P0): wrapped in withTimeout — this runs before EVERY mutating
+    // primitive, so a page stuck in a synchronous JS loop (the exact bug
+    // class this tool exists to catch) would otherwise wedge url()'s
+    // Runtime.evaluate and, with it, the whole run, forever. A timeout here
+    // throws, which the driver's per-action catch turns into a failed step,
+    // not a crash.
+    await withTimeout(
+      (async () => {
+        const host = hostOfUrl(await this.url());
+        assertMutationHostAllowed(host, this.opts.allowedHosts!, what);
+      })(),
+      CDP_CALL_TIMEOUT_MS,
+      `assertMutationAllowed(${what})`,
+    );
   }
 
   /** Raw CDP client for extras outside the BrowserPort contract (clip recorder). */
@@ -161,8 +204,19 @@ export class CdpBrowser implements BrowserPort {
   }
 
   async url(): Promise<string> {
-    const { result } = await this.c.Runtime.evaluate({ expression: 'location.href', returnByValue: true });
-    return result.value as string;
+    // A4 (P0): wrapped in withTimeout — a page stuck in a synchronous JS loop
+    // can wedge this Runtime.evaluate call forever; throwing here (instead of
+    // hanging) lets the driver's per-action catch classify it as a failed
+    // step. Also called from assertMutationAllowed(), which has its own outer
+    // timeout — the inner one here fires first in practice.
+    return withTimeout(
+      (async () => {
+        const { result } = await this.c.Runtime.evaluate({ expression: 'location.href', returnByValue: true });
+        return result.value as string;
+      })(),
+      CDP_CALL_TIMEOUT_MS,
+      'url()',
+    );
   }
 
   async axTree(opts?: AxTreeOptions): Promise<AxSnapshot> {
