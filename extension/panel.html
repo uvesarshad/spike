@@ -334,20 +334,30 @@
       <div id="suggestWrap">
       <div class="field-label">Try one of these</div>
       <div id="suggestions" class="suggestions">
+        <!-- A26: every suggestion has to be runnable on whatever site is open,
+             with nothing set up first — these are the first thing a new user
+             taps, so one that needs credentials is a guaranteed-fail welcome. -->
+        <button class="suggestion-card" type="button"
+                data-task="Find anything broken on this page">
+          <span class="suggestion-emoji" data-icon="search"></span>
+          <span class="suggestion-text">Find anything broken</span>
+        </button>
         <button class="suggestion-card" type="button"
                 data-task="Check the signup form rejects a bad email">
           <span class="suggestion-emoji" data-icon="sparkles"></span>
           <span class="suggestion-text">Check signup validation</span>
         </button>
         <button class="suggestion-card" type="button"
-                data-task="Add an item to the cart, check out, and verify the order confirmation page">
+                data-task="Add an item to the cart and complete checkout">
           <span class="suggestion-emoji" data-icon="cart"></span>
           <span class="suggestion-text">Add to cart &amp; checkout</span>
         </button>
-        <button class="suggestion-card" type="button"
-                data-task="Click through the main pages and report any errors, broken buttons or blank content">
-          <span class="suggestion-emoji" data-icon="search"></span>
-          <span class="suggestion-text">Find anything broken</span>
+        <!-- A26: the one suggestion that DOES need a login, offered only once a
+             test login has been saved (Settings → Test login). -->
+        <button id="suggestLoginCard" class="suggestion-card" type="button" hidden
+                data-task="Log in and check the dashboard loads">
+          <span class="suggestion-emoji" data-icon="lock"></span>
+          <span class="suggestion-text">Log in &amp; check the dashboard</span>
         </button>
       </div>
 

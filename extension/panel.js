@@ -112,6 +112,8 @@ const tabHost = $('tabHost');
 const tabWarning = $('tabWarning');
 const stopBtn = $('stopBtn');
 const consentToggle = $('consentToggle');
+// A26: the login suggestion, shown only once a test login is saved.
+const suggestLoginCard = $('suggestLoginCard');
 // A25: "Remember my login for tests" (desktop-helper only).
 const rememberLoginRow = $('rememberLoginRow');
 const rememberLogin = $('rememberLogin');
@@ -546,6 +548,8 @@ function onPortMessage(msg) {
       if (typeof msg.debugMode === 'string') debugMode = msg.debugMode;
       renderSettings(msg);
       refreshKeyGate();
+      // A26: the one suggestion that needs a login appears once one is saved.
+      refreshLoginSuggestion();
       break;
     case 'key-saved':
       onKeySaved(msg);
@@ -2287,6 +2291,14 @@ const TEST_PASSWORD_REF = '{{secret:TEST_PASSWORD}}';
 function hasSavedLogin() {
   const saved = currentConfig && currentConfig.testLogin;
   return Boolean(saved && saved.user && saved.password);
+}
+
+/** A26: the "Log in and check the dashboard loads" suggestion exists only when
+ * a test login has been saved — otherwise it is a card that cannot succeed,
+ * which is exactly what the first suggestion used to be. */
+function refreshLoginSuggestion() {
+  if (!suggestLoginCard) return;
+  suggestLoginCard.hidden = !hasSavedLogin();
 }
 
 /** Tell the agent it has a login to use, by reference — never by value. Left
