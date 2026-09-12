@@ -856,7 +856,15 @@ chrome.runtime.onConnect.addListener((port) => {
           try {
             // {accepted:true} on success; fix-progress / fix-done stream as vibe.*
             // events handled by the generic fan-out in handleBridgeEvent.
-            await sendRequest('vibe.fix', {});
+            // A11: the first fix for a project comes back as
+            // {needsConfirmation:true, projectDir} instead — Spike Core has no
+            // terminal to ask in, so the panel shows the confirm dialog and
+            // re-sends this with confirmed:true.
+            const result = await sendRequest('vibe.fix', msg && msg.confirmed ? { confirmed: true } : {});
+            if (result && result.needsConfirmation) {
+              port.postMessage({ kind: 'fix-confirm', projectDir: (result && result.projectDir) || '' });
+              break;
+            }
             // no panel message on accept; the daemon's fix-progress/fix-done drive UI
           } catch (e) {
             // includes 'unknown method vibe.fix' from an old daemon

@@ -79,6 +79,23 @@ function isAutoFixAccepted(store: SettingsStore, cwd: string): boolean {
   return readAcceptedDirs(store).includes(projectKey(cwd));
 }
 
+/**
+ * A11: has this project directory already been accepted for unattended edits?
+ *
+ * The bridge/panel path needs to ASK this question before it dispatches, because
+ * it has no terminal to fall back to: a caller with no confirmation and no prior
+ * acceptance must be answered with a "please confirm" payload the side panel can
+ * render, not left waiting on a y/N prompt nobody will ever see. Same per-project
+ * store as ensureAutoFixConfirmed's own check — this is a read-only peek at it.
+ */
+export function isAutoFixAcceptedFor(cwd: string, store?: SettingsStore): boolean {
+  try {
+    return isAutoFixAccepted(store ?? new SettingsStore(), cwd);
+  } catch {
+    return false;
+  }
+}
+
 function recordAutoFixAcceptance(store: SettingsStore, cwd: string): void {
   const key = projectKey(cwd);
   const dirs = new Set(readAcceptedDirs(store));

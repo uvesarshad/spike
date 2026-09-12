@@ -9,7 +9,11 @@
  * Reverse-RPC methods registered here:
  *   vibe.run    {task, url} → {accepted:true}      (then async vibe.progress/done/error events)
  *   vibe.status {}          → {busy:boolean}
- *   vibe.fix    {}          → {accepted:true}      (then async vibe.fix-progress/-done events)
+ *   vibe.fix    {confirmed?} → {accepted:true} | {needsConfirmation:true, projectDir}
+ *                             (A11: a bridge caller has no terminal, so an
+ *                             unconfirmed first fix for a project is ANSWERED
+ *                             with the question rather than prompting; then
+ *                             async vibe.fix-progress/-done events)
  *   vibe.cancel {}          → {cancelled:boolean}  (aborts the active run)
  *   vibe.clip   {}          → {name, mime, dataBase64}  (last saved replay clip)
  *   vibe.map.get      {host?} → {present:false} | {present:true, baseUrl?, routeCount,
@@ -43,7 +47,7 @@ import { qaRun, type QaRunOptions } from '../engine.js';
 import { loadConfig } from '../config.js';
 import { slimReport, type Report } from '../report/report.js';
 import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
-import { dispatchFix } from './auto-fix.js';
+import { dispatchFix, isAutoFixAcceptedFor } from './auto-fix.js';
 import { loadAppModel, coverageReport, type AppModel } from '../discovery/index.js';
 import {
   SettingsStore,
@@ -179,6 +183,18 @@ export class VibeService {
     this.lastClipPath = p;
   }
 
+  /** TEST SEAM ONLY: let v85.autofix-consent exercise the vibe.fix consent gate
+   * without running a real (failing) QA run first. Production sets this in
+   * execute() when a run comes back failed. */
+  noteFailedReportForTest(report: Report): void {
+    this.lastFailedReport = report;
+  }
+
+  /** The project directory an auto-fix would edit. */
+  private fixProjectDir(): string {
+    return loadConfig({}).fixAgentCwd ?? process.cwd();
+  }
+
   start(): void {
     // A23: sw.js emits {event:'detached'} whenever chrome.debugger detaches
     // from a tab (e.g. the user dismissed Chrome's "<ext> is debugging this
@@ -241,11 +257,23 @@ export class VibeService {
       if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.fix: unauthenticated client');
       if (!this.lastFailedReport) throw new Error('vibe.fix: no failed run to fix yet');
       if (this.fixing) throw new Error('vibe.fix: a fix is already in progress');
-      this.fixing = true;
       const report = this.lastFailedReport;
       // A16: the panel's explicit "confirm auto-fix" control is the only way
       // a bridge caller vouches for the one-time per-project consent gate.
       const confirmed = (params as { confirmed?: boolean } | undefined)?.confirmed === true;
+      // A11 (P0): a request that arrived over the bridge has NO terminal behind
+      // it, so the consent gate can never be answered with a y/N prompt here —
+      // under a login-installed helper that prompt has no reader at all, and in
+      // a real terminal it would hang the panel's button forever on a keypress
+      // nobody sees. Instead we answer the question as DATA: the panel gets the
+      // project folder back, shows its own confirm dialog, and re-sends the
+      // request with confirmed:true. Acceptance is then remembered per project
+      // directory by ensureAutoFixConfirmed, so this asks at most once.
+      const projectDir = this.fixProjectDir();
+      if (!confirmed && !isAutoFixAcceptedFor(projectDir)) {
+        return { needsConfirmation: true, projectDir };
+      }
+      this.fixing = true;
       void this.dispatch(report, ctx?.clientId, confirmed);
       return { accepted: true };
     });
@@ -607,6 +635,10 @@ export class VibeService {
       const res = await dispatchFix(report, {
         onProgress: (line) => this.bridge.sendEvent('vibe.fix-progress', { line }, target),
         confirmed,
+        // A11: the request came over the bridge, so there is no terminal to ask
+        // in — force the non-interactive branch of the consent gate regardless
+        // of whether the process that happens to host the helper has a TTY.
+        interactive: false,
       });
       this.bridge.sendEvent('vibe.fix-done', { ok: res.ok, agent: res.agent }, target);
     } catch (e) {

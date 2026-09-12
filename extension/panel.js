@@ -88,6 +88,10 @@ const fixSection = $('fixSection');
 const fixPrompt = $('fixPrompt');
 const copyBtn = $('copyBtn');
 const autoFixBtn = $('autoFixBtn');
+const confirmModal = $('confirmModal');
+const confirmModalBody = $('confirmModalBody');
+const confirmCancel = $('confirmCancel');
+const confirmOk = $('confirmOk');
 const fixStatus = $('fixStatus');
 const fixNote = $('fixNote');
 const suggestions = $('suggestions');
@@ -421,6 +425,9 @@ function onPortMessage(msg) {
       break;
     case 'fix-progress':
       addFixLine(msg.line);
+      break;
+    case 'fix-confirm':
+      onFixNeedsConfirmation(msg);
       break;
     case 'fix-done':
       onFixDone(msg);
@@ -1256,14 +1263,9 @@ function resetFixUi() {
   fixNote.textContent = '';
 }
 
-autoFixBtn.addEventListener('click', () => {
-  if (fixing) return;
-  if (!bridgeHealthy()) {
-    showError(bridgeConnected && bridgeCompatible === false
-      ? "Spike Core is outdated and can't run auto-fix reliably. Update it (Settings → re-run the installer), then try again."
-      : 'Auto-fix needs Spike Core running. Start it, then try again — or use the fix prompt below.');
-    return;
-  }
+/** Put the UI into "a fix is running" state and ask for the fix. `confirmed` is
+ * set only on the second attempt, after the user accepted the A11 dialog. */
+function startFix(confirmed) {
   fixing = true;
   autoFixBtn.disabled = true;
   autoFixBtn.textContent = 'Fixing…';
@@ -1275,7 +1277,57 @@ autoFixBtn.addEventListener('click', () => {
   suggestions.querySelectorAll('.suggestion-card').forEach((c) => { c.disabled = true; });
   runBtn.disabled = true;
   addFixLine('Starting auto-fix…');
-  postToSW({ kind: 'fix' });
+  postToSW(confirmed ? { kind: 'fix', confirmed: true } : { kind: 'fix' });
+}
+
+/** Roll the UI back out of the "fixing" state without treating it as a failure
+ * (the confirm dialog and a cancelled confirm both land here). */
+function stopFixUi() {
+  fixing = false;
+  autoFixBtn.disabled = false;
+  autoFixBtn.innerHTML = qaIcon('sparkles') + '<span>Auto-fix with my coding agent</span>';
+  fixStatus.hidden = true;
+  fixStatus.textContent = '';
+  suggestions.querySelectorAll('.suggestion-card').forEach((c) => { c.disabled = false; });
+  refreshRunEnabled();
+}
+
+/* A11: Spike Core answered "I need the user to say yes first" instead of
+ * starting. It has no terminal to ask in, so the question is asked here, once
+ * per project folder — accepting is remembered on this computer. */
+function onFixNeedsConfirmation(msg) {
+  stopFixUi();
+  const folder = (msg && msg.projectDir) ? String(msg.projectDir) : 'your project folder';
+  confirmModalBody.textContent =
+    'Spike will let your coding agent edit files in ' + folder + '. Continue?';
+  confirmModal.hidden = false;
+  confirmOk.focus();
+}
+
+function closeConfirmModal() {
+  confirmModal.hidden = true;
+  confirmModalBody.textContent = '';
+}
+
+confirmCancel.addEventListener('click', () => {
+  closeConfirmModal();
+  addFixLine('Auto-fix cancelled — nothing was changed.');
+});
+
+confirmOk.addEventListener('click', () => {
+  closeConfirmModal();
+  startFix(true);
+});
+
+autoFixBtn.addEventListener('click', () => {
+  if (fixing) return;
+  if (!bridgeHealthy()) {
+    showError(bridgeConnected && bridgeCompatible === false
+      ? "Spike Core is outdated and can't run auto-fix reliably. Update it (Settings → re-run the installer), then try again."
+      : 'Auto-fix needs Spike Core running. Start it, then try again — or use the fix prompt below.');
+    return;
+  }
+  startFix(false);
 });
 
 function onFixDone(msg) {
