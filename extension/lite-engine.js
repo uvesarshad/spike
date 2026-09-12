@@ -10767,6 +10767,29 @@ var PLAN_JSON_SCHEMA = {
     }
   }
 };
+function planJsonSchema(opts) {
+  if (opts.emailEnabled) return PLAN_JSON_SCHEMA;
+  const items = PLAN_JSON_SCHEMA.properties.actions.items;
+  return {
+    ...PLAN_JSON_SCHEMA,
+    properties: {
+      ...PLAN_JSON_SCHEMA.properties,
+      actions: {
+        ...PLAN_JSON_SCHEMA.properties.actions,
+        items: {
+          ...items,
+          properties: {
+            ...items.properties,
+            type: {
+              ...items.properties.type,
+              enum: items.properties.type.enum.filter((t) => t !== "wait_for_email")
+            }
+          }
+        }
+      }
+    }
+  };
+}
 var GoalPlanSchema = external_exports.object({
   thought: external_exports.string(),
   // A26 (P1): capped at 12 — an oversized goal list paired with an
@@ -10909,6 +10932,10 @@ Action types:
 - {"type":"wait","ms":number}
 - {"type":"wait_for_email","matching":string,"extractOtpTo":string,"timeoutMs":number} // all optional; poll the configured inbox for a verification email
 - {"type":"finish","verdict":"pass"|"fail","reason":string}`;
+function actionRulesAndVocabulary(opts) {
+  if (opts.emailEnabled) return ACTION_RULES_AND_VOCABULARY;
+  return ACTION_RULES_AND_VOCABULARY.split("\n").filter((line) => !line.includes("wait_for_email")).join("\n");
+}
 var LOOK_ONLY_NOTICE = "LOOK-ONLY MODE: you may navigate and observe but clicks/typing will be refused; use assert_*/finish instead of interacting";
 function buildGoalPlannerPrompt(ctx) {
   const escalating = !!(ctx.failure || ctx.goals?.length || ctx.currentGoal !== void 0);
@@ -10978,13 +11005,27 @@ ${historyLines ? `ACTIONS SO FAR (with any errors/console/network evidence they 
 ${historyLines}` : "No actions taken yet."}
 
 Work on the CURRENT GOAL. Decide the next 1-3 actions. Rules:
-${ACTION_RULES_AND_VOCABULARY}
+${actionRulesAndVocabulary({ emailEnabled: ctx.emailEnabled === true })}
 
 Respond with ONLY JSON, ONE of:
 - {"thought":"<one short sentence>","actions":[{...}, ...]}
 - {"thought":"<one short sentence>","goalComplete":true}
 - {"thought":"<one short sentence>","blocked":"<reason>"}
 Example: {"thought":"Fill the login form and submit it.","actions":[{"type":"type","nodeId":"n4","text":"test@test.com"},{"type":"type","nodeId":"n6","text":"pw"},{"type":"click","nodeId":"n8"}]}`;
+}
+
+// src/driver/sso-popup.ts
+init_buffer_shim();
+var SSO_POPUP_UNSUPPORTED_REASON = "Sign-in popups aren't supported yet \u2014 log in on this tab first, then run again";
+var SSO_BUTTON_RE = /\b(sign[- ]?in|sign[- ]?up|log[- ]?in|continue|connect)\s+with\s+(google|microsoft|github|apple)\b/i;
+function isSsoPopupButtonName(name) {
+  if (!name) return false;
+  return SSO_BUTTON_RE.test(name);
+}
+function detectSsoPopupClick(actionType, targetName, canAdoptPopups) {
+  if (canAdoptPopups) return null;
+  if (actionType !== "click") return null;
+  return isSsoPopupButtonName(targetName) ? SSO_POPUP_UNSUPPORTED_REASON : null;
 }
 
 // src/assertions/policy.ts
@@ -12368,7 +12409,8 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
   const spendCapUsd = opts.spendCapUsd && opts.spendCapUsd > 0 ? opts.spendCapUsd : void 0;
   const strictOracles = opts.strictOracles ?? true;
   const assertionTrace = [];
-  const runData = createRunDataState();
+  const runData = createRunDataState(opts.runEmailDomain ? { emailDomain: opts.runEmailDomain } : {});
+  const emailEnabled = Boolean(opts.emailProvider);
   const actionCache = opts.actionCache;
   const actionCacheStats = { enabled: Boolean(actionCache), hits: 0, misses: 0, stale: 0, stored: 0 };
   const runMain = async () => {
@@ -12716,10 +12758,13 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             stepIndex,
             maxSteps,
             hint,
-            readOnly
+            readOnly,
             // A1 (P0): tell the navigator clicks/typing are refused this run
+            emailEnabled
+            // A9 (P0): only offer the wait-for-email verb if an inbox is wired
           }),
-          step: stepIndex
+          step: stepIndex,
+          emailEnabled
         });
       } catch (e) {
         const outcome = await escalate(`navigator failed: ${e instanceof Error ? e.message : e}`);
@@ -12777,6 +12822,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       lastBatchFirstSig = firstSig;
       let aborted = false;
       let readOnlyBlock = null;
+      let ssoPopupBlock = null;
       let finishReplan = false;
       for (let a = 0; a < actions.length && stepIndex < maxSteps; a++) {
         const action = actions[a];
@@ -12850,6 +12896,15 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
           }
         }
         steps.push(record);
+        const ssoReason = detectSsoPopupClick(action.type, record.target?.name, typeof browser.takeNewTabs === "function");
+        if (ssoReason) {
+          record.ok = false;
+          record.error = ssoReason;
+          record.description = `${record.description} \u2014 ${ssoReason}`;
+          onStep({ index: i, kind: stepKind(action), text: ssoReason, ok: false });
+          ssoPopupBlock = ssoReason;
+          break;
+        }
         const isCountDeltaStep = countDeltaDirection(record) !== null;
         if (isCountDeltaStep) {
           const pre = await (browser.peekAxTree?.() ?? browser.axTree()).catch(() => null);
@@ -13085,6 +13140,13 @@ ${m.html ?? ""}`.toLowerCase().includes(matching)) ?? null : messages[messages.l
         }
         if (!skippedReadOnly) await captureFailureShot(browser, artifacts, record);
         if (record.ok && record.target) lastTouchedTarget = { role: record.target.role, ...record.target.name && { name: record.target.name } };
+        if (browser.takeNewTabs && record.ok && !skippedReadOnly) {
+          const opened = await browser.takeNewTabs().catch(() => []);
+          if (opened.length) {
+            record.description += opened.map((t) => ` \u2192 the page opened a new tab (id: ${t.id})${t.url ? ` at ${t.url}` : ""} \u2014 switch_tab to it to work there`).join("");
+            batchDirty = true;
+          }
+        }
         if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
           try {
             const cacheAfter = await captureActionEffectState(browser);
@@ -13151,6 +13213,11 @@ ${m.html ?? ""}`.toLowerCase().includes(matching)) ?? null : messages[messages.l
       if (readOnlyBlock) {
         verdict = "uncertain";
         reason = `read-only mode: ${readOnlyBlock} is not in allowedHosts \u2014 add it via SPIKE_ALLOWED_HOSTS or spike.config.json to allow interaction`;
+        break;
+      }
+      if (ssoPopupBlock) {
+        verdict = "uncertain";
+        reason = ssoPopupBlock;
         break;
       }
       if (!done && !finishReplan && stepsInGoal >= perGoalMaxSteps) {
@@ -13330,8 +13397,9 @@ function computeSpendSummary(r, capUsd) {
     ...capUsd !== void 0 && { capUsd }
   };
 }
-async function navigateOnce(router, { prompt, step }) {
-  const raw = await withTimeout(router.planJson(prompt, PLAN_JSON_SCHEMA, step), LLM_CALL_TIMEOUT_MS, "navigator planJson");
+async function navigateOnce(router, { prompt, step, emailEnabled }) {
+  const schema = planJsonSchema({ emailEnabled });
+  const raw = await withTimeout(router.planJson(prompt, schema, step), LLM_CALL_TIMEOUT_MS, "navigator planJson");
   const parsed = PlanResultSchema.safeParse(raw);
   if (parsed.success) return parsed.data;
   const retryRaw = await withTimeout(
@@ -13340,7 +13408,7 @@ async function navigateOnce(router, { prompt, step }) {
 
 Your previous response was invalid: ${parsed.error.message.slice(0, 300)}
 Respond again with ONLY valid JSON.`,
-      PLAN_JSON_SCHEMA,
+      schema,
       step
     ),
     LLM_CALL_TIMEOUT_MS,
@@ -14614,7 +14682,19 @@ var LiteExtensionBrowser = class {
   /** Tab primitives are NOT implemented for the lite extension transport: the
    * SW deps injected here (LiteBrowserDeps) don't expose chrome.tabs
    * create/update/remove, only the single tab this instance is attached to.
-   * Throw a clear error instead of a silent no-op. */
+   * Throw a clear error instead of a silent no-op.
+   *
+   * A9 (P0) FOLLOW-UP — popup adoption: because this transport cannot take
+   * over a tab it did not attach to, BrowserPort.takeNewTabs is deliberately
+   * NOT implemented here, and that absence is what makes the driver refuse a
+   * "Sign in with Google/…" click up front with a plain explanation (see
+   * src/driver/sso-popup.ts) instead of clicking into an invisible window. The
+   * CDP transport adopts popups for real (CdpBrowser.adoptPageTarget). Doing
+   * the same here needs chrome.tabs.onCreated in extension/sw.js (matching
+   * openerTabId against the attached tab), a debugger attach to the new tab,
+   * and the tab primitives above — still open. It matters less here than it
+   * looks: this transport runs on the tab the user already has open, so the
+   * advice the guard gives ("log in on this tab first") is the normal flow. */
   async openTab(_url) {
     throw new Error("openTab() is not supported in the lite extension transport (single-tab attach only)");
   }
@@ -14903,6 +14983,15 @@ var PROVIDER_ORDER = ["nano", "gemini", "claude", "gpt", "ollama", "openrouter",
 
 // src/vibe/fix-prompt.ts
 init_buffer_shim();
+
+// src/orchestrator/fan-out.ts
+init_buffer_shim();
+function renderCoverageLine(c) {
+  const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+  return `I got through ${c.flowsAttempted} of ${plural(c.flowsTotal, "flow")}, visited ${plural(c.pagesVisited, "page")} and tried ${plural(c.controlsExercised, "control")}.`;
+}
+
+// src/vibe/fix-prompt.ts
 function humanizeStep(step) {
   const a = step.action;
   const t = step.target;
@@ -15027,6 +15116,11 @@ function renderPlainReport(report) {
       lines.push("");
       lines.push("These requests failed:");
       for (const c of calls) lines.push(`- ${describeCall(c)}`);
+    }
+    if (report.coverage) {
+      lines.push("");
+      lines.push("**How much I checked:**");
+      lines.push(renderCoverageLine(report.coverage));
     }
   }
   if (report.tokens) {
