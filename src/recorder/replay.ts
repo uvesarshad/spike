@@ -22,8 +22,20 @@ import type { Vault } from '../vault/vault.js';
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const FIND_TIMEOUT_MS = 5_000;
 
+/** A1 (P0): script step types that change the page. A saved test is a sequence
+ * of these by construction, so look-only mode can't "partially" run one — see
+ * replayScript's up-front refusal. Mirrors driver/loop.ts's mutation set. */
+const MUTATING_SCRIPT_STEPS = new Set<ScriptStep['type']>([
+  'click', 'type', 'press_key', 'select_option', 'upload_file', 'drag_and_drop', 'mouse', 'script',
+]);
+
 export interface ReplayOptions {
   onProgress?: (line: string) => void;
+  /** A1 (P0): look-only mode (`spike replay --read-only`). A saved test is made
+   * of clicks and typing, so there is nothing honest to run: rather than skip
+   * every step and report a meaningless pass, the replay refuses up front with
+   * a plain-English `uncertain`. Absent/false → today's behaviour exactly. */
+  readOnly?: boolean;
   /** Secrets store for a recorded `script` step's {{secret:NAME}} placeholders
    * (and, for parity, a `type` step's). Optional — without it a step
    * referencing a secret fails exactly as it would live. */
@@ -50,6 +62,33 @@ export async function replayScript(
   // open_tab steps ran — resolves a recorded switch_tab/close_tab tabIndex
   // (0 = the original tab; N = the Nth open_tab call) to a real id/index.
   const openedTabIds: string[] = [];
+
+  // A1 (P0): look-only mode — refuse before touching the page, with a reason
+  // that says what to do about it, instead of half-running the saved test.
+  if (opts.readOnly && script.steps.some((s) => MUTATING_SCRIPT_STEPS.has(s.type))) {
+    const refusal: Report = {
+      verdict: 'uncertain',
+      failing_step: null,
+      console_error: null,
+      evidence_paths: [],
+      reason:
+        `look-only mode is on, so this saved test can\u2019t run \u2014 "${script.name}" clicks and types on the page. ` +
+        'Run it again without look-only mode.',
+      runId: artifacts.runId,
+      task: `[replay:${script.name}] ${script.task}`,
+      url: script.url,
+      steps: [],
+      model_trace: [],
+      run_data: runData,
+      durationMs: Date.now() - t0,
+      tokenEstimate: 0,
+    };
+    progress(refusal.reason);
+    const refusalPath = await artifacts.saveReport(refusal);
+    refusal.evidence_paths.unshift(refusalPath);
+    await artifacts.saveReport(refusal);
+    return refusal;
+  }
 
   const nanoReady = nano !== null && (await nano.availability().catch(() => 'unavailable')) === 'available';
   if (nano && !nanoReady) progress('warning: Gemini Nano unavailable — visual assertions will be SKIPPED (replays never spend paid tokens)');

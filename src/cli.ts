@@ -103,6 +103,7 @@ program
   .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain (A45)', collectRepeatable, [])
   .option('--action-cache', 'enable the verified file-backed action cache for this run')
   .option('--no-action-cache', 'bypass the verified action cache for this run')
+  .option('--read-only', 'look-only mode: navigate and check the page, but never click, type, or submit. Off by default when you name a --url (naming the target is your go-ahead to drive it)', false)
   .option('--no-record', 'do not record a passing run to generated-tests/')
   .option('--no-replay', 'skip the pre-run replay matcher — always run a fresh AI pass, even if a recorded script confidently matches this task+url')
   .option('--headless', 'run Chrome headless — skips the opportunistic $0 Nano rung for this run (see CLAUDE.md); replay is the well-tested headless path', false)
@@ -112,11 +113,15 @@ program
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
   .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent (A16) for this non-interactive run', false)
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
+  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
     const onProgress = opts.json ? undefined : (l: string) => console.log(l);
     const config = mergeConfig(opts.via, opts.allowHost, opts.actionCache);
     const qaRunOpts = {
       maxSteps: opts.maxSteps,
+      // A1 (P0): only an explicit --read-only turns look-only mode on here —
+      // naming --url is itself the go-ahead to drive that page, so the flag's
+      // absence must NOT re-impose the safe-by-default config value.
+      ...(opts.readOnly && { readOnly: true }),
       record: opts.record,
       replay: opts.replay,
       headless: opts.headless,
@@ -371,6 +376,7 @@ program
   .argument('[name]', 'script name (or path to a generated-tests/*.json)')
   .option('--all', 'replay the suite (spike.suite.json if present, else every script in generated-tests/, sorted)', false)
   .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
+  .option('--read-only', 'look-only mode: refuse to run a saved test that clicks or types (it reports why instead of interacting)', false)
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
   .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain (A45)', collectRepeatable, [])
   .option('--json', 'print slim JSON verdicts only', false)
@@ -391,6 +397,7 @@ program
       opts: {
         all: boolean;
         heal: boolean;
+        readOnly: boolean;
         via?: 'cdp' | 'extension' | 'playwright';
         allowHost: string[];
         json: boolean;
@@ -418,6 +425,9 @@ program
         const report = await qaReplay(name, {
           ...(opts.retries !== undefined && { retries: opts.retries }),
           heal: opts.heal,
+          // A1 (P0): look-only mode — a saved test is clicks and typing, so the
+          // replay refuses up front and says why instead of interacting.
+          ...(opts.readOnly && { readOnly: true }),
           ...(config && { config }),
           onProgress: opts.json ? undefined : (l) => console.log(l),
           headless: opts.headless,
@@ -513,6 +523,7 @@ program
         const perCallConfig = isolation ? { ...config, ...isolation } : config;
         const report = await qaReplay(scriptId, {
           heal: opts.heal,
+          ...(opts.readOnly && { readOnly: true }), // A1 (P0): look-only mode, suite-wide
           // A31: qaReplay has accepted `retries` since A11, but nothing ever
           // passed it — so flake control was unreachable from `replay --all`,
           // the only place a suite owner would use it.

@@ -32,9 +32,17 @@ export async function startMcpServer(): Promise<void> {
       task: z.string().describe('what to test, in plain English (e.g. "log in as x@y.z / pw and complete checkout")'),
       url: z.string().url().describe('page to start on'),
       maxSteps: z.number().int().min(1).max(30).optional().describe('driver step budget (default 12)'),
+      readOnly: z
+        .boolean()
+        .optional()
+        .describe(
+          'look-only mode: navigate and check the page but never click, type, or submit. ' +
+            'Defaults to false because naming a url here already grants click/type authority on it; ' +
+            'set true to inspect a page without changing anything.',
+        ),
     },
-    async ({ task, url, maxSteps }) => {
-      const report = await qaRun(task, url, { maxSteps });
+    async ({ task, url, maxSteps, readOnly }) => {
+      const report = await qaRun(task, url, { maxSteps, ...(readOnly !== undefined && { readOnly }) });
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(slimReport(report), null, 2) }],
         isError: report.verdict === 'fail' ? false : undefined, // a failing TEST is a successful TOOL call

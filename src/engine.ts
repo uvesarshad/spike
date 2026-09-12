@@ -13,7 +13,7 @@
 
 import type { ChildProcess } from 'node:child_process';
 import type CDP from 'chrome-remote-interface';
-import { loadConfig, type EmulationConfig, type QaConfig, type RouteRule } from './config.js';
+import { loadConfig, readOnlyWasConfigured, type EmulationConfig, type QaConfig, type RouteRule } from './config.js';
 import { CdpBrowser } from './ports/cdp-browser.js';
 import { ExtensionBrowser } from './ports/extension-browser.js';
 // A52 (P2): playwright-core is a large optional dependency (`--via
@@ -102,6 +102,19 @@ export interface QaRunOptions {
    * OTHER than the named target (ad iframes, unexpected redirects) still stay
    * read-only unless separately allow-listed. */
   trustTargetHost?: boolean;
+  /** A1 (P0): look-only mode for THIS run — the driver navigates and checks the
+   * page but refuses every click/type/submit. Highest precedence: it overrides
+   * spike.config.json / SPIKE_READ_ONLY / the saved settings.
+   *
+   * Absent is the interesting case. `readOnly` defaults to TRUE in config (a
+   * safe posture for the browser extension, which drives whatever tab happens
+   * to be open), but a caller who NAMED a target url — `spike run --url`, the
+   * `qa_run` tool — has already said "drive this page", exactly the way
+   * `trustTargetHost` treats that url as host consent. So when the target host
+   * is trusted AND nobody configured `readOnly` explicitly, the effective
+   * value is false; otherwise the configured value stands. `spike run
+   * --read-only` sets this true for the look-only case. See resolveReadOnly. */
+  readOnly?: boolean;
   /** A7 (P1): run the QA browser's Chrome headless for THIS run, overriding
    * cfg.headless. Absent → cfg.headless (default false, unchanged behavior).
    * A headless qaRun skips the opportunistic rung-0 Nano probe entirely
@@ -827,6 +840,10 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
             headless: opts.headless,
             storageStatePath: opts.storageStatePath,
             saveStorageStatePath: opts.saveStorageStatePath,
+            // A1 (P0): a look-only run must never be quietly satisfied by
+            // replaying a saved test full of clicks — the replay refuses and
+            // the fresh look-only pass below takes over.
+            readOnly: opts.readOnly,
           });
           if (replayed.verdict !== 'fail') {
             runSpan.addEvent('replay.used', { name: match.name, verdict: replayed.verdict });
@@ -878,6 +895,27 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
  * the Phase 14 replay matcher was added in front of it. Split out so the
  * matcher's early-return (a matched $0 replay) never pays for opening a
  * browser session / building the model ladder at all. */
+/** A1 (P0): the effective look-only setting for a run. Pure (all inputs
+ * passed in) so the precedence rule is unit-testable without a browser.
+ *
+ * Precedence: an explicit per-run override wins; otherwise a named+trusted
+ * target relaxes the safe-by-default true to false, but ONLY when no config
+ * source set `readOnly` explicitly; otherwise the configured value stands. */
+export function resolveReadOnly(input: {
+  /** QaRunOptions.readOnly — `--read-only` / the `qa_run` input / the panel. */
+  optionReadOnly?: boolean;
+  /** Was the run's target url named by the caller and therefore trusted? */
+  trustTargetHost: boolean;
+  /** Did any config source set `readOnly` explicitly (readOnlyWasConfigured)? */
+  configured: boolean;
+  /** The resolved config value (DEFAULTS.readOnly when nobody set one). */
+  configReadOnly: boolean;
+}): boolean {
+  if (input.optionReadOnly !== undefined) return input.optionReadOnly;
+  if (input.trustTargetHost && !input.configured) return false;
+  return input.configReadOnly;
+}
+
 async function runFreshAiPass(
   task: string,
   url: string,
@@ -895,14 +933,25 @@ async function runFreshAiPass(
   // Tier-4 allowedHosts guard (A4, P0) at construction time, not just inside
   // the driver loop — closes the "raw cdp passthrough bypasses the guard" gap.
   const preCfg = loadConfig(configOverride);
-  const allowedHosts = (opts.trustTargetHost ?? true)
+  const trustTargetHost = opts.trustTargetHost ?? true;
+  const allowedHosts = trustTargetHost
     ? [...preCfg.allowedHosts, ...targetHostCandidates(url)]
     : preCfg.allowedHosts;
+  // A1 (P0): same relaxation, one layer up — naming the target url is consent
+  // to drive it, so look-only mode is off unless it was asked for. See
+  // resolveReadOnly / QaRunOptions.readOnly.
+  const readOnly = resolveReadOnly({
+    optionReadOnly: opts.readOnly,
+    trustTargetHost,
+    configured: readOnlyWasConfigured(configOverride),
+    configReadOnly: preCfg.readOnly,
+  });
 
   // A7: a headless qaRun skips the opportunistic rung-0 Nano probe entirely
   // (see QaRunOptions.headless's doc comment) rather than either dragging
   // Nano into a headless Chrome or spinning up a second headed one just for
   // the $0 optimization on a live AI-driven run.
+  if (readOnly) progress('look-only mode: I\u2019ll navigate and check this page, but never click or type');
   const session = await openSession(configOverride, { bridge: opts.bridge, tabId: opts.tabId, clientId: opts.clientId, allowedHosts, wantNano: !preCfg.headless });
   const { cfg, browser, nano } = session;
 
@@ -1002,7 +1051,7 @@ async function runFreshAiPass(
         assertionPolicy: cfg.assertionPolicy,
         actionCache,
         videoAssertions: cfg.videoAssertions,
-        readOnly: cfg.readOnly,
+        readOnly,
         spendCapUsd: cfg.spendCapUsd,
         strictOracles: cfg.strictOracles,
       }),
@@ -1110,6 +1159,12 @@ async function runFreshAiPass(
 export interface QaReplayOptions {
   /** On replay failure, re-engage the driver on the original task and re-emit the script. */
   heal?: boolean;
+  /** A1 (P0): look-only mode (`spike replay --read-only`). A saved test is made
+   * of clicks and typing, so the replay refuses up front with a plain-English
+   * `uncertain` instead of half-running it — see replayScript. Explicit only:
+   * unlike qaRun, replay does NOT read `readOnly` from the config, so a replay
+   * only ever becomes look-only because a caller asked for it on this call. */
+  readOnly?: boolean;
   config?: Partial<QaConfig>;
   onProgress?: (line: string) => void;
   /** Caller-owned bridge (extension mode) — see QaRunOptions.bridge. */
@@ -1291,7 +1346,7 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   let report: QaReplayResult;
   try {
     let artifacts = new ArtifactStore(session.cfg.artifactsDir);
-    let current: QaReplayResult = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress });
+    let current: QaReplayResult = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress, readOnly: opts.readOnly });
     attemptReports.push(current);
     // A11 (P1): opt-in retry loop — only engages when the caller asked for
     // retries AND the attempt actually failed. Each retry gets its own fresh
@@ -1301,7 +1356,7 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
       progress(`replay attempt ${attemptReports.length}/${maxAttempts} failed — retrying (${maxAttempts - attemptReports.length} attempt(s) left)`);
       replaySpan.addEvent('replay.retry', { attempt: attemptReports.length, runId: current.runId });
       artifacts = new ArtifactStore(session.cfg.artifactsDir);
-      current = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress });
+      current = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress, readOnly: opts.readOnly });
       attemptReports.push(current);
     }
     report = resolveRetryOutcome(attemptReports);
@@ -1334,6 +1389,7 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
       record: false, // we re-emit manually to keep the script's name + lineage
       replay: false, // never let the matcher re-find and re-replay THIS SAME failing script
       config: opts.config,
+      readOnly: opts.readOnly, // A1 (P0): healing must not click when look-only was asked for
       onProgress: progress,
     });
     if (healed.verdict === 'pass') {

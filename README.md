@@ -217,6 +217,7 @@ What each add-on unlocks:
 | Command | What it does |
 |---|---|
 | `spike run <task> --url <url>` | Run one QA task against a URL; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra error |
+| `spike run … --read-only` | Look-only mode: navigate and check the page, but never click, type, or submit (also `spike replay --read-only`, `readOnly` on the `qa_run` tool, `SPIKE_READ_ONLY=1`) |
 | `spike bless [flow]` | Accept the current stored baseline for a flow as intentional (differential oracle) |
 | `spike map <url>` | Discover the app — routes, states, interactive elements — into `.spike/app-model.json` ($0, no browser) |
 | `spike coverage` | Report what has and hasn't been tested yet, from `.spike/app-model.json` |
@@ -276,7 +277,7 @@ Conventions worth knowing: logpoint lines are located by content, never hardcode
 | 2026-06-07 | **Vibe mode (core)**: side-panel chat (`spike daemon`), ghost-cursor overlay (glide/ripples/captions), plain-English reports + paste-ready fix prompts (`spike fix`) — headless e2e green | ✅ shipped |
 | next | Dogfood against a real production app | 🔜 |
 | then | **Vibe mode (polish)**: shareable replay clips (MP4/GIF), guided Nano onboarding from the panel, run history | planned |
-| then | **Tier 4 guardrails**: local credential vault (model never sees secrets), read-only-by-default on third-party sites, audit log | planned |
+| then | **Tier 4 guardrails**: local credential vault (model never sees secrets), look-only mode (no clicking or typing anywhere, on by default in the browser panel unless you allow this site), mutation limited to the site you named, audit log | planned |
 | then | Launch: OSS core + BYOK, token-cost benchmark vs Playwright MCP / Claude in Chrome | planned |
 | 2026-06-18 | External: Gemini CLI free tier moves to Antigravity CLI — rung 1 is a generic adapter, switch is a config change | tracked |
 

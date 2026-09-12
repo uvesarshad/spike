@@ -449,6 +449,35 @@ function warnIfDeadPlanner(cfg: QaConfig): void {
   if (isDeadPlannerSelection(cfg.navigator)) console.warn(deadPlannerHint('navigator'));
 }
 
+/** A1 (P0): did ANY configuration source explicitly set `readOnly`, or is the
+ * resolved value just DEFAULTS.readOnly?
+ *
+ * `readOnly` defaults to true (a safe posture for an unattended browser
+ * extension driving whatever tab is open), but a CLI/MCP caller who names a
+ * target URL has already said "drive this" — for them the safe-by-default
+ * value is the wrong one, and silently skipping every click produced a page of
+ * green "skipped" ticks and an `uncertain` verdict. engine.ts uses this to
+ * relax the default for a named target WITHOUT overriding a user who actually
+ * asked for look-only mode (spike.config.json, SPIKE_READ_ONLY, the saved
+ * settings, or an explicit per-run override).
+ *
+ * Same source precedence as loadConfig(); only the presence of an explicit
+ * boolean matters here, not which source won. */
+export function readOnlyWasConfigured(overrides: Partial<QaConfig> = {}, cwd = process.cwd()): boolean {
+  if (typeof overrides.readOnly === 'boolean') return true;
+  if (typeof fromEnv().readOnly === 'boolean') return true;
+  if (typeof fromFile(cwd).readOnly === 'boolean') return true;
+  // Deliberately NOT fromSettings(): the SettingsStore copy is an artifact of
+  // the browser panel's "Save", which wrote `readOnly` on EVERY save whether or
+  // not the user ever thought about it — treating that as a deliberate choice
+  // would leave the CLI silently look-only on any machine that ever opened the
+  // panel's settings (verified on a real settings.json). The panel now decides
+  // look-only per run from its own per-site checkbox, so that stored value is
+  // no longer anybody's explicit instruction to the CLI. It still feeds
+  // loadConfig()'s resolved value for callers that don't name a target.
+  return false;
+}
+
 export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd()): QaConfig {
   // precedence (low → high): defaults < spike.config.json < SettingsStore < env < overrides.
   // planner env may be a PARTIAL selection — merge it onto whatever's beneath so a
