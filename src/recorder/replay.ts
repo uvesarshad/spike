@@ -17,10 +17,63 @@ import type { LocatorCandidate, QaScript, ScriptStep, ScriptTarget } from './scr
 import { candidateStackFor } from './script.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders } from '../run-data/index.js';
 import { validateScriptSteps, runScriptSteps } from '../driver/script-runner/index.js';
-import type { Vault } from '../vault/vault.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const FIND_TIMEOUT_MS = 5_000;
+
+/** A12 (P0): the one-method shape replay needs from a secrets store — mirrors
+ * driver/loop.ts's SecretsSource (kept as its own tiny interface rather than a
+ * cross-module import so recorder/ doesn't need to depend on driver/'s
+ * SecretsSource just for this). The real `Vault` (src/vault/vault.ts)
+ * satisfies this structurally, and so does a plain test double. */
+export interface ReplaySecretsSource {
+  get(name: string): string | undefined;
+}
+
+/** {{secret:NAME}} — NAME is [a-zA-Z0-9_-]+. Mirrors driver/loop.ts's SECRET_RE. */
+const SECRET_PLACEHOLDER_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
+
+/** A12 (P0): thrown when a recorded `type` step's `{{secret:NAME}}` can't be
+ * resolved (no vault passed, or the vault doesn't hold NAME). Deliberately a
+ * distinct, named error — a missing secret is a setup problem ("you never
+ * saved this credential"), not a UI regression, so `isMissingSecretFailure`
+ * below lets a caller (qaRun's replay-fallback decision) recognize it and
+ * skip the silent "fall back to a paid AI run" path that every other replay
+ * failure gets. */
+export class MissingSecretError extends Error {
+  constructor(readonly secretName: string) {
+    super(`missing secret ${secretName} — run: spike secret set ${secretName}`);
+    this.name = 'MissingSecretError';
+  }
+}
+
+/** Resolve any {{secret:NAME}} occurrences in `text` via `vault`. Throws
+ * MissingSecretError when a referenced secret is missing (no vault at all, or
+ * the vault doesn't hold NAME). Returns `text` unchanged when it has no
+ * placeholders — the common case, and the only one that doesn't need a vault. */
+function resolveReplaySecrets(text: string, vault: ReplaySecretsSource | undefined): string {
+  if (!SECRET_PLACEHOLDER_RE.test(text)) return text;
+  SECRET_PLACEHOLDER_RE.lastIndex = 0;
+  return text.replace(SECRET_PLACEHOLDER_RE, (_m, name: string) => {
+    const value = vault?.get(name);
+    if (value === undefined) throw new MissingSecretError(name);
+    return value;
+  });
+}
+
+/** A12 (P0): true when `report` is a replay failure caused by an unresolved
+ * `{{secret:NAME}}` — either a `type` step (MissingSecretError above) or a
+ * `script` step's nested executor (driver/script-runner/executor.ts, same
+ * "spike secret set" remediation text). Pure string check on the failing
+ * step's recorded error: that's the only place the distinction survives,
+ * since replayScript folds every step failure into the same Report shape.
+ * Exported so engine.ts's replay-fallback decision doesn't have to guess at
+ * the message format independently. */
+export function isMissingSecretFailure(report: Report): boolean {
+  if (report.verdict !== 'fail' || !report.failing_step) return false;
+  const step = report.steps[report.failing_step.index];
+  return typeof step?.error === 'string' && step.error.includes('spike secret set');
+}
 
 /** A1 (P0): script step types that change the page. A saved test is a sequence
  * of these by construction, so look-only mode can't "partially" run one — see
@@ -36,10 +89,11 @@ export interface ReplayOptions {
    * every step and report a meaningless pass, the replay refuses up front with
    * a plain-English `uncertain`. Absent/false → today's behaviour exactly. */
   readOnly?: boolean;
-  /** Secrets store for a recorded `script` step's {{secret:NAME}} placeholders
-   * (and, for parity, a `type` step's). Optional — without it a step
-   * referencing a secret fails exactly as it would live. */
-  vault?: Vault;
+  /** Secrets store for a recorded `type` step's {{secret:NAME}} placeholders
+   * (and a `script` step's, via driver/script-runner/executor.ts). Optional —
+   * without it, a step referencing a secret fails loudly with
+   * MissingSecretError rather than typing the literal placeholder text. */
+  vault?: ReplaySecretsSource;
 }
 
 export async function replayScript(
@@ -131,7 +185,13 @@ export async function replayScript(
         case 'type': {
           const node = await findByTarget(browser, s.target);
           await browser.waitForActionable?.(node.id);
-          await browser.type(node.id, resolveRunPlaceholders(s.text, runData).text);
+          // A12 (P0): {{run.*}} first, then {{secret:NAME}} — the record keeps
+          // the ORIGINAL placeholder text (record.target/description above are
+          // built from `s`, not the resolved value), so the real secret never
+          // lands in a report/log.
+          const resolvedRun = resolveRunPlaceholders(s.text, runData).text;
+          const resolved = resolveReplaySecrets(resolvedRun, opts.vault);
+          await browser.type(node.id, resolved);
           break;
         }
         case 'hover': {

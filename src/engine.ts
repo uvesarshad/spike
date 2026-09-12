@@ -51,7 +51,7 @@ import { compareToBaseline, loadBaseline, saveBaseline } from './assertions/diff
 import { detectRelationCandidates } from './assertions/metamorphic.js';
 import { diffScripts, loadScript, saveScript, scriptFromReport, scriptsDir, type QaScript } from './recorder/script.js';
 import { classifyHeal, type HealTier } from './recorder/heal-policy.js';
-import { replayScript } from './recorder/replay.js';
+import { replayScript, isMissingSecretFailure } from './recorder/replay.js';
 import { matchReplayScriptDetailed, NEAR_MISS_MARGIN, type ReplayMatch } from './recorder/matcher.js';
 import { startClipRecorder, type ClipRecorder } from './clip/screencast.js';
 import { FileActionCache } from './cache/action-cache.js';
@@ -918,6 +918,19 @@ export async function qaRun(task: string, url: string, opts: QaRunOptions = {}):
             runSpan.end({ verdict: result.verdict, source: 'replay', runId: result.runId });
             return result;
           }
+          // A12 (P0): a missing vaulted secret is a setup problem ("you never
+          // saved this credential"), not a UI regression a fresh AI pass could
+          // diagnose or fix — falling back would silently spend paid tokens on
+          // a run that is going to fail the exact same way every time. Return
+          // the replay's own loud failure instead of falling through.
+          if (isMissingSecretFailure(replayed)) {
+            progress(`matched replay failed (${replayed.reason}) — save the missing secret and run it again; a fresh AI run would just fail the same way`);
+            runSpan.addEvent('replay.missing_secret', { name: match.name });
+            const result: QaRunResult = { ...replayed, replayMatch: { name: match.name, score: match.score } };
+            persistReportPatch(loadConfig(opts.config ?? {}).artifactsDir, result);
+            runSpan.end({ verdict: result.verdict, source: 'replay', runId: result.runId });
+            return result;
+          }
           progress('matched replay failed — falling back to a fresh AI run');
           runSpan.addEvent('replay.fallback', { reason: 'replay-failed', name: match.name });
           replayFallback = buildReplayFallback(match, replayed.verdict, 'replay-failed');
@@ -1409,6 +1422,11 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   const scriptNeedsNano = script.steps.some((s) => s.type === 'assert_visual');
   const wantNano = !preCfg.headless || scriptNeedsNano;
   const session = await openSession(configOverride, { bridge: opts.bridge, allowedHosts, wantNano });
+  // A12 (P0): same vault a fresh AI pass gets (runFreshAiPass's `new Vault()`)
+  // — without it, a recorded `type` step's {{secret:NAME}} placeholder can
+  // never resolve, so a credentialed regression test always failed and
+  // silently fell back to a paid AI run (see isMissingSecretFailure below).
+  const vault = new Vault();
 
   // A13 (P1) + A6 (P1): same wiring as runFreshAiPass — see its doc comment.
   try {
@@ -1428,7 +1446,7 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   let report: QaReplayResult;
   try {
     let artifacts = new ArtifactStore(session.cfg.artifactsDir);
-    let current: QaReplayResult = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress, readOnly: opts.readOnly });
+    let current: QaReplayResult = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress, readOnly: opts.readOnly, vault });
     attemptReports.push(current);
     // A11 (P1): opt-in retry loop — only engages when the caller asked for
     // retries AND the attempt actually failed. Each retry gets its own fresh
@@ -1438,7 +1456,7 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
       progress(`replay attempt ${attemptReports.length}/${maxAttempts} failed — retrying (${maxAttempts - attemptReports.length} attempt(s) left)`);
       replaySpan.addEvent('replay.retry', { attempt: attemptReports.length, runId: current.runId });
       artifacts = new ArtifactStore(session.cfg.artifactsDir);
-      current = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress, readOnly: opts.readOnly });
+      current = await replayScript(session.browser, session.nano, artifacts, script, { onProgress: progress, readOnly: opts.readOnly, vault });
       attemptReports.push(current);
     }
     report = resolveRetryOutcome(attemptReports);
