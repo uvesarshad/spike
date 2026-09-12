@@ -214,17 +214,22 @@ const ACCORDIONS = [
 
 // Per-card DOM references, so the settings logic runs once per role. `nanoNote`/
 // `nanoDownload` live only on the navigator card (Nano is navigator-only now).
+// `savedStamp`/`saving` are the A4 key-persistence bookkeeping (see
+// saveKeyFromCard): the provider+key we last sent, and whether its reply is
+// still outstanding.
 const brainCardRefs = {
   role: 'brain',
   provider: setProvider, modeRow: setModeRow, modeName: 'setMode',
   model: setModel, keyRow: setKeyRow, key: setKey, keyStatus: setKeyStatus,
   nanoNote: null, nanoDownload: null,
+  savedStamp: null, saving: false,
 };
 const navCardRefs = {
   role: 'navigator',
   provider: setNavProvider, modeRow: setNavModeRow, modeName: 'setNavMode',
   model: setNavModel, keyRow: setNavKeyRow, key: setNavKey, keyStatus: setNavKeyStatus,
   nanoNote: setNavNanoNote, nanoDownload: setNavNanoDownload,
+  savedStamp: null, saving: false,
 };
 
 // last nano availability reported by the SW (drives the settings nano note/button)
@@ -1452,6 +1457,60 @@ function renderSettings(cfg) {
   refreshSettingsVisibility();
 }
 
+// ---- saving the key (A4) ---------------------------------------------------
+//
+// One code path stores a key, whoever asks for it: the little "Save key" button
+// next to the field, leaving the field (blur), and the modal's primary Save.
+// Before A4 only the little button did, so a pasted key was silently dropped
+// when the user hit the big Save — the single most common first-run dead end.
+
+/** Providers whose key save was started by the primary Save button; the modal
+ * stays open until each one answers. */
+const pendingPrimarySaves = new Set();
+let primarySaveFailed = false;
+/** The settings payload held back until those key saves answer, so the stored
+ * key is on disk before anything re-reads it. */
+let pendingConfigSet = null;
+let primarySaveTimer = null;
+
+/** Store the key typed into ONE card. No-ops when that card needs no key right
+ * now, when the field is empty, or when this exact key is already stored.
+ * Returns the provider whose save is in flight (so a caller can wait for it),
+ * or null when there is nothing to wait for. */
+function saveKeyFromCard(refs) {
+  if (!refs || !refs.key || !refs.keyRow || refs.keyRow.hidden) return null;
+  const key = refs.key.value.trim();
+  if (!key) return null;
+  const provider = refs.provider.value;
+  const stamp = provider + ' ' + key;
+  if (refs.savedStamp === stamp) return refs.saving ? provider : null;
+  refs.savedStamp = stamp;
+  refs.saving = true;
+  refs.keyStatus.classList.remove('err');
+  refs.keyStatus.textContent = 'saving…';
+  postToSW({ kind: 'set-key', provider, key });
+  return provider;
+}
+
+/** Same, but always re-sends (what the explicit "Save key" button should do). */
+function forceSaveKeyFromCard(refs) {
+  if (!refs) return null;
+  refs.savedStamp = null;
+  return saveKeyFromCard(refs);
+}
+
+/** Every key save the primary Save started has answered → send the settings and
+ * (on success) close the modal, leaving the "saved ✓" visible for a beat. */
+function settlePrimarySave() {
+  if (pendingPrimarySaves.size > 0) return;
+  if (primarySaveTimer) { clearTimeout(primarySaveTimer); primarySaveTimer = null; }
+  if (pendingConfigSet) {
+    postToSW(pendingConfigSet);
+    pendingConfigSet = null;
+  }
+  if (!primarySaveFailed) setTimeout(closeSettings, 500);
+}
+
 function onKeySaved(msg) {
   if (!msg) return;
   // reflect hasKey locally so a re-render keeps the status accurate
@@ -1462,16 +1521,23 @@ function onKeySaved(msg) {
   // A provider's key is shared across cards — update every card showing it.
   for (const refs of [navCardRefs, brainCardRefs]) {
     if (refs.provider.value !== msg.provider) continue;
+    refs.saving = false;
     if (msg.ok) {
       refs.keyStatus.classList.remove('err');
       refs.keyStatus.textContent = msg.cleared ? '' : 'saved ✓';
       // keep the key in the field (persistent) — the user can reveal it with the
       // eye toggle to confirm; clear it only when the key was removed.
-      if (msg.cleared) refs.key.value = '';
+      if (msg.cleared) { refs.key.value = ''; refs.savedStamp = null; }
     } else {
+      // let the next attempt through instead of treating it as already stored
+      refs.savedStamp = null;
       refs.keyStatus.classList.add('err');
       refs.keyStatus.textContent = msg.message ? ('error: ' + msg.message) : 'could not save key';
     }
+  }
+  if (pendingPrimarySaves.delete(msg.provider)) {
+    if (!msg.ok) primarySaveFailed = true;
+    settlePrimarySave();
   }
 }
 
@@ -1581,29 +1647,35 @@ setNavModeRow.querySelectorAll('input[name="setNavMode"]').forEach((el) => {
 setNavModel.addEventListener('input', () => { refreshSameAsNav(); refreshAccordionSummaries(); });
 
 // Save key — one handler per card; keys are stored per-provider (shared across cards).
-setKeySave.addEventListener('click', () => {
-  const key = setKey.value.trim();
-  if (!key) return;
-  setKeyStatus.classList.remove('err');
-  setKeyStatus.textContent = 'saving…';
-  postToSW({ kind: 'set-key', provider: selectedProvider(), key });
-});
-setNavKeySave.addEventListener('click', () => {
-  const key = setNavKey.value.trim();
-  if (!key) return;
-  setNavKeyStatus.classList.remove('err');
-  setNavKeyStatus.textContent = 'saving…';
-  postToSW({ kind: 'set-key', provider: selectedNavProvider(), key });
-});
+setKeySave.addEventListener('click', () => { forceSaveKeyFromCard(brainCardRefs); });
+setNavKeySave.addEventListener('click', () => { forceSaveKeyFromCard(navCardRefs); });
+
+// A4: leaving the field saves it too, so a pasted key can't be lost by tabbing
+// away, closing the modal, or hitting the primary Save.
+setKey.addEventListener('blur', () => { saveKeyFromCard(brainCardRefs); });
+setNavKey.addEventListener('blur', () => { saveKeyFromCard(navCardRefs); });
 
 settingsSave.addEventListener('click', () => {
+  // A4: the primary Save owns the key fields too. Any key typed but not yet
+  // stored goes first, and the settings themselves wait for it — otherwise the
+  // fresh settings are read back before the key exists and the row reports
+  // "no key" for a key the user just pasted.
+  pendingPrimarySaves.clear();
+  primarySaveFailed = false;
+  const navSaving = saveKeyFromCard(navCardRefs);
+  if (navSaving) pendingPrimarySaves.add(navSaving);
+  if (!setSameAsNav.checked) {
+    const brainSaving = saveKeyFromCard(brainCardRefs);
+    if (brainSaving) pendingPrimarySaves.add(brainSaving);
+  }
+
   // "same as Navigator": ship the Brain an EXACT copy of the Navigator's
   // provider/mode/model. Since the vault stores API keys per-provider (not
   // per-role), matching provider is all it takes to also share the key.
   const planner = setSameAsNav.checked
     ? { provider: selectedNavProvider(), mode: selectedNavMode(), model: selectedNavModel() }
     : { provider: selectedProvider(), mode: selectedMode(), model: setModel.value.trim() };
-  postToSW({
+  const configSet = {
     kind: 'config-set',
     planner,
     navigator: {
@@ -1619,8 +1691,31 @@ settingsSave.addEventListener('click', () => {
         ? Number(setSpendCap.value)
         : undefined,
     strictOracles: Boolean(setStrictOracles && setStrictOracles.checked),
-  });
-  closeSettings();
+  };
+
+  if (pendingPrimarySaves.size === 0) {
+    postToSW(configSet);
+    closeSettings();
+    return;
+  }
+  // hold the settings until every key save answers (settlePrimarySave sends
+  // them). A silent SW never strands the settings: flush after 4s and leave the
+  // modal open so the unfinished key row is visible.
+  pendingConfigSet = configSet;
+  if (primarySaveTimer) clearTimeout(primarySaveTimer);
+  primarySaveTimer = setTimeout(() => {
+    primarySaveTimer = null;
+    for (const refs of [navCardRefs, brainCardRefs]) {
+      if (!refs.saving) continue;
+      refs.saving = false;
+      refs.savedStamp = null;
+      refs.keyStatus.classList.add('err');
+      refs.keyStatus.textContent = 'could not save key';
+    }
+    pendingPrimarySaves.clear();
+    primarySaveFailed = true;
+    settlePrimarySave();
+  }, 4000);
 });
 
 // ---- run history (chrome.storage.local) ------------------------------------
