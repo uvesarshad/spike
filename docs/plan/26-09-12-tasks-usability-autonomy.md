@@ -1,5 +1,5 @@
 > Source audit: [26-09-12-audit-usability-autonomy](./26-09-12-audit-usability-autonomy.md)
-> Updated: 26-09-13 · 50/81 done
+> Updated: 26-09-13 · 51/81 done
 
 ## Execution protocol (for the agent working this list)
 
@@ -83,7 +83,7 @@ Work the list **top to bottom** (severity order). For every task:
 - [ ] "Test login (optional)" vault-backed card — covered by A5's third task; tick together. (E3)
 - [x] `spike doctor` + resolved-config view — covered by A21; tick together. (E4)
 - [x] Document intake with a user-confirmed flow checklist — covered by A7; tick together. (E5)
-- [ ] Route/flow fan-out orchestrator with a coverage line on every non-pass — covered by A8; tick together. (E6)
+- [x] Route/flow fan-out orchestrator with a coverage line on every non-pass — covered by A8; tick together. (E6)
 - [ ] Implement the AI exploration pass in the `exploreInteractionGated` seam (`src/discovery/discover.ts:46`) under a step budget so modals, wizards and auth-gated surface enter the app-model. (E7)
 - [ ] Optional "What should be true at the end?" field → precise assertion verbs — covered by A17; tick together. (E8)
 - [x] Promote the dead-click oracle — covered by A16; tick together. (E9)
