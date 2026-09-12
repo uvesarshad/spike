@@ -92,7 +92,8 @@ Work the list **top to bottom** (severity order). For every task:
 - [x] Metamorphic relations only from observed actions + cart-badge fixture — covered by A2; tick together. (E12)
 - [x] Result card v2 (inline screenshot, one-line verdict in user words, whose-fault attribution, three buttons) — covered by A14/A15/A19; tick when all three land. (E13)
 - [x] Reason translation layer — covered by A14; tick together. (E14)
-- [ ] Redaction pass incl. pixel-blur on password-field screenshots: after A5, blur the bounding box of any password-type input in step screenshots before writing them (CDP `DOM.getBoxModel` + canvas blur in the runner page, or skip the screenshot for that step). (E15)
+- [x] Redaction pass incl. pixel-blur on password-field screenshots: after A5, blur the bounding box of any password-type input in step screenshots before writing them (CDP `DOM.getBoxModel` + canvas blur in the runner page, or skip the screenshot for that step). (E15) <!-- note: the box is blurred IN THE PAGE just before the capture (getBoundingClientRect boxes -> padded/clamped regions -> backdrop-filter overlays, removed again after) rather than post-processed onto the PNG in Node — there is no PNG codec in the deps and the skip-the-screenshot fallback would have blinded the visual check on exactly the login pages this is for. Applied to all four transports, none of which falls back to skipping. -->
+
 - [x] Reopenable history + Saved tests card — covered by A19; tick together. (E16)
 - [x] CLI prints the plain report by default + `schemaVersion` — covered by A30; tick together. (E17)
 - [x] One real inbox provider — covered by A9's second task; tick together. (E18)
