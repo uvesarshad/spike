@@ -11,7 +11,8 @@ import os from 'node:os';
 import { loadConfig, type QaConfig } from './config.js';
 import { exitCodeForVerdict, INFRA_ERROR_EXIT_CODE } from './cli-exit-codes.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
-import { allocateIsolatedSession, isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
+import { allocateIsolatedSession, createPlanningRouter, isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
+import { decomposeSpec, renderFlowTable, runFlows } from './driver/spec-decompose.js';
 import { slimReport, type Report } from './report/report.js';
 import { resolveSuite } from './suite/config.js';
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
@@ -97,8 +98,9 @@ function mergeConfig(
 program
   .command('run')
   .description('run a QA task against a URL; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra or tool error (A47)')
-  .argument('<task>', 'what to test, in plain English')
+  .argument('[task]', 'what to test, in plain English (omit it when you pass --spec)')
   .requiredOption('--url <url>', 'page to start on')
+  .option('--spec <path>', 'test a document instead of one sentence: reads a markdown/text file (a spec, a PRD, a list of user stories), works out the flows it describes, and tests each one as its own run')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
   .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain (A45)', collectRepeatable, [])
@@ -114,7 +116,16 @@ program
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
   .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent (A16) for this non-interactive run', false)
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string, opts: { url: string; maxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
+  .action(async (task: string | undefined, opts: { url: string; spec?: string; maxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
+    // A7 (P0): exactly one input — a sentence or a document, never neither.
+    if (!task && !opts.spec) {
+      console.error('Tell me what to test: either a sentence in quotes, or --spec <file> with a document describing the flows.');
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
+    if (task && opts.spec) {
+      console.error('Pass either a sentence or --spec <file>, not both.');
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
     const onProgress = opts.json ? undefined : (l: string) => console.log(l);
     const config = mergeConfig(opts.via, opts.allowHost, opts.actionCache);
     const qaRunOpts = {
@@ -131,15 +142,51 @@ program
       ...(config && { config }),
       onProgress,
     };
-    const report = opts.fix
-      ? (await runWithAutoFix(task, opts.url, {
-          maxAttempts: opts.maxFixAttempts ?? 2,
-          config: qaRunOpts.config,
-          onProgress,
-          qaRunOpts,
-          yesAutoFix: opts.yesAutoFix,
-        })).finalReport
-      : await qaRun(task, opts.url, qaRunOpts);
+    /** One task → one run, with --fix applied the same way in both modes. */
+    const runOneTask = async (t: string) =>
+      opts.fix
+        ? (await runWithAutoFix(t, opts.url, {
+            maxAttempts: opts.maxFixAttempts ?? 2,
+            config: qaRunOpts.config,
+            onProgress,
+            qaRunOpts,
+            yesAutoFix: opts.yesAutoFix,
+          })).finalReport
+        : await qaRun(t, opts.url, qaRunOpts);
+
+    // A7 (P0): document mode — work out the flows once, then test each one as
+    // its own run, sharing whatever sign-in state --storage-state supplies.
+    if (opts.spec) {
+      const specPath = path.resolve(opts.spec);
+      if (!fs.existsSync(specPath)) {
+        console.error(`I couldn't find that document: ${specPath}`);
+        process.exit(INFRA_ERROR_EXIT_CODE);
+      }
+      const specText = fs.readFileSync(specPath, 'utf8');
+      onProgress?.('Reading your document and working out what to test…');
+      const router = createPlanningRouter(config ?? {});
+      const flows = await decomposeSpec(specText, {
+        planFlows: (prompt, schema, step) => router.planGoals(prompt, schema, step),
+        url: opts.url,
+      });
+      if (!opts.json) {
+        console.log(`\nI'll test ${flows.length} flow${flows.length === 1 ? '' : 's'}:`);
+        flows.forEach((f, i) => console.log(`${String(i + 1).padStart(2)}. ${f.name} — ${f.task}`));
+        console.log('');
+      }
+      const outcome = await runFlows(flows, {
+        runFlow: (flow) => runOneTask(flow.task),
+        onProgress,
+      });
+      if (opts.json) {
+        console.log(JSON.stringify(outcome, null, 2));
+      } else {
+        console.log(`\n${renderFlowTable(outcome)}`);
+      }
+      process.exit(exitCodeForVerdict(outcome.verdict));
+    }
+
+    const report = await runOneTask(task as string);
     console.log(JSON.stringify(slimReport(report), null, 2));
     if (!opts.json) console.log(`full report: ${report.evidence_paths[0]}`);
     // A47 (P2): 0 pass / 1 verdict fail / 2 uncertain — see cli-exit-codes.ts.

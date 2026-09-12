@@ -113,6 +113,11 @@ node dist/cli.js fixture --bug on        # terminal 1: intentionally broken shop
 node dist/cli.js run "log in as test@test.com with password pw and complete checkout" \
   --url http://localhost:9401/login      # terminal 2: watch the verdict
 
+# test a whole document instead of one sentence: the flows it describes are
+# worked out once, then each one is tested as its own run and rolled up into
+# a single verdict (exit code follows the overall verdict)
+node dist/cli.js run --spec ./docs/release-2.3.md --url http://localhost:9401/
+
 # CI replay-first workflow after committing or restoring generated-tests/
 node dist/cli.js replay --all --json
 ```
@@ -123,7 +128,10 @@ Register as an MCP tool in Claude Code:
 claude mcp add spike -- node /path/to/repo/dist/mcp-server.js
 ```
 
-…then any agent in that session can call `qa_run(task, url)`.
+…then any agent in that session can call `qa_run(task, url)` — or, for several
+things at once, `qa_run({ url, flows: [...] })` with instructions it split
+itself, or `qa_run({ url, spec: "<document text>" })` to have them worked out
+from a spec/PRD/story list.
 
 <details>
 <summary>Windows (PowerShell)</summary>

@@ -762,6 +762,21 @@ function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; n
   return { adapters: [...byKey.values()], navigatorName, plannerName };
 }
 
+/** A7 (P0): the model ladder ALONE — no Chrome, no on-device model, no
+ * artifacts — for the single planning call that turns a document into a list
+ * of flows (src/driver/spec-decompose.ts). Nothing on-device is added here on
+ * purpose: the on-device model never plans, so the one useful rung is the
+ * configured smart planning model and its fallbacks. */
+export function createPlanningRouter(config: Partial<QaConfig> = {}): ModelRouter {
+  const cfg = loadConfig(config);
+  const built = buildLadder(cfg, new Vault());
+  return new ModelRouter(built.adapters, {
+    preferFreePlanner: cfg.preferFreePlanner,
+    navigatorAdapter: built.navigatorName,
+    plannerAdapter: built.plannerName,
+  });
+}
+
 /** The host of `url` plus its www./bare-domain sibling (apex↔www redirects are
  * common — e.g. a bare domain → its www. subdomain — and the guard's
  * subdomain check only covers one direction). '' / unparseable url → []. */
