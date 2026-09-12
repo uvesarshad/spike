@@ -1,5 +1,5 @@
 > Source audit: [26-09-12-audit-usability-autonomy](./26-09-12-audit-usability-autonomy.md)
-> Updated: 26-09-13 · 63/81 done
+> Updated: 26-09-13 · 71/81 done
 
 ## Execution protocol (for the agent working this list)
 
@@ -81,7 +81,7 @@ Work the list **top to bottom** (severity order). For every task:
 
 - [ ] Three-screen first run: one key with provider auto-detect from the key prefix (`sk-ant-` → Claude, `AIza` → Gemini, `sk-` → GPT), current tab, one consent switch; never asks for a second key unless the user opens Advanced. (E1)
 - [x] "Check this site" zero-input mode — covered by A24's second task; tick together. (E2)
-- [ ] "Test login (optional)" vault-backed card — covered by A5's third task; tick together. (E3)
+- [x] "Test login (optional)" vault-backed card — covered by A5's third task; tick together. (E3)
 - [x] `spike doctor` + resolved-config view — covered by A21; tick together. (E4)
 - [x] Document intake with a user-confirmed flow checklist — covered by A7; tick together. (E5)
 - [x] Route/flow fan-out orchestrator with a coverage line on every non-pass — covered by A8; tick together. (E6)
