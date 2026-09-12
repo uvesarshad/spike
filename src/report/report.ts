@@ -50,6 +50,13 @@ export interface StepRecord {
    * verdict until the oracle has been dogfooded against a real passing run
    * (A1), so enabling it cannot silently flip existing outcomes. */
   invariants?: InvariantViolation[];
+  /** A2 (P0): named counters (today: the cart badge) read off the page
+   * immediately before and after THIS action, captured only for the handful of
+   * steps a count-delta relation could apply to (a landed add/remove click).
+   * Comparing a badge across a whole run is meaningless — it only has to move
+   * around the action that moves it. */
+  countsBefore?: Record<string, number>;
+  countsAfter?: Record<string, number>;
   visual?: NanoVerdict;
   screenshot?: string;
   video?: string;

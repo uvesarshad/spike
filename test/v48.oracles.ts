@@ -11,7 +11,8 @@
  *  - baseline save/load/bless round-trip
  *  - compareEnvironments needs no baseline
  *  - every metamorphic relation, both satisfied and violated
- *  - pattern detection proposes a cart relation for a cart-badge tree and
+ *  - pattern detection proposes a cart relation only when the run actually
+ *    clicked an add/remove control (A2), never both directions at once, and
  *    nothing for a bare page
  */
 
@@ -44,6 +45,7 @@ import {
   sameUrlTwiceSameState,
   sortPreservesSet,
   type Observation,
+  type RelationHistoryStep,
 } from '../src/assertions/metamorphic.js';
 
 const checks: [string, boolean][] = [];
@@ -352,9 +354,69 @@ async function run() {
         { id: 'n3', role: 'main', name: '', children: listItems(3) },
       ],
     });
-    const proposals = detectRelationCandidates(cartTree);
-    check('pattern detection proposes a cart relation for a cart-badge tree', proposals.some((p) => p.relation.id === 'add-item-increments-count'));
-    check('pattern detection also proposes the inverse (remove) relation', proposals.some((p) => p.relation.id === 'remove-item-decrements-count'));
+    // A2 (P0): a badge on its own proposes NOTHING. Proposing "+1 on add" and
+    // "-1 on remove" from the same node meant at least one of two mutually
+    // exclusive relations violated on every single run, which force-failed
+    // every site that has a cart badge.
+    check('a cart badge with no add/remove action in the run proposes no cart relation', detectRelationCandidates(cartTree, []).length === 0);
+    check('a cart badge with no history at all proposes no cart relation', detectRelationCandidates(cartTree).length === 0);
+
+    const addStep = (before: number, after: number): RelationHistoryStep => ({
+      ok: true,
+      action: { type: 'click' },
+      target: { role: 'button', name: 'Add Widget to cart' },
+      description: 'Click "Add Widget to cart"',
+      countsBefore: { cart: before },
+      countsAfter: { cart: after },
+    });
+
+    {
+      const proposals = detectRelationCandidates(cartTree, [addStep(0, 1)]);
+      check('a landed add-to-cart click proposes the +1 relation', proposals.filter((p) => p.relation.id === 'add-item-increments-count').length === 1);
+      check('the add click never proposes the inverse (remove) relation', !proposals.some((p) => p.relation.id === 'remove-item-decrements-count'));
+      const p = proposals.find((x) => x.relation.id === 'add-item-increments-count')!;
+      check('the +1 relation is checked around THAT action and holds when the badge went 0 -> 1', checkRelation(p.relation, p.before!, p.after!, p.params) === null);
+    }
+
+    {
+      const proposals = detectRelationCandidates(cartTree, [addStep(0, 0)]);
+      const p = proposals.find((x) => x.relation.id === 'add-item-increments-count')!;
+      const violation = checkRelation(p.relation, p.before!, p.after!, p.params);
+      check('a badge that stays at 0 after an add click violates the +1 relation', violation !== null && violation.insufficientData !== true);
+    }
+
+    {
+      const removeStep: RelationHistoryStep = {
+        ok: true,
+        action: { type: 'click' },
+        target: { role: 'button', name: 'Remove Widget from cart' },
+        description: 'Click "Remove Widget from cart"',
+        countsBefore: { cart: 2 },
+        countsAfter: { cart: 1 },
+      };
+      const proposals = detectRelationCandidates(cartTree, [removeStep]);
+      check('a landed remove click proposes only the -1 relation', proposals.length === 1 && proposals[0].relation.id === 'remove-item-decrements-count');
+      const p = proposals[0];
+      check('the -1 relation holds when the badge went 2 -> 1', checkRelation(p.relation, p.before!, p.after!, p.params) === null);
+    }
+
+    {
+      const refused: RelationHistoryStep = {
+        ok: false,
+        action: { type: 'click' },
+        target: { role: 'button', name: 'Add Widget to cart' },
+        description: 'look-only mode: skipped Click "Add Widget to cart"',
+        countsBefore: { cart: 0 },
+        countsAfter: { cart: 0 },
+      };
+      check('a click that never landed proposes nothing', detectRelationCandidates(cartTree, [refused]).length === 0);
+      check('an add click with no counter readings proposes nothing', detectRelationCandidates(cartTree, [{ ok: true, action: { type: 'click' }, target: { role: 'button', name: 'Add Widget to cart' } }]).length === 0);
+    }
+
+    {
+      const many = [addStep(0, 1), addStep(1, 2), addStep(2, 3), addStep(3, 4), addStep(4, 5)];
+      check('count-delta proposals are capped per run', detectRelationCandidates(cartTree, many).length === 3);
+    }
   }
 
   {

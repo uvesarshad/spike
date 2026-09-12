@@ -342,6 +342,31 @@ export interface RelationProposal {
   relation: Relation;
   reason: string;
   params?: RelationParams;
+  /** A2 (P0): for a relation proposed BECAUSE a specific action happened (the
+   * count-delta pair), the two observations bracketing THAT action. Callers
+   * must check the relation against these rather than against run-start /
+   * run-end — a cart badge is only supposed to move around the add/remove
+   * click, not across the whole run. Absent for the page-shape relations
+   * (sort/filter/pagination), which carry no single anchoring action. */
+  before?: Observation;
+  after?: Observation;
+}
+
+/** A2 (P0): the slice of a recorded step this module needs to decide whether
+ * an add/remove action actually happened, and what the counter did around it.
+ * Structurally a subset of report/report.ts's StepRecord (which is what
+ * driver/loop.ts passes) — declared here so this module stays a pure
+ * predicate library with no dependency on the report shape. */
+export interface RelationHistoryStep {
+  /** Whether the action landed. A refused or failed click did not happen. */
+  ok: boolean;
+  action: { type: string };
+  target?: { role: string; name?: string };
+  description?: string;
+  /** Counters read from the page immediately BEFORE this action. */
+  countsBefore?: Record<string, number>;
+  /** Counters read from the page immediately AFTER this action. */
+  countsAfter?: Record<string, number>;
 }
 
 function collectAxNodes(ax: AxSnapshot): AxNode[] {
@@ -363,12 +388,86 @@ function nodeText(n: AxNode): string {
 
 const CART_RE = /\bcart\b/i;
 const DIGIT_RE = /\d/;
+/** A2 (P0): control names that ADD one item to the counter. A cart badge on
+ * its own says nothing about which direction the counter is supposed to move
+ * — only an action does, so these gate the +1 relation. Deliberately narrow:
+ * a missed proposal costs one unchecked relation, a wrong one force-fails a
+ * healthy site. */
+const ADD_ITEM_RES: readonly RegExp[] = [
+  /\badd\b[^]{0,32}?\b(cart|bag|basket)\b/i,
+  /\badd (an? )?item\b/i,
+  /\badd to (cart|bag|basket)\b/i,
+];
+/** Control names that REMOVE one item from the counter — the -1 half. Note
+ * "empty/clear the cart" is deliberately absent: it is not a -1 action. */
+const REMOVE_ITEM_RES: readonly RegExp[] = [
+  /\bremove\b[^]{0,32}?\b(cart|bag|basket|item)\b/i,
+  /\bremove (an? )?item\b/i,
+  /\bdelete (an? )?item\b/i,
+];
 const SORT_RE = /\bsort\b/i;
 const SORT_STATE_RE = /sort/i;
 const FILTER_RE = /\bfilter\b/i;
 const PAGINATION_NEXT_RE = /^(next|older|more results?)\b/i;
 const PAGINATION_LABEL_RE = /\bpagination\b|\bpage \d+\s+of\s+\d+\b/i;
 const FILTER_ROLES = new Set(['checkbox', 'combobox', 'button', 'radio', 'menuitemcheckbox']);
+
+/** The text a step is matched against: the name of the control it touched,
+ * falling back to the step's own description when the control had no name. */
+function historyStepText(s: RelationHistoryStep): string {
+  return (s.target?.name ?? '').trim() || (s.description ?? '').trim();
+}
+
+/** A2 (P0): does this step look like the add- or remove-an-item click a
+ * count-delta relation talks about? Exported so the driver knows which steps
+ * are worth reading the counter around — capturing it on every step would
+ * cost a page snapshot per action for nothing.
+ *
+ * Only a LANDED click counts: a failed click, or one a look-only run refused,
+ * did not move anything, so no relation about its effect applies. */
+export function countDeltaDirection(step: RelationHistoryStep): 'add' | 'remove' | null {
+  if (!step.ok || step.action?.type !== 'click') return null;
+  const text = historyStepText(step);
+  if (!text) return null;
+  if (ADD_ITEM_RES.some((re) => re.test(text))) return 'add';
+  if (REMOVE_ITEM_RES.some((re) => re.test(text))) return 'remove';
+  return null;
+}
+
+/** At most this many count-delta proposals per direction per run — a long
+ * shopping flow can add a dozen items, and each extra pair is one more chance
+ * for a snapshot-timing artefact to gate a verdict for no extra signal. */
+const MAX_COUNT_DELTA_PROPOSALS = 3;
+
+/** One proposal per landed add/remove click that carries a before/after
+ * counter reading. Steps without both readings are skipped outright rather
+ * than proposed with no data: a relation that can only report "I couldn't
+ * observe this" is noise in the report, not evidence. */
+function countDeltaProposals(
+  history: readonly RelationHistoryStep[],
+  patterns: readonly RegExp[],
+  relation: Relation,
+  phrasing: string,
+): RelationProposal[] {
+  const out: RelationProposal[] = [];
+  for (const step of history) {
+    if (out.length >= MAX_COUNT_DELTA_PROPOSALS) break;
+    if (!step.ok || step.action?.type !== 'click') continue;
+    const text = historyStepText(step);
+    if (!text || !patterns.some((re) => re.test(text))) continue;
+    const before = step.countsBefore;
+    const after = step.countsAfter;
+    if (typeof before?.cart !== 'number' || typeof after?.cart !== 'number') continue;
+    out.push({
+      relation,
+      reason: `The run clicked "${text}", which ${phrasing} the cart, while a cart badge was on the page.`,
+      params: { countKey: 'cart' },
+      before: { counts: before },
+      after: { counts: after },
+    });
+  }
+  return out;
+}
 
 /** Deterministic pattern detection over an AxSnapshot — role/name/state
  * sniffing, zero model calls, runs in a few milliseconds. This is
@@ -377,24 +476,24 @@ const FILTER_ROLES = new Set(['checkbox', 'combobox', 'button', 'radio', 'menuit
  * model — the verification step, human or AI, happens outside this
  * function). A miss here just means no candidate was proposed for that
  * pattern on that page, not that the page is relation-free. */
-export function detectRelationCandidates(ax: AxSnapshot): RelationProposal[] {
+export function detectRelationCandidates(ax: AxSnapshot, history: readonly RelationHistoryStep[] = []): RelationProposal[] {
   const proposals: RelationProposal[] = [];
   const nodes = collectAxNodes(ax);
   if (nodes.length === 0) return proposals;
 
   // --- cart badge: a node whose text mentions "cart" and carries a digit ---
+  //
+  // A2 (P0): the badge alone is NOT enough to propose anything. Proposing both
+  // "+1 on add" and "-1 on remove" from one badge guarantees that at least one
+  // of them violates on every run (they are mutually exclusive), and both did
+  // when the badge never moved — which force-failed every storefront under
+  // strictOracles. A count-delta relation is now proposed only for an action
+  // the run ACTUALLY performed, and is checked against the counter as it stood
+  // immediately before and after THAT action.
   const cartNode = nodes.find((n) => CART_RE.test(nodeText(n)) && DIGIT_RE.test(nodeText(n)));
   if (cartNode) {
-    proposals.push({
-      relation: addItemIncrementsCount,
-      reason: `Found a cart-labelled node with a numeric badge: ${cartNode.role} "${cartNode.name ?? cartNode.value ?? ''}".`,
-      params: { countKey: 'cart' },
-    });
-    proposals.push({
-      relation: removeItemDecrementsCount,
-      reason: 'Same cart-badge node also implies the inverse relation on removal.',
-      params: { countKey: 'cart' },
-    });
+    proposals.push(...countDeltaProposals(history, ADD_ITEM_RES, addItemIncrementsCount, 'adds an item to'));
+    proposals.push(...countDeltaProposals(history, REMOVE_ITEM_RES, removeItemDecrementsCount, 'removes an item from'));
   }
 
   // --- sortable table/list: a columnheader/button naming or state-flagging sort ---

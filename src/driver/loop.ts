@@ -42,7 +42,7 @@ import type { Vault } from '../vault/vault.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
 import { checkDrainInvariants, checkProbeInvariants, type InvariantViolation } from '../assertions/invariants.js';
 import { evaluateAssertion, type AssertionSpec } from '../assertions/dom-assertions.js';
-import { axToObservation, checkRelation, detectRelationCandidates } from '../assertions/metamorphic.js';
+import { axToObservation, checkRelation, countDeltaDirection, detectRelationCandidates } from '../assertions/metamorphic.js';
 import { validateScriptSteps, runScriptSteps } from './script-runner/index.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders, RunDataNotFoundError } from '../run-data/index.js';
 import {
@@ -1261,6 +1261,20 @@ export async function runDriverLoop(
       }
       steps.push(record);
 
+      // A2 (P0): read the page's counters RIGHT BEFORE an add/remove click, so
+      // the count-delta relation below can be checked around the one action it
+      // is about instead of across the whole run (a badge compared run-start to
+      // run-end force-failed every site that has one). Only these few steps pay
+      // for the extra snapshot; `countDeltaDirection` is what says which.
+      // `record.ok` is still true here — this is a pre-flight guess that the
+      // action is a candidate; a click that then fails or is refused drops its
+      // reading below and proposes nothing.
+      const isCountDeltaStep = countDeltaDirection(record) !== null;
+      if (isCountDeltaStep) {
+        const pre = await (browser.peekAxTree?.() ?? browser.axTree()).catch(() => null);
+        if (pre) record.countsBefore = axToObservation(pre).counts;
+      }
+
       // ---- execute ----
       const cacheBefore =
         actionCache &&
@@ -1562,6 +1576,16 @@ export async function runDriverLoop(
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
       await collectInvariants(browser, record);
+      // A2 (P0): the matching "after" reading. A click that failed or was
+      // refused moved nothing, so its "before" reading is dropped too and no
+      // count-delta relation is proposed for it.
+      if (record.countsBefore) {
+        if (record.ok && !skippedReadOnly) {
+          const post = await (browser.peekAxTree?.() ?? browser.axTree()).catch(() => null);
+          if (post) record.countsAfter = axToObservation(post).counts;
+        }
+        if (!record.countsAfter) delete record.countsBefore;
+      }
       // A1 (P0): a look-only refusal is a deliberate no-op, not a failure worth
       // a screenshot — the page is exactly as the last real step left it.
       if (!skippedReadOnly) await captureFailureShot(browser, artifacts, record);
@@ -1709,12 +1733,18 @@ export async function runDriverLoop(
   // Report field, and so findStrictOracleViolation below picks it up for
   // free via the SAME error-severity scan Tier-0 invariants already get. ----
   if (firstSnapshotAx && lastSnapshotAx && steps.length) {
-    const candidates = detectRelationCandidates(lastSnapshotAx);
+    // A2 (P0): the step history is what decides whether a count-delta relation
+    // applies at all, and supplies the pair of readings bracketing the action
+    // it is about. Everything else still falls back to the run-start/run-end
+    // pair below, where "no evidence either way" is the worst it can do.
+    const candidates = detectRelationCandidates(lastSnapshotAx, steps);
     if (candidates.length) {
-      const before = axToObservation(firstSnapshotAx);
-      const after = axToObservation(lastSnapshotAx, url);
+      const runStart = axToObservation(firstSnapshotAx);
+      const runEnd = axToObservation(lastSnapshotAx, url);
       const relationEvidence: InvariantViolation[] = [];
       for (const c of candidates) {
+        const before = c.before ?? runStart;
+        const after = c.after ?? runEnd;
         const violation = checkRelation(c.relation, before, after, c.params);
         if (!violation) continue;
         // only a RELIABLE-confidence relation with sufficient data can gate
