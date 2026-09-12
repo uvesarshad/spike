@@ -240,6 +240,22 @@ export interface ModelRouterOptions {
   retryPolicy?: Partial<RetryPolicy>;
 }
 
+/** One ladder rung's live state — see ModelRouter.probeLadder (A21). */
+export interface LadderAdapterStatus {
+  name: string;
+  rung: 0 | 1 | 2 | 3;
+  available: boolean;
+  capabilities: Capability[];
+}
+
+export interface LadderStatus {
+  /** Adapter NAME leading plan-step (the navigator role), if pinned. */
+  navigatorPin?: string;
+  /** Adapter NAME leading plan-goals (the brain role), if pinned. */
+  brainPin?: string;
+  adapters: LadderAdapterStatus[];
+}
+
 export class ModelRouter {
   readonly trace: ModelTraceEntry[] = [];
   /** Process-wide telemetry tracer (no-op sink by default → zero external calls
@@ -268,6 +284,29 @@ export class ModelRouter {
    * instead of failing the run. */
   async hasCapability(cap: Capability): Promise<boolean> {
     return (await this.candidates(cap)).length > 0;
+  }
+
+  /** A21 (`spike doctor`): the ladder as it stands right now — every adapter,
+   * its live `available()` result, what it can do, and which role pin (if any)
+   * names it. READ-ONLY: it probes availability and nothing else, never runs a
+   * generateJson call and never mutates router state. A pin that no adapter
+   * carries (e.g. the on-device navigator default, which is not a ladder
+   * adapter) still comes back in `navigatorPin`/`brainPin` so the caller can
+   * report the user's actual choice rather than silently showing the fallback. */
+  async probeLadder(): Promise<LadderStatus> {
+    const probes = await Promise.all(
+      this.adapters.map(async (a): Promise<LadderAdapterStatus> => ({
+        name: a.name,
+        rung: a.rung,
+        available: await a.available().catch(() => false),
+        capabilities: (['visual-verdict', 'plan-step', 'plan-goals'] as Capability[]).filter((c) => a.supports(c)),
+      })),
+    );
+    return {
+      navigatorPin: this.effectivePin('plan-step'),
+      brainPin: this.effectivePin('plan-goals'),
+      adapters: probes,
+    };
   }
 
   /** Which pin leads the ladder for a role. plan-step → navigator, plan-goals →

@@ -14,6 +14,10 @@ import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { allocateIsolatedSession, createPlanningRouter, isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
 import { decomposeSpec, renderFlowTable, runFlows } from './driver/spec-decompose.js';
 import { slimReport, type Report } from './report/report.js';
+import { findChrome } from './chrome/launch.js';
+import { buildDoctorReport, doctorExitCode, renderDoctorReport, type DoctorRoleProbe } from './doctor.js';
+import type { Capability } from './router/adapter.js';
+import type { LadderStatus } from './router/model-router.js';
 import { resolveSuite } from './suite/config.js';
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
 import { buildJUnitXml } from './suite/reporters.js';
@@ -30,6 +34,9 @@ import { startFixture } from '../fixture/server.js';
 
 const PROVIDERS: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama', 'openrouter', 'glm'];
 const PLANNER_MODES: PlannerMode[] = ['api', 'cli'];
+/** The navigator may additionally be the on-device model, which the brain can
+ * never be (Nano does visual verdicts + plan-step, never plan-goals). */
+const NAVIGATOR_MODES: PlannerMode[] = ['api', 'cli', 'ondevice'];
 const DEBUG_MODES: DebugMode[] = ['prompt', 'auto'];
 const DEBUG_AGENTS: DebugAgent[] = ['auto', 'claude', 'codex', 'gemini'];
 
@@ -42,24 +49,42 @@ const VAULT_KEY_NAMES: Partial<Record<ProviderId, string>> = {
   glm: 'glm',
 };
 
-/** Render the settings (planner + debug + which API keys are configured) as a
- * readable block. Shared by `config show` and `config set`. Never prints key values. */
-function printSettings(s: QaSettings): void {
-  const { provider, mode, model } = s.planner;
-  const modelLine = model && model.length ? model : `(default: ${defaultModelFor(provider, mode) || 'none'})`;
-  const vault = new Vault();
-  console.log('Browsing-control AI (planner):');
+/** One model role as `config show` prints it. A21: both roles are shown, by
+ * their real names — the old output printed only the brain, under a heading
+ * ("Browsing-control AI (planner)") that described the NAVIGATOR's job. */
+function printRole(title: string, sel: PlannerSelection, role: 'navigator' | 'brain'): void {
+  const { provider, mode, model } = sel;
+  const modelLine = model && model.length ? model : `(default: ${defaultModelFor(provider, mode, role) || 'none'})`;
+  console.log(`${title}:`);
   console.log(`  provider:   ${provider}`);
   console.log(`  mode:       ${mode}`);
   console.log(`  model:      ${modelLine}`);
+}
+
+/** Render the settings (both model roles + debug prefs + which API keys are
+ * configured + the RESOLVED run config) as a readable block. Shared by
+ * `config show` and `config set`. Never prints key values.
+ *
+ * "Navigator"/"Brain" are the literal headings on purpose: this is the expert
+ * CLI surface, which already uses that vocabulary everywhere, not the panel
+ * copy the §1.5 jargon ban is about. */
+function printSettings(s: QaSettings): void {
+  const vault = new Vault();
+  printRole('Navigator (the model that clicks)', s.navigator, 'navigator');
+  printRole('Brain (the model that plans)', s.planner, 'brain');
   console.log('Debugging:');
   console.log(`  debugMode:  ${s.debugMode}`);
   console.log(`  debugAgent: ${s.debugAgent}`);
-  // A1 headline feature: deterministic verdicts — Tier-0 invariants + failed
-  // assertions + metamorphic relations force fail instead of staying advisory.
-  // Read-only here (spike.config.json / SPIKE_STRICT_ORACLES env, not a
-  // SettingsStore field — `config set` has no --strict-oracles flag).
-  console.log(`Oracle strict mode: ${loadConfig().strictOracles ? 'on' : 'off'} (spike.config.json "strictOracles" / SPIKE_STRICT_ORACLES env)`);
+  // A21: the effective run config — flags > env > settings.json >
+  // spike.config.json > defaults, all five layers already collapsed by
+  // loadConfig(). Without this there was no single place to see what a run
+  // would actually be allowed to do.
+  const cfg = loadConfig();
+  console.log('What a run would do (effective config):');
+  console.log(`  look-only mode:   ${cfg.readOnly ? 'on — never clicks or types' : 'off — may click and type'}`);
+  console.log(`  drives Chrome by: ${cfg.via}`);
+  console.log(`  sites allowed:    ${cfg.allowedHosts.join(', ') || '(none)'} — plus whatever host you name with --url`);
+  console.log(`  strict checks:    ${cfg.strictOracles ? 'on — a failed check forces a fail verdict' : 'off — the model alone decides'}`);
   console.log('API keys (in encrypted vault):');
   for (const p of PROVIDERS) {
     const name = VAULT_KEY_NAMES[p];
@@ -67,6 +92,78 @@ function printSettings(s: QaSettings): void {
     const status = vault.get(name) !== undefined ? 'set' : 'not set';
     console.log(`  ${p} (${name}): ${status}`);
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * `spike doctor` (A21) — the preflight. Everything that has to touch the real
+ * machine happens HERE; src/doctor.ts turns the resulting snapshot into ✓/✗
+ * lines and is unit-tested on its own with stubbed probes.
+ * ------------------------------------------------------------------------ */
+
+/** On-device model availability, best-effort and time-boxed. Starting the
+ * runner page launches Chrome, so a machine with no Chrome (or a slow cold
+ * start) must degrade to "couldn't check" rather than hanging the preflight. */
+async function probeNano(cfg: QaConfig, timeoutMs = 45_000): Promise<{ availability?: string; error?: string }> {
+  const nano = new NanoRunnerPage({ cdpPort: cfg.cdpPort, runnerPort: cfg.runnerPort, profileDir: cfg.chromeProfile });
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const availability = await Promise.race([
+      (async () => {
+        await nano.start();
+        return nano.availability();
+      })(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+      }),
+    ]);
+    return { availability };
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    if (timer) clearTimeout(timer);
+    await nano.close().catch(() => {});
+  }
+}
+
+/** Turn the configured roles + a live ladder probe into the three role rows
+ * `spike doctor` prints. Pure enough to follow at a glance; the ✓/✗ decisions
+ * themselves all live in src/doctor.ts. */
+function buildRoleProbes(cfg: QaConfig, ladder: LadderStatus, nanoAvailable: boolean): DoctorRoleProbe[] {
+  const byName = new Map(ladder.adapters.map((a) => [a.name, a]));
+  const roleProbe = (role: 'navigator' | 'brain', sel: PlannerSelection, pinName: string | undefined, cap: Capability): DoctorRoleProbe => {
+    const pin = `${sel.provider}:${sel.mode}`;
+    const model = sel.model || defaultModelFor(sel.provider, sel.mode, role) || undefined;
+    const adapter = pinName ? byName.get(pinName) : undefined;
+    // An on-device pin is not a ladder adapter at all — its availability is the
+    // Nano probe's answer, not an adapter's available().
+    const onDevice = sel.provider === 'nano';
+    const available = onDevice ? nanoAvailable : Boolean(adapter?.available);
+    if (available) return { role, pin, adapter: pinName, ...(model && { model }), available: true };
+    const fallback = ladder.adapters.find((a) => a.available && a.capabilities.includes(cap) && a.name !== pinName);
+    return {
+      role,
+      pin,
+      adapter: pinName,
+      ...(model && { model }),
+      available: false,
+      reason: onDevice ? 'the on-device model is not ready' : adapter ? 'not reachable (no key, or the CLI is not on your PATH)' : 'not configured',
+      ...(fallback && { fallback: fallback.name }),
+    };
+  };
+
+  const visualLadder = ladder.adapters.filter((a) => a.capabilities.includes('visual-verdict'));
+  const visualLive = visualLadder.find((a) => a.available);
+  const visual: DoctorRoleProbe = nanoAvailable
+    ? { role: 'visual', pin: 'the on-device model', available: true }
+    : visualLive
+      ? { role: 'visual', pin: visualLive.name, available: true }
+      : { role: 'visual', pin: 'none configured', available: false, reason: 'no vision model is reachable' };
+
+  return [
+    roleProbe('navigator', cfg.navigator, ladder.navigatorPin, 'plan-step'),
+    roleProbe('brain', cfg.planner, ladder.brainPin, 'plan-goals'),
+    visual,
+  ];
 }
 
 const program = new Command();
@@ -97,13 +194,13 @@ function mergeConfig(
 
 program
   .command('run')
-  .description('run a QA task against a URL; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra or tool error (A47)')
+  .description('run a QA task against a URL; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra or tool error')
   .argument('[task]', 'what to test, in plain English (omit it when you pass --spec)')
   .requiredOption('--url <url>', 'page to start on')
   .option('--spec <path>', 'test a document instead of one sentence: reads a markdown/text file (a spec, a PRD, a list of user stories), works out the flows it describes, and tests each one as its own run')
   .option('--max-steps <n>', 'driver step budget', (v) => parseInt(v, 10))
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
-  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain (A45)', collectRepeatable, [])
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain', collectRepeatable, [])
   .option('--action-cache', 'enable the verified file-backed action cache for this run')
   .option('--no-action-cache', 'bypass the verified action cache for this run')
   .option('--read-only', 'look-only mode: navigate and check the page, but never click, type, or submit. Off by default when you name a --url (naming the target is your go-ahead to drive it)', false)
@@ -114,7 +211,7 @@ program
   .option('--save-storage-state <path>', 'on a PASSING run, save cookies + localStorage to this file')
   .option('--fix', 'on failure, hand the fix prompt to your coding agent (claude/codex/gemini) and re-test', false)
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
-  .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent (A16) for this non-interactive run', false)
+  .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent for this non-interactive run', false)
   .option('--json', 'print the slim JSON verdict only', false)
   .action(async (task: string | undefined, opts: { url: string; spec?: string; maxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
     // A7 (P0): exactly one input — a sentence or a document, never neither.
@@ -248,7 +345,7 @@ function collectAppDirFiles(root: string): { files: string[]; routerKind: 'app' 
  * signal.) */
 program
   .command('bless')
-  .description('accept the CURRENT stored baseline for a flow as intentional (A30 differential oracle)')
+  .description('accept the CURRENT stored baseline for a flow as intentional — the baseline-diff check stops reporting it as a regression')
   .argument('[flow]', 'flow name (defaults to every stored baseline)')
   .option('--list', 'show stored baselines and whether each has been blessed', false)
   .action(async (flow: string | undefined, opts: { list: boolean }) => {
@@ -288,7 +385,7 @@ program
   .argument('<url>', 'seed URL — also fixes the same-origin crawl boundary')
   .option('--max-depth <n>', 'link-hops to follow', (v) => parseInt(v, 10))
   .option('--max-pages <n>', 'hard cap on pages fetched', (v) => parseInt(v, 10))
-  .option('--diff', 'compare against the stored model and print what changed (A25)', false)
+  .option('--diff', 'compare against the stored model and print what changed', false)
   .option('--json', 'machine-readable output', false)
   .action(async (url: string, opts: { maxDepth?: number; maxPages?: number; diff: boolean; json: boolean }) => {
     const root = process.cwd();
@@ -361,15 +458,52 @@ program
   });
 
 program
+  .command('doctor')
+  .description('preflight this machine: is Chrome there, are the configured models reachable, and what would a run actually be allowed to do')
+  .option('--skip-nano', 'skip the on-device model probe (it launches Chrome and can take a few seconds)', false)
+  .action(async (opts: { skipNano: boolean }) => {
+    const cfg = loadConfig();
+
+    let chrome: { path?: string; error?: string };
+    try {
+      chrome = { path: findChrome(cfg.chromePath) };
+    } catch (e) {
+      chrome = { error: e instanceof Error ? e.message.split('\n')[1]?.trim() || e.message : String(e) };
+    }
+
+    const nano = opts.skipNano
+      ? { error: 'skipped (--skip-nano)' }
+      : chrome.path
+        ? await probeNano(cfg)
+        : { error: 'Chrome was not found, so the on-device model could not be checked' };
+
+    const ladder = await createPlanningRouter().probeLadder();
+    const roles = buildRoleProbes(cfg, ladder, nano.availability === 'available');
+
+    const sections = buildDoctorReport({
+      chrome,
+      nano,
+      roles,
+      run: { readOnly: cfg.readOnly, via: cfg.via, allowedHosts: cfg.allowedHosts, strictOracles: cfg.strictOracles },
+    });
+    for (const line of renderDoctorReport(sections)) console.log(line);
+    process.exit(doctorExitCode(sections));
+  });
+
+program
   .command('config')
-  .description('view or change the browsing-control AI + debugging settings (shared with the extension panel)')
+  .description('view or change which models are used + how debugging is handled (shared with the extension panel)')
   .argument('<action>', 'show | set')
-  .option('--provider <p>', 'nano|gemini|claude|gpt|ollama|openrouter|glm')
-  .option('--mode <m>', 'api|cli')
-  .option('--model <m>', 'model id (blank = provider default)')
+  .option('--provider <p>', 'BRAIN (the model that plans): nano|gemini|claude|gpt|ollama|openrouter|glm')
+  .option('--mode <m>', 'BRAIN: api|cli')
+  .option('--model <m>', 'BRAIN model id (blank = provider default)')
+  .option('--navigator-provider <p>', 'NAVIGATOR (the model that clicks): nano|gemini|claude|gpt|ollama|openrouter|glm')
+  .option('--navigator-mode <m>', 'NAVIGATOR: api|cli|ondevice')
+  .option('--navigator-model <m>', 'NAVIGATOR model id (blank = provider default)')
+  .option('--strict-oracles <on|off>', 'on: a failed safety check forces a fail verdict whatever the model says')
   .option('--debug-mode <d>', 'prompt|auto')
   .option('--debug-agent <a>', 'auto|claude|codex|gemini')
-  .action((action: string, opts: { provider?: string; mode?: string; model?: string; debugMode?: string; debugAgent?: string }) => {
+  .action((action: string, opts: { provider?: string; mode?: string; model?: string; navigatorProvider?: string; navigatorMode?: string; navigatorModel?: string; strictOracles?: string; debugMode?: string; debugAgent?: string }) => {
     const store = new SettingsStore();
     if (action === 'show') {
       printSettings(store.read());
@@ -400,6 +534,34 @@ program
       // blank model is allowed — it means "use the provider/mode default"
       planner.model = opts.model;
     }
+    // A21: the navigator is the role that actually drives the page on every
+    // step, and until now it could only be set by editing settings.json or
+    // exporting SPIKE_NAVIGATOR_* — the one role with no CLI switch.
+    const navigator: Partial<PlannerSelection> = {};
+    if (opts.navigatorProvider !== undefined) {
+      if (!PROVIDERS.includes(opts.navigatorProvider as ProviderId)) {
+        console.error(`invalid --navigator-provider "${opts.navigatorProvider}" — choose one of: ${PROVIDERS.join(', ')}`);
+        process.exit(2);
+      }
+      navigator.provider = opts.navigatorProvider as ProviderId;
+    }
+    if (opts.navigatorMode !== undefined) {
+      if (!NAVIGATOR_MODES.includes(opts.navigatorMode as PlannerMode)) {
+        console.error(`invalid --navigator-mode "${opts.navigatorMode}" — choose one of: ${NAVIGATOR_MODES.join(', ')}`);
+        process.exit(2);
+      }
+      navigator.mode = opts.navigatorMode as PlannerMode;
+    }
+    if (opts.navigatorModel !== undefined) navigator.model = opts.navigatorModel;
+    if (opts.strictOracles !== undefined) {
+      const on = ['on', 'true', '1', 'yes'].includes(opts.strictOracles.toLowerCase());
+      const off = ['off', 'false', '0', 'no'].includes(opts.strictOracles.toLowerCase());
+      if (!on && !off) {
+        console.error(`invalid --strict-oracles "${opts.strictOracles}" — use "on" or "off"`);
+        process.exit(2);
+      }
+      patch.strictOracles = on;
+    }
     if (opts.debugMode !== undefined) {
       if (!DEBUG_MODES.includes(opts.debugMode as DebugMode)) {
         console.error(`invalid --debug-mode "${opts.debugMode}" — choose one of: ${DEBUG_MODES.join(', ')}`);
@@ -415,8 +577,11 @@ program
       patch.debugAgent = opts.debugAgent as DebugAgent;
     }
     if (Object.keys(planner).length) patch.planner = planner as PlannerSelection;
+    if (Object.keys(navigator).length) patch.navigator = navigator as PlannerSelection;
     if (Object.keys(patch).length === 0) {
-      console.error('nothing to set — pass at least one of: --provider --mode --model --debug-mode --debug-agent');
+      console.error(
+        'nothing to set — pass at least one of: --provider --mode --model --navigator-provider --navigator-mode --navigator-model --strict-oracles --debug-mode --debug-agent',
+      );
       process.exit(2);
     }
     printSettings(store.write(patch));
@@ -424,25 +589,25 @@ program
 
 program
   .command('replay')
-  .description('replay recorded scripts deterministically — no planner, $0; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra or tool error (A47)')
+  .description('replay recorded scripts deterministically — no planner, $0; exit 0 pass / 1 verdict fail / 2 uncertain / 3 infra or tool error')
   .argument('[name]', 'script name (or path to a generated-tests/*.json)')
   .option('--all', 'replay the suite (spike.suite.json if present, else every script in generated-tests/, sorted)', false)
   .option('--heal', 'on failure, re-engage the AI driver and re-emit the script', false)
   .option('--read-only', 'look-only mode: refuse to run a saved test that clicks or types (it reports why instead of interacting)', false)
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
-  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain (A45)', collectRepeatable, [])
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain', collectRepeatable, [])
   .option('--json', 'print slim JSON verdicts only', false)
-  .option('--workers <n>', 'with --all: concurrent scripts in flight (default 1 — today\'s serial behaviour). With --via playwright this is the cheap path (one shared Chrome, one isolated BrowserContext per script); otherwise each concurrent script gets its OWN fully isolated Chrome (A3)', (v) => parseInt(v, 10))
+  .option('--workers <n>', 'with --all: concurrent scripts in flight (default 1 — today\'s serial behaviour). With --via playwright this is the cheap path (one shared Chrome, one isolated BrowserContext per script); otherwise each concurrent script gets its OWN fully isolated Chrome', (v) => parseInt(v, 10))
   .option('--tag <tag>', 'with --all + spike.suite.json: run only entries tagged with this (repeatable, OR match)', collectRepeatable, [])
   .option('--filter <substr>', 'with --all: run only scripts whose name/path contains this substring')
   .option('--shard <i/N>', 'with --all: run only shard i of N, deterministically partitioned by sorted script name (1-based i)')
   .option('--retries <n>', 'A11 flake control: re-run a FAILED script up to n times; a flow that fails then passes is reported flaky rather than red (default 0 — no retries, unchanged behaviour)', (v) => parseInt(v, 10))
   .option('--reporter <type>', 'with --all: also emit a report in this format — currently "junit" (requires --out)')
   .option('--out <path>', 'with --reporter: file path to write the report to')
-  .option('--headless', 'run Chrome headless — a script needing assert_visual still gets Nano on its own split-off headed Chrome (A7)', false)
+  .option('--headless', 'run Chrome headless — a script needing assert_visual still gets Nano on its own split-off headed Chrome', false)
   .option('--storage-state <path>', 'load cookies + localStorage from this file before replaying (auth reuse)')
   .option('--save-storage-state <path>', 'single-script replay only: on a PASSING replay, save storage state to this file (with --all, use --auth-fixture instead)')
-  .option('--auth-fixture', 'with --all + a configured suite setup script: run setup once, capture the storage state it produces, and inject it into every entry — "log in once, reuse everywhere" (A6)', false)
+  .option('--auth-fixture', 'with --all + a configured suite setup script: run setup once, capture the storage state it produces, and inject it into every entry — "log in once, reuse everywhere"', false)
   .action(
     async (
       name: string | undefined,
@@ -658,7 +823,7 @@ program
   .description('print the fix prompt for a finished run — or with --apply, hand it to your coding agent headlessly')
   .argument('<runIdOrPath>', 'a runId under artifacts/, or a path to a report.json')
   .option('--apply', 'dispatch the prompt to the configured coding agent (claude/codex/gemini auto-detected)', false)
-  .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent (A16) for this non-interactive run', false)
+  .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent for this non-interactive run', false)
   .action(async (runIdOrPath: string, opts: { apply: boolean; yesAutoFix: boolean }) => {
     const cfg = loadConfig();
     const candidates = [
