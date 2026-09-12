@@ -232,12 +232,38 @@ What each add-on unlocks:
 | `spike fixture --bug on\|off` | Start the dogfood fixture app (login → products → cart → checkout) |
 | `spike config` | View or change the browsing-control AI + debugging settings (shared with the extension panel) |
 | `spike replay [name\|--all]` | Replay recorded scripts deterministically — no planner, $0 |
+| `spike suite` | Run the whole suite from `spike.suite.json` — plain-English cases plus recorded scripts, one exit code, optional `--reporter json\|junit --out <path>` |
+| `spike doctor` | Preflight: is Chrome there, are the configured models reachable, and what would a run actually be allowed to do |
 | `spike daemon` | Start the vibe-mode daemon: the bridge the extension side panel connects to |
 | `spike fix <runId>` | Print the fix prompt for a finished run — or with `--apply`, hand it to your coding agent headlessly |
 | `spike secret` | Manage the local encrypted vault — secrets are typed via `{{secret:NAME}}`, never reach any model |
 | `spike mcp` | Start the MCP stdio server (register in a coding agent as command `spike`, args `["mcp"]`) |
 | `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
 | `spike dashboard` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats |
+
+## Running a suite
+
+Write the tests down in `spike.suite.json` at the repo root and run `spike suite`:
+
+```json
+{
+  "cases": [
+    { "name": "checkout", "url": "http://localhost:3000/login", "task": "log in as test@test.com with password pw and complete checkout" },
+    { "name": "signup rejects a bad email", "url": "http://localhost:3000/signup", "task": "check the signup form rejects \"nope\"", "tags": ["smoke"] },
+    { "name": "dashboard loads", "url": "http://localhost:3000/app", "task": "check the dashboard renders with no errors", "needsAuth": true }
+  ],
+  "entries": [{ "script": "checkout-happy-path" }],
+  "setup": "login",
+  "teardown": "reset-db"
+}
+```
+
+- **`cases`** are plain English — a name, a URL and a sentence. Each runs as a real AI pass (same as `spike run`).
+- **`entries`** are already-recorded scripts, replayed deterministically at $0 (same as `spike replay`). Record them by letting a passing `spike run` write to `generated-tests/`.
+- **`needsAuth`** marks a test that only makes sense signed in; it is skipped, and said out loud, unless the run passes `--storage-state <file>`.
+- **`expect: "fail"`** holds a known-broken flow red-side-up: the case passes while the flow keeps failing, and turns the suite red once someone fixes it and forgets the entry.
+
+One exit code covers the lot — 0 pass / 1 fail / 2 uncertain. For CI, `--reporter json --out report.json` or `--reporter junit --out junit.xml` writes an artifact; `--tag`, `--filter`, `--shard i/N` and `--workers N` select and parallelise.
 
 ## Testing an app behind a login
 

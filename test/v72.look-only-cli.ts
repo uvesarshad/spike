@@ -115,7 +115,9 @@ console.log('\n=== v72 3/3: --read-only / qa_run readOnly are wired ===');
 {
   const cli = fs.readFileSync(path.join(repoRoot, 'src', 'cli.ts'), 'utf8');
   const readOnlyFlags = cli.match(/\.option\('--read-only'/g) ?? [];
-  check('cli.ts declares --read-only on both run and replay', readOnlyFlags.length === 2);
+  // run + replay, and since A22 `suite` too — every surface that drives a page
+  // must be able to say "look, don't touch".
+  check('cli.ts declares --read-only on run, replay and suite', readOnlyFlags.length >= 3);
   check('cli.ts forwards the flag as a qaRun/qaReplay option', /\.\.\.\(opts\.readOnly && \{ readOnly: true \}\)/.test(cli));
   check(
     'the run flag is not on by default (an absent flag must not re-impose look-only)',

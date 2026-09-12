@@ -67,7 +67,9 @@ function writeScriptFile(root: string, name: string): void {
   fs.writeFileSync(path.join(dir, `${name}.json`), '{}'); // content is never parsed by this suite
 }
 
-function writeSuiteConfig(root: string, config: SuiteFileConfig): void {
+// Takes the FILE's shape (entries/cases both optional — A22), not the resolved
+// SuiteFileConfig, so a fixture can write exactly what a user would author.
+function writeSuiteConfig(root: string, config: Partial<SuiteFileConfig>): void {
   fs.writeFileSync(path.join(root, 'spike.suite.json'), JSON.stringify(config, null, 2));
 }
 

@@ -3,8 +3,15 @@
  * report" (A12). A repo-wide grep confirms no JUnit output exists anywhere
  * today — this is the first. Both reporters are pure functions over a
  * `SuiteRunOutcome` (see runner.ts) so they're testable with zero browser/
- * filesystem/model dependency; only the CLI writes the JUnit result to disk. */
+ * model dependency. The one impure function is `writeSuiteReport` at the
+ * bottom: the single place a report reaches disk, shared by `spike suite` and
+ * `spike replay --all`. It lives here rather than in cli.ts so that "--reporter
+ * json --out really does produce a file" is a fast-suite assertion — A22's
+ * actual bug was that the flag was accepted, wired to nothing, and a CI job
+ * asking for a JSON artifact got no file and a green step. */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import type { SuiteRunOutcome, SuiteScriptResult, Verdict } from './runner.js';
 
 /* ---------- JSON summary ---------- */
@@ -96,4 +103,26 @@ export function buildJUnitXml(outcome: SuiteRunOutcome, suiteName = 'spike repla
     `  </testsuite>\n` +
     `</testsuites>\n`
   );
+}
+
+/* ---------- writing one to disk ---------- */
+
+export type SuiteReporterId = 'json' | 'junit';
+
+export const SUITE_REPORTERS: SuiteReporterId[] = ['json', 'junit'];
+
+export function isSuiteReporter(value: string): value is SuiteReporterId {
+  return (SUITE_REPORTERS as string[]).includes(value);
+}
+
+/** Render `outcome` with the named reporter and write it to `outPath`,
+ * creating parent directories (a CI job almost always points --out at a
+ * not-yet-existing artifacts directory). Returns the path written, so a caller
+ * can say so. */
+export function writeSuiteReport(outcome: SuiteRunOutcome, reporter: SuiteReporterId, outPath: string, suiteName = 'spike suite'): string {
+  const body = reporter === 'junit' ? buildJUnitXml(outcome, suiteName) : `${JSON.stringify(buildJsonSummary(outcome), null, 2)}\n`;
+  const dir = path.dirname(path.resolve(outPath));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(outPath, body);
+  return outPath;
 }

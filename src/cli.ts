@@ -18,9 +18,9 @@ import { findChrome } from './chrome/launch.js';
 import { buildDoctorReport, doctorExitCode, renderDoctorReport, type DoctorRoleProbe } from './doctor.js';
 import type { Capability } from './router/adapter.js';
 import type { LadderStatus } from './router/model-router.js';
-import { resolveSuite } from './suite/config.js';
+import { applyExpectation, resolveSuite, skipsForMissingAuth, SUITE_CONFIG_FILENAME, type SuiteCase, type SuiteEntry } from './suite/config.js';
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
-import { buildJUnitXml } from './suite/reporters.js';
+import { isSuiteReporter, writeSuiteReport, SUITE_REPORTERS } from './suite/reporters.js';
 import { DEFAULT_BASELINE_DIR, blessBaseline } from './assertions/differential.js';
 import { coverageReport, diffAppModel, discoverApp, emptyAppModel, loadAppModel, saveAppModel, type Fetched } from './discovery/index.js';
 import { BridgeServer } from './bridge/bridge-server.js';
@@ -92,6 +92,23 @@ function printSettings(s: QaSettings): void {
     const status = vault.get(name) !== undefined ? 'set' : 'not set';
     console.log(`  ${p} (${name}): ${status}`);
   }
+}
+
+/** Shared `--reporter <type> --out <path>` handling for `spike suite` and
+ * `spike replay --all`. Exits 2 on a bad/incomplete flag combination rather
+ * than carrying on: the whole point of A22 is that asking for a CI artifact
+ * and not getting one must never pass quietly. */
+function emitSuiteReport(outcome: Parameters<typeof writeSuiteReport>[0], reporter: string | undefined, out: string | undefined, suiteName: string): void {
+  if (!reporter) return;
+  if (!isSuiteReporter(reporter)) {
+    console.error(`unknown --reporter "${reporter}" — expected one of: ${SUITE_REPORTERS.join(', ')}`);
+    process.exit(2);
+  }
+  if (!out) {
+    console.error(`--reporter ${reporter} requires --out <path>`);
+    process.exit(2);
+  }
+  console.error(`wrote ${reporter} report to ${writeSuiteReport(outcome, reporter, out, suiteName)}`);
 }
 
 /* ---------------------------------------------------------------------------
@@ -602,7 +619,7 @@ program
   .option('--filter <substr>', 'with --all: run only scripts whose name/path contains this substring')
   .option('--shard <i/N>', 'with --all: run only shard i of N, deterministically partitioned by sorted script name (1-based i)')
   .option('--retries <n>', 'A11 flake control: re-run a FAILED script up to n times; a flow that fails then passes is reported flaky rather than red (default 0 — no retries, unchanged behaviour)', (v) => parseInt(v, 10))
-  .option('--reporter <type>', 'with --all: also emit a report in this format — currently "junit" (requires --out)')
+  .option('--reporter <type>', `with --all: also write a report in this format — ${SUITE_REPORTERS.join(' | ')} (requires --out)`)
   .option('--out <path>', 'with --reporter: file path to write the report to')
   .option('--headless', 'run Chrome headless — a script needing assert_visual still gets Nano on its own split-off headed Chrome', false)
   .option('--storage-state <path>', 'load cookies + localStorage from this file before replaying (auth reuse)')
@@ -775,17 +792,182 @@ program
 
       if (opts.json) console.log(JSON.stringify(jsonResults, null, 2));
 
-      if (opts.reporter === 'junit') {
-        if (!opts.out) {
-          console.error('--reporter junit requires --out <path>');
-          process.exit(2);
-        }
-        fs.writeFileSync(opts.out, buildJUnitXml(outcome));
-      } else if (opts.reporter && opts.reporter !== 'json') {
-        console.error(`unknown --reporter "${opts.reporter}" — expected "junit"`);
+      // A22: `--reporter json` used to be accepted and wired to NOTHING — a CI
+      // job asking for a JSON artifact got no file and a green step. Both
+      // reporters now go through the same writer.
+      emitSuiteReport(outcome, opts.reporter, opts.out, 'spike replay');
+
+      process.exit(outcome.worst);
+    },
+  );
+
+/* ---------------------------------------------------------------------------
+ * `spike suite` (A22) — the command a suite was always missing.
+ *
+ * Until now a "suite" was `spike replay --all`: recorded scripts only. You
+ * could not write a test down. `spike.suite.json` gains `cases` — {name, url,
+ * task} in plain English — which run through the ordinary AI pass (`qaRun`),
+ * alongside the existing `entries`, which still run through deterministic $0
+ * replay. One ordered list, one storage state, one exit code.
+ * ------------------------------------------------------------------------ */
+
+type SuiteItem = { kind: 'case'; value: SuiteCase } | { kind: 'entry'; value: SuiteEntry };
+
+/** Give every case and entry a unique display label — this is what the
+ * runner, the reporters and the exit-code roll-up all key on. A case whose
+ * name collides with a recorded script's gets a `case: ` prefix rather than
+ * silently shadowing it. */
+function labelSuiteItems(cases: SuiteCase[], entries: SuiteEntry[]): Map<string, SuiteItem> {
+  const items = new Map<string, SuiteItem>();
+  const scriptNames = new Set(entries.map((e) => e.script));
+  for (const c of cases) {
+    let label = scriptNames.has(c.name) || items.has(c.name) ? `case: ${c.name}` : c.name;
+    while (items.has(label)) label = `${label}'`;
+    items.set(label, { kind: 'case', value: c });
+  }
+  for (const e of entries) {
+    let label = e.script;
+    while (items.has(label)) label = `${label}'`;
+    items.set(label, { kind: 'entry', value: e });
+  }
+  return items;
+}
+
+program
+  .command('suite')
+  .description(`run the whole suite from ${SUITE_CONFIG_FILENAME}: plain-English cases (a real AI pass) plus recorded scripts ($0 replay), rolled up into one exit code`)
+  .option('--storage-state <path>', 'load cookies + localStorage from this file before each test (auth reuse — see `spike replay --save-storage-state`). Tests marked "needsAuth" are skipped without it')
+  .option('--tag <tag>', 'run only tests tagged with this (repeatable, OR match)', collectRepeatable, [])
+  .option('--filter <substr>', 'run only tests whose name contains this substring')
+  .option('--shard <i/N>', 'run only shard i of N, deterministically partitioned by sorted name (1-based i)')
+  .option('--workers <n>', 'concurrent tests in flight (default 1)', (v) => parseInt(v, 10))
+  .option('--reporter <type>', `also write a report in this format — ${SUITE_REPORTERS.join(' | ')} (requires --out)`)
+  .option('--out <path>', 'with --reporter: file path to write the report to')
+  .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
+  .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond each test\'s own (repeatable)', collectRepeatable, [])
+  .option('--read-only', 'look-only mode: navigate and check, but never click, type or submit', false)
+  .option('--no-record', 'do not record a passing case to generated-tests/')
+  .option('--headless', 'run Chrome headless', false)
+  .option('--max-steps <n>', 'per-case driver step budget', (v) => parseInt(v, 10))
+  .option('--json', 'print slim JSON verdicts only', false)
+  .action(
+    async (opts: {
+      storageState?: string;
+      tag: string[];
+      filter?: string;
+      shard?: string;
+      workers?: number;
+      reporter?: string;
+      out?: string;
+      via?: 'cdp' | 'extension' | 'playwright';
+      allowHost: string[];
+      readOnly: boolean;
+      record: boolean;
+      headless: boolean;
+      maxSteps?: number;
+      json: boolean;
+    }) => {
+      const config = mergeConfig(opts.via, opts.allowHost);
+      const say = (line: string) => { if (!opts.json) console.log(line); };
+
+      let suiteConfig;
+      try {
+        suiteConfig = resolveSuite();
+      } catch (e) {
+        console.error(e instanceof Error ? e.message : String(e));
         process.exit(2);
       }
 
+      // needsAuth is finally CONSUMED (it was validated and read by nothing):
+      // a test that only makes sense signed in is skipped, out loud, rather
+      // than run into a guaranteed failure.
+      const hasAuth = Boolean(opts.storageState);
+      const casePick = skipsForMissingAuth(suiteConfig.cases, hasAuth);
+      const entryPick = skipsForMissingAuth(suiteConfig.entries, hasAuth);
+      const skipped = casePick.skipped.length + entryPick.skipped.length;
+      if (skipped) {
+        console.error(
+          `skipping ${skipped} test${skipped === 1 ? '' : 's'} that need a signed-in session — pass --storage-state <file> to include ${skipped === 1 ? 'it' : 'them'}: ` +
+            [...casePick.skipped.map((c) => c.name), ...entryPick.skipped.map((e) => e.script)].join(', '),
+        );
+      }
+
+      const items = labelSuiteItems(casePick.run, entryPick.run);
+      // The runner speaks SuiteEntry; `script` here is the display label and
+      // `items` says what actually runs behind it.
+      let list: SuiteEntry[] = [...items].map(([label, item]) => ({ script: label, ...(item.value.tags && { tags: item.value.tags }) }));
+      list = filterByTags(list, opts.tag);
+      list = filterByString(list, opts.filter);
+      if (opts.shard) {
+        let shard;
+        try {
+          shard = parseShard(opts.shard);
+        } catch (e) {
+          console.error(e instanceof Error ? e.message : String(e));
+          process.exit(2);
+        }
+        list = shardEntries(list, shard);
+      }
+      if (list.length === 0) {
+        console.error(`nothing to run — ${SUITE_CONFIG_FILENAME} has no matching tests (check --tag/--filter/--shard, and whether everything needs a signed-in session)`);
+        process.exit(2);
+      }
+      say(`running ${list.length} test${list.length === 1 ? '' : 's'} from ${SUITE_CONFIG_FILENAME}`);
+
+      const jsonResults: unknown[] = [];
+      const runOne = async (label: string): Promise<RunOneResult> => {
+        const item = items.get(label);
+        // A label always resolves — it came out of `items` — but a suite/setup
+        // script named in the config does not, so fall back to replaying it.
+        if (!item || item.kind === 'entry') {
+          const report = await qaReplay(item ? (item.value as SuiteEntry).script : label, {
+            heal: false,
+            ...(opts.readOnly && { readOnly: true }),
+            ...(config && { config }),
+            onProgress: opts.json ? undefined : (l) => console.log(l),
+            headless: opts.headless,
+            storageStatePath: opts.storageState,
+          });
+          return { verdict: report.verdict, report };
+        }
+        const c = item.value;
+        const report = await qaRun(c.task, c.url, {
+          maxSteps: opts.maxSteps,
+          ...(opts.readOnly && { readOnly: true }),
+          record: opts.record,
+          headless: opts.headless,
+          storageStatePath: opts.storageState,
+          ...(config && { config }),
+          onProgress: opts.json ? undefined : (l) => console.log(l),
+        });
+        // `expect: 'fail'` flips the polarity — see applyExpectation.
+        return { verdict: applyExpectation(report.verdict, c.expect), report, actualVerdict: report.verdict };
+      };
+
+      const onResult = (r: SuiteScriptResult) => {
+        const report = r.result?.report as Report | undefined;
+        const out = report ? { test: r.script, ...slimReport(report), ...(r.verdict !== report.verdict && { expectedVerdict: r.verdict }) } : { test: r.script, verdict: r.verdict, error: r.error };
+        if (opts.json) jsonResults.push(out);
+        else console.log(JSON.stringify(out, null, 2));
+      };
+
+      const outcome = await runSuite(list, runOne, {
+        workers: opts.workers,
+        setup: suiteConfig.setup,
+        teardown: suiteConfig.teardown,
+        onResult,
+        isQuarantined: (script) => isQuarantined(script),
+      });
+      if (outcome.setup) console.error(`setup ${outcome.setup.verdict === 'pass' ? 'passed' : `${outcome.setup.verdict} — skipping ${list.length} test${list.length === 1 ? '' : 's'}`}`);
+      if (suiteConfig.teardown && outcome.teardown) console.error(`teardown: ${suiteConfig.teardown} — ${outcome.teardown.verdict}`);
+
+      if (opts.json) console.log(JSON.stringify(jsonResults, null, 2));
+      else {
+        const failedTests = outcome.results.filter((r) => r.verdict !== 'pass');
+        say(`\n${outcome.results.length - failedTests.length}/${outcome.results.length} passed${failedTests.length ? ` — ${failedTests.map((r) => r.script).join(', ')}` : ''}`);
+      }
+
+      emitSuiteReport(outcome, opts.reporter, opts.out, 'spike suite');
       process.exit(outcome.worst);
     },
   );
