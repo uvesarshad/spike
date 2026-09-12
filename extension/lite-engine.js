@@ -6332,6 +6332,14 @@ init_buffer_shim();
 // src/discovery/diff.ts
 init_buffer_shim();
 
+// src/discovery/browser-crawl.ts
+init_buffer_shim();
+
+// src/discovery/site-check.ts
+init_buffer_shim();
+var LITE_CHECK_PAGES = 10;
+var LITE_CAP_NOTE = `Without the optional desktop helper a check looks at up to ${LITE_CHECK_PAGES} pages. Install it to check the whole site at once.`;
+
 // src/report/report.ts
 init_buffer_shim();
 function headlineScreenshot(r) {
@@ -6345,8 +6353,10 @@ function headlineScreenshot(r) {
   }
   return shots[shots.length - 1];
 }
+var REPORT_SCHEMA_VERSION = 1;
 function slimReport(r) {
   return {
+    schemaVersion: REPORT_SCHEMA_VERSION,
     verdict: r.verdict,
     failing_step: r.failing_step,
     console_error: r.console_error,
@@ -12598,8 +12608,27 @@ function isDeterministicAssertion(action) {
 function drainHasPageError(consoleEntries, networkEntries) {
   return consoleEntries.some((e) => e.level === "error" || e.level === "page-error") || networkEntries.some((e) => e.failed);
 }
+var ALERT_LIKE_ROLES = /* @__PURE__ */ new Set(["alert", "alertdialog", "status"]);
+function parseAxLine(line) {
+  const trimmed = line.trim();
+  const head = trimmed.match(/^\S+\s+(\S+)(?:\s+"([^"]*)")?/);
+  const statesMatch = trimmed.match(/\(([^)]*)\)\s*$/);
+  return {
+    role: head?.[1],
+    name: head?.[2],
+    states: statesMatch ? statesMatch[1].split(",").map((s) => s.trim().toLowerCase()).filter(Boolean) : void 0
+  };
+}
 function visibleErrorText(axText) {
   if (!axText) return null;
+  for (const line of axText.split("\n")) {
+    const { role, name, states } = parseAxLine(line);
+    const isAlertRole = role ? ALERT_LIKE_ROLES.has(role.toLowerCase()) : false;
+    const isInvalidControl = states?.includes("invalid") ?? false;
+    if (!isAlertRole && !isInvalidControl) continue;
+    const text = (name ?? line.trim()).trim();
+    if (text) return text;
+  }
   let fallback = null;
   for (const line of axText.split("\n")) {
     const lower = line.toLowerCase();
@@ -15979,6 +16008,17 @@ function rootCauseLines(consoleError, calls) {
   }
   return out;
 }
+var MAX_FIX_PROMPT_CHECKS = 8;
+function pageChecks(report) {
+  const out = [];
+  for (const s of report.steps) {
+    for (const v of s.invariants ?? []) {
+      out.push(v.detail);
+      if (out.length >= MAX_FIX_PROMPT_CHECKS) return out;
+    }
+  }
+  return out;
+}
 function safeRoute(url) {
   try {
     return new URL(url).pathname;
@@ -16048,6 +16088,8 @@ function buildFixPrompt(report, opts = {}) {
     if (headline && p === headline) continue;
     lines.push(`- Screenshot: ${baseName(p)}`);
   }
+  const checks = pageChecks(report);
+  for (const c of checks) lines.push(`- Automated page check: ${c}`);
   lines.push("");
   lines.push("**Likely root cause**");
   for (const rc of rootCauseLines(report.console_error, calls)) lines.push(`- ${rc}`);

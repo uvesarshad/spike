@@ -236,8 +236,17 @@ export function headlineScreenshot(r: Report): string | undefined {
   return shots[shots.length - 1];
 }
 
-export function slimReport(r: Report): Pick<Report, 'verdict' | 'failing_step' | 'console_error' | 'evidence_paths' | 'reason' | 'spendSummary'> {
+/** The version of the machine-readable result shape below. Bump it whenever a
+ * field is removed or changes meaning (adding a field does not need a bump) —
+ * A30/A35: without it, anything parsing `--json` had no way to tell one
+ * generation of the output from the next. Documented in README. */
+export const REPORT_SCHEMA_VERSION = 1;
+
+export function slimReport(
+  r: Report,
+): Pick<Report, 'verdict' | 'failing_step' | 'console_error' | 'evidence_paths' | 'reason' | 'spendSummary'> & { schemaVersion: number } {
   return {
+    schemaVersion: REPORT_SCHEMA_VERSION,
     verdict: r.verdict,
     failing_step: r.failing_step,
     console_error: r.console_error,

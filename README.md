@@ -242,6 +242,53 @@ What each add-on unlocks:
 | `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
 | `spike dashboard` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats |
 
+## The machine-readable output (`--json`)
+
+`spike run` prints the plain-English report by default — the same report the
+side panel shows — followed by the path to the full run folder. Pass `--json`
+and it prints the machine-readable result instead, and nothing else, so it can
+be piped straight into `jq` or read by a script.
+
+```jsonc
+{
+  "schemaVersion": 1,          // bumped only when a field is removed or changes meaning
+  "verdict": "fail",           // "pass" | "fail" | "uncertain"
+  "failing_step": {            // null when nothing failed
+    "index": 6,
+    "action": { "type": "click", "nodeId": "n7" },
+    "description": "click \"Place order\""
+  },
+  "console_error": "TypeError: Cannot read properties of undefined (reading 'total')",
+  "evidence_paths": ["artifacts/<runId>/report.json", "artifacts/<runId>/step-06.png"],
+  "reason": "the order could not be placed",
+  "spendSummary": {            // absent on a run that spent nothing
+    "freeCalls": 14,
+    "paidCalls": 3,
+    "totalTokens": 8535,
+    "estimatedUsd": 0.0031
+  }
+}
+```
+
+Adding a field is not a breaking change, so read it defensively and ignore keys
+you don't know. `schemaVersion` goes up only when a field disappears or changes
+meaning. `evidence_paths[0]` is always the full report for the run, which has
+every step, screenshot and model call in it.
+
+The exit code carries the verdict on its own, for a script that doesn't want to
+parse anything at all:
+
+| Exit code | Meaning |
+|---|---|
+| `0` | pass |
+| `1` | fail — the run reached a verdict and it was bad |
+| `2` | uncertain — the run finished without being able to decide |
+| `3` | couldn't run at all (no Chrome, bad flags, unreachable URL) |
+
+The same shape comes back from the `qa_run` tool over MCP, and from
+`spike replay --json` / `spike suite --reporter json` (each wrapped with the
+name of the test it belongs to).
+
 ## Registering as an MCP tool
 
 There are exactly two forms, and which one you use depends only on whether the

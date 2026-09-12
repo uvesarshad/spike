@@ -26,7 +26,7 @@ import { browserFetcher, checkInstruction, checkTargets, coverageReport, DEFAULT
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
 import { installService, uninstallService } from './service/install-service.js';
-import { buildFixPrompt } from './vibe/fix-prompt.js';
+import { buildFixPrompt, renderPlainReport } from './vibe/fix-prompt.js';
 import { dispatchFix, runWithAutoFix } from './vibe/auto-fix.js';
 import { Vault } from './vault/vault.js';
 import { SettingsStore, defaultModelFor, type ProviderId, type PlannerMode, type DebugMode, type DebugAgent, type QaSettings, type PlannerSelection } from './vibe/settings.js';
@@ -305,8 +305,16 @@ program
     }
 
     const report = await runOneTask(task as string);
-    console.log(JSON.stringify(slimReport(report), null, 2));
-    if (!opts.json) console.log(`full report: ${report.evidence_paths[0]}`);
+    // A30: the default reader of `spike run` is a person, so print the same
+    // plain-English report the panel shows. The machine-readable shape is
+    // still exactly one flag away (`--json`), and its contract — fields,
+    // schemaVersion, exit codes — is documented in the README.
+    if (opts.json) {
+      console.log(JSON.stringify(slimReport(report), null, 2));
+    } else {
+      console.log(`\n${renderPlainReport(report)}`);
+      console.log(`full report: ${report.evidence_paths[0]}`);
+    }
     // A47 (P2): 0 pass / 1 verdict fail / 2 uncertain — see cli-exit-codes.ts.
     process.exit(exitCodeForVerdict(report.verdict));
   });
