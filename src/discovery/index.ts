@@ -55,6 +55,17 @@ export {
 
 export { browserFetcher, type CrawlBrowser, type BrowserCrawlOptions } from './browser-crawl.js';
 
+export {
+  checkTargets,
+  checkInstruction,
+  renderCheckSummary,
+  DEFAULT_CHECK_PAGES,
+  LITE_CHECK_PAGES,
+  LITE_CAP_NOTE,
+  type CheckTarget,
+  type CheckSummaryInput,
+} from './site-check.js';
+
 export { parseSitemapXml, parseRobotsTxt, routesFromFileList, routesFromBundle, type RouterKind } from './static-routes.js';
 
 export {

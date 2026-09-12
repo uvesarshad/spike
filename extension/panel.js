@@ -152,6 +152,8 @@ const flowsList = $('flowsList');
 const flowsRunBtn = $('flowsRunBtn');
 const flowsCancelBtn = $('flowsCancelBtn');
 const flowResults = $('flowResults');
+const checkSiteBtn = $('checkSiteBtn');
+const checkSiteNote = $('checkSiteNote');
 
 // A14: the plain-English "what happened / whose problem / what to do" block
 // under the verdict badge, plus the one-click cross-site consent button.
@@ -469,6 +471,12 @@ function onPortMessage(msg) {
       break;
     case 'flows-error':
       onFlowsError(msg.message);
+      break;
+    case 'check-pages':
+      onCheckPages(msg);
+      break;
+    case 'check-error':
+      onCheckError(msg.message);
       break;
     case 'history':
       // A10: the worker writes the "recent tests" list and hands it over.
@@ -805,6 +813,8 @@ nanoDownloadBtn.addEventListener('click', () => {
 // Exactly one of Run / Stop is visible at a time: idle → "Run test", running →
 // "Stop test". Run is disabled until a task is typed (and a testable tab is open).
 function setBusy(value) {
+  // A24: the "Check this site" button follows the same busy state as Run.
+  setTimeout(refreshCheckSiteBtn, 0);
   busy = value;
   // running → hide Run, show Stop; idle → the reverse
   runBtn.hidden = value;
@@ -1593,6 +1603,16 @@ function renderResult(params) {
   // A7: when the run came from a pasted document, the card leads with one row
   // per flow — the single report below is the flow that most needs attention.
   renderFlowOutcome(params.flowOutcome);
+
+  // A24: a whole-site check leads with its own health + coverage sentence,
+  // above the per-page rows.
+  if (params.checkSummary) {
+    const line = document.createElement('div');
+    line.className = 'flow-result';
+    line.textContent = params.checkSummary;
+    flowResults.insertBefore(line, flowResults.firstChild);
+    flowResults.hidden = false;
+  }
 
   // A15: the failing step's screenshot (or the final one on a pass), and the
   // one-file bundle for whoever is going to fix it.
@@ -2915,9 +2935,15 @@ function runNextFlow() {
     return;
   }
   const flow = flowQueue.flows[flowQueue.index];
-  addProgressLine(`Flow ${flowQueue.index + 1} of ${flowQueue.flows.length}: ${flow.name}`);
+  // A24: a whole-site check counts pages, not flows — and it never signs in,
+  // so the saved test login has nothing to add to a look-only page visit.
+  addProgressLine(
+    flowQueue.lookOnly
+      ? `Page ${flowQueue.index + 1} of ${flowQueue.flows.length}: ${flow.name}`
+      : `Flow ${flowQueue.index + 1} of ${flowQueue.flows.length}: ${flow.name}`,
+  );
   setBusy(true);
-  postToSW(buildRunMessage(withSavedLogin(flow.task)));
+  postToSW(buildRunMessage(flowQueue.lookOnly ? flow.task : withSavedLogin(flow.task)));
 }
 
 /** One flow finished (verdict or error). Record it and move on — one broken
@@ -2963,6 +2989,13 @@ function finishFlowQueue() {
     total: q.flows.length,
     cancelled: q.cancelled,
   };
+  // A24: a check closes with its own health + coverage sentence, in place of a
+  // single test's reason line.
+  if (q.lookOnly && checkStats) {
+    base.checkSummary = renderCheckSummaryLine(q.results, checkStats);
+    checkStats = null;
+  }
+  refreshCheckSiteBtn();
   renderResult(base);
 }
 
@@ -3005,6 +3038,110 @@ function renderFlowOutcome(outcome) {
   return true;
 }
 
+// ---- A24: "Check this site" -------------------------------------------------
+//
+// The way in that asks for nothing. It finds the pages on the site, then looks
+// at each one in turn — no clicking, no typing — and rolls the answers into a
+// single "here is what's broken". The per-page tests go through exactly the
+// same queue a pasted document's flows use, so there is one place that decides
+// what the overall answer is.
+
+/** Set while a check is finding its pages, so the button can't be tapped twice
+ * and the spinner state means something. */
+let findingPages = false;
+/** Counts carried from the page-finding step into the closing sentence. */
+let checkStats = null;
+
+function setCheckNote(text) {
+  if (!checkSiteNote) return;
+  checkSiteNote.textContent = text || '';
+  checkSiteNote.hidden = !text;
+}
+
+function refreshCheckSiteBtn() {
+  if (!checkSiteBtn) return;
+  checkSiteBtn.disabled = busy || findingPages || !!flowQueue;
+}
+
+function startSiteCheck() {
+  if (busy || findingPages || flowQueue) return;
+  if (missingAiKey()) {
+    showKeyCta();
+    return;
+  }
+  if (!activeTab || !isTestableUrl(activeTab.url)) {
+    showError('Switch to the tab with your site, then come back here.');
+    return;
+  }
+  hideError();
+  setCheckNote('');
+  resultCard.hidden = true;
+  flowResults.hidden = true;
+  hideShot();
+  resetFixUi();
+  clearFeed();
+  findingPages = true;
+  refreshCheckSiteBtn();
+  addProgressLine('Looking around your site to see what pages there are…');
+  postToSW({ kind: 'check-site', url: activeTab.url });
+}
+
+/** The pages came back. Turn each one into a test and hand the list to the
+ * queue that already knows how to run a sequence and aggregate it. */
+function onCheckPages(msg) {
+  findingPages = false;
+  refreshCheckSiteBtn();
+  const pages = Array.isArray(msg.pages) ? msg.pages : [];
+  if (!pages.length) {
+    onCheckError('I could not find any pages to look at on that site.');
+    return;
+  }
+  checkStats = {
+    controlsFound: Number(msg.controlsFound) || 0,
+    capped: !!msg.capped,
+    liteCap: Number(msg.liteCap) || 0,
+  };
+  if (checkStats.capped && checkStats.liteCap) {
+    setCheckNote(`Without the optional desktop helper a check looks at up to ${checkStats.liteCap} pages. Install it to check the whole site at once.`);
+  } else if (checkStats.capped) {
+    setCheckNote('This site has more pages than one check covers — I looked at the main ones.');
+  }
+  addProgressLine(`Found ${pages.length} page${pages.length === 1 ? '' : 's'}. Looking at each one…`);
+  flowQueue = {
+    flows: pages.map((p) => ({ name: p.name || p.url, task: p.task })),
+    index: 0,
+    results: [],
+    cancelled: false,
+    // A24: a check is look-only whatever the click-and-type box says — the user
+    // asked "is anything broken", not "go press things on my site".
+    lookOnly: true,
+  };
+  refreshCheckSiteBtn();
+  runNextFlow();
+}
+
+function onCheckError(message) {
+  findingPages = false;
+  checkStats = null;
+  refreshCheckSiteBtn();
+  setBusy(false);
+  showError(message || 'I could not look around that site.');
+}
+
+/** The closing sentence of a check. Counts controls FOUND rather than pressed:
+ * a look-only check never presses anything, so "0 controls" would be true and
+ * useless — the number is there to say how much of the site was in view. */
+function renderCheckSummaryLine(results, stats) {
+  const word = (n, one) => `${n} ${n === 1 ? one : one + 's'}`;
+  const problems = results.filter((r) => r.verdict === 'fail').length;
+  const found = problems === 0
+    ? 'nothing looked broken'
+    : `${word(problems, 'problem')} — ${problems === 1 ? 'it is' : 'they are'} listed below`;
+  return `Checked ${word(results.length, 'page')} and ${word(stats.controlsFound, 'control')} on them; ${found}.`;
+}
+
+if (checkSiteBtn) checkSiteBtn.addEventListener('click', startSiteCheck);
+
 // ---- run -------------------------------------------------------------------
 /** The run message for one instruction — shared by a single test and by every
  * flow in a document run, so consent/look-only behave identically in both. */
@@ -3012,7 +3149,10 @@ function buildRunMessage(task) {
   // A1 (P0): the consent checkbox IS the look-only switch. Checked → the agent
   // may click and type on this site (its host is allow-listed for this run).
   // Unchecked → look-only mode: it navigates and checks, never interacts.
-  const lookOnly = !consentToggle.checked;
+  // A24: a check the user never wrote a word for is always look-only — it asked
+  // "is anything broken", not "go press things on my site". Otherwise the
+  // consent checkbox IS the switch.
+  const lookOnly = (flowQueue && flowQueue.lookOnly) || !consentToggle.checked;
   const runMsg = { kind: 'run', task, tabId: activeTab.id, url: activeTab.url, readOnly: lookOnly };
   lastStartedTask = task;
   if (!lookOnly) {

@@ -12,7 +12,7 @@ import { loadConfig, type QaConfig } from './config.js';
 import { exitCodeForVerdict, INFRA_ERROR_EXIT_CODE } from './cli-exit-codes.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { allocateIsolatedSession, createPlanningRouter, injectStorageState, isQuarantined, loadStorageStateFile, openBrowserSession, qaReplay, qaRun, type QaReplayResult } from './engine.js';
-import { decomposeSpec, renderFlowTable, runFlows } from './driver/spec-decompose.js';
+import { decomposeSpec, flowsFromRoutes, renderFlowTable, runFanOut, runFlows } from './driver/spec-decompose.js';
 import { headlineScreenshot, slimReport, type Report } from './report/report.js';
 import { findChrome } from './chrome/launch.js';
 import { buildDoctorReport, doctorExitCode, renderDoctorReport, type DoctorRoleProbe } from './doctor.js';
@@ -22,7 +22,7 @@ import { applyExpectation, resolveSuite, skipsForMissingAuth, SUITE_CONFIG_FILEN
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
 import { isSuiteReporter, writeSuiteReport, SUITE_REPORTERS } from './suite/reporters.js';
 import { DEFAULT_BASELINE_DIR, blessBaseline } from './assertions/differential.js';
-import { browserFetcher, coverageReport, diffAppModel, discoverApp, emptyAppModel, hasBlockingFindings, loadAppModel, saveAppModel, type AppModel, type AppModelFinding, type Fetched } from './discovery/index.js';
+import { browserFetcher, checkInstruction, checkTargets, coverageReport, DEFAULT_CHECK_PAGES, diffAppModel, discoverApp, emptyAppModel, hasBlockingFindings, loadAppModel, renderCheckSummary, saveAppModel, type AppModel, type AppModelFinding, type Fetched } from './discovery/index.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
 import { installService, uninstallService } from './service/install-service.js';
@@ -548,6 +548,106 @@ program
     }
     process.exit(broken ? 1 : 0);
   });
+
+/* A24 (second half) — `spike check <url>`: the zero-input level.
+ *
+ * Every other entry point asks the user to say what to test. This one asks
+ * nothing: walk the site, then look at each page it found, and answer "is any
+ * of this broken?". The per-page runs go through the SAME fan-out orchestrator
+ * a document run uses — one budgeted run each, one aggregated verdict — rather
+ * than a second loop with its own aggregation rule. */
+program
+  .command('check')
+  .description('check a whole site with no instructions: walk every page it can reach, look at each one, and say what is broken')
+  .argument('<url>', 'address to start from — the check stays on this site')
+  .option('--max-pages <n>', `how many pages to look at (default ${DEFAULT_CHECK_PAGES})`, (v) => parseInt(v, 10))
+  .option('--storage-state <path>', 'load a saved sign-in first, so the check sees the pages a signed-in person sees')
+  .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
+  .option('--no-browser', 'find the pages over the network instead of opening them in Chrome: faster, but it cannot sign in and cannot see a page that draws itself with JavaScript')
+  .option('--headless', 'run Chrome without a window', false)
+  .option('--json', 'machine-readable output', false)
+  .action(async (url: string, opts: { maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; json: boolean }) => {
+    const root = process.cwd();
+    const maxPages = opts.maxPages && opts.maxPages > 0 ? opts.maxPages : DEFAULT_CHECK_PAGES;
+    const progress = opts.json ? undefined : (l: string) => console.error(l);
+
+    let model: AppModel;
+    try {
+      model = await buildSiteMap(
+        url,
+        {
+          // Find a few more pages than we will look at, so the page list is a
+          // choice rather than whatever the crawl happened to stop on.
+          maxPages: maxPages * 2,
+          browser: opts.browser,
+          via: opts.via,
+          storageState: opts.storageState,
+          headless: opts.headless,
+        },
+        progress,
+      );
+    } catch (e) {
+      console.error(`I could not walk that site: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
+    saveAppModel(model, root);
+
+    const targets = checkTargets(model, url, maxPages);
+    if (!targets.length) {
+      console.error('I could not find any pages to look at on that site.');
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
+    const capped = targets.length < countVisitableRoutes(model, url);
+    progress?.(`Found ${targets.length} page${targets.length === 1 ? '' : 's'}. Looking at each one…`);
+
+    // The orchestrator maps units to flows 1:1 in order, so the address for
+    // flow i is the target at i — which is how each run knows where to start.
+    const flows = flowsFromRoutes(
+      targets.map((t) => ({ url: t.url, name: t.name })),
+      { baseUrl: url, maxFlows: targets.length, instruction: (_r, address) => checkInstruction(address) },
+    );
+
+    const outcome = await runFanOut(flows, {
+      runFlow: (flow, i) =>
+        qaRun(flow.task, targets[i]?.url ?? url, {
+          readOnly: true, // a check nobody asked for must never press anything
+          record: false,
+          replay: false,
+          headless: opts.headless,
+          storageStatePath: opts.storageState,
+          ...(opts.via && { config: { via: opts.via } }),
+        }),
+      ...(opts.storageState && { storageStatePath: opts.storageState }),
+      onProgress: progress,
+    });
+
+    const findings = model.findings ?? [];
+    const cov = coverageReport(model);
+    const problems = outcome.flows.filter((f) => f.verdict === 'fail').length;
+    const summary = renderCheckSummary({
+      pagesChecked: outcome.coverage.flowsAttempted,
+      controlsFound: cov.interactiveElements.total,
+      problems,
+      capped,
+    });
+
+    if (opts.json) {
+      console.log(JSON.stringify({ summary, verdict: outcome.verdict, flows: outcome.flows, coverage: outcome.coverage, findings }, null, 2));
+    } else {
+      console.log('');
+      console.log(renderFlowTable(outcome));
+      console.log('');
+      console.log(summary);
+      for (const line of renderFindings(findings)) console.log(line);
+    }
+    process.exit(hasBlockingFindings(findings) ? 1 : exitCodeForVerdict(outcome.verdict));
+  });
+
+/** How many mapped routes could have been looked at, so the summary can say
+ * honestly whether the page cap cut the check short. */
+function countVisitableRoutes(model: AppModel, baseUrl: string): number {
+  return checkTargets(model, baseUrl, Number.MAX_SAFE_INTEGER).length;
+}
 
 program
   .command('coverage')

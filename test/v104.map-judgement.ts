@@ -1,4 +1,4 @@
-/* v103 — `spike map` judges what it crawls, and can see a client-rendered app (A24).
+/* v104 — `spike map` judges what it crawls, and can see a client-rendered app (A24).
  *
  * Mapping used to be descriptive only: it recorded an HTTP status for every
  * page and never looked at it again, so a site where half the pages 500 mapped
@@ -260,7 +260,7 @@ function fakeFetcher(pages: Record<string, { status?: number; html?: string }>) 
 
 // ---- summary ---------------------------------------------------------------
 const failed = checks.filter(([, ok]) => !ok);
-console.log(`\nv103: ${checks.length - failed.length}/${checks.length} checks passed`);
+console.log(`\nv104: ${checks.length - failed.length}/${checks.length} checks passed`);
 if (failed.length) {
   console.error(`FAILED: ${failed.map(([l]) => l).join(', ')}`);
   process.exit(1);

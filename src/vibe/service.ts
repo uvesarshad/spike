@@ -62,7 +62,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { BridgeServer } from '../bridge/bridge-server.js';
-import { createPlanningRouter, qaReplay, qaRun, type QaReplayOptions, type QaRunOptions } from '../engine.js';
+import { createPlanningRouter, openBrowserSession, qaReplay, qaRun, type QaReplayOptions, type QaRunOptions } from '../engine.js';
 import { listScripts, loadScript } from '../recorder/script.js';
 import { loadConfig } from '../config.js';
 import { decomposeSpec } from '../driver/spec-decompose.js';
@@ -71,7 +71,17 @@ import { makeZip, type ZipEntry } from '../report/zip.js';
 import { renderPlainReport, buildFixPrompt, dataUri, MAX_FIX_PROMPT_IMAGE_BYTES } from './fix-prompt.js';
 import { explainReason } from './reason-text.js';
 import { dispatchFix, isAutoFixAcceptedFor, detectFixAgent, NO_PROJECT_FOLDER_MESSAGE } from './auto-fix.js';
-import { loadAppModel, coverageReport, type AppModel } from '../discovery/index.js';
+import {
+  loadAppModel,
+  saveAppModel,
+  coverageReport,
+  discoverApp,
+  browserFetcher,
+  checkTargets,
+  checkInstruction,
+  DEFAULT_CHECK_PAGES,
+  type AppModel,
+} from '../discovery/index.js';
 import {
   SettingsStore,
   defaultModelFor,
@@ -554,6 +564,47 @@ export class VibeService {
       };
     });
 
+    // vibe.check.site — A24: the "Check this site" button's first half.
+    //
+    // Walks the site in the user's own Chrome (their sign-in comes along, and
+    // a page that draws itself with JavaScript is seen as it really is), then
+    // hands back the list of pages to look at and what to ask about each one.
+    // The panel then runs them through the very machinery it already uses for
+    // a document's flow list — one budgeted run per page, one verdict — so
+    // there is no second runner and no second aggregation rule to disagree.
+    //
+    // Nothing is driven beyond the walk itself: the check is look-only, and
+    // the pages open in a tab of their own rather than steering the tab the
+    // user is reading.
+    this.bridge.onRequest('vibe.check.site', async (params, ctx) => {
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.check.site: unauthenticated client');
+      if (this.busy) throw new Error('a test is already running');
+      const url = String((params as { url?: unknown }).url ?? '');
+      if (!url) throw new Error('vibe.check.site requires { url }');
+      const rawMax = (params as { maxPages?: unknown }).maxPages;
+      const maxPages = typeof rawMax === 'number' && Number.isFinite(rawMax) && rawMax > 0 ? Math.floor(rawMax) : DEFAULT_CHECK_PAGES;
+      const target = ctx?.clientId !== undefined ? { clientId: ctx.clientId } : undefined;
+      const progress = (line: string) => this.bridge.sendEvent('vibe.progress', { line }, target);
+
+      this.busy = true;
+      try {
+        progress('Looking around your site…');
+        const model = await this.crawlSite(url, maxPages * 2, ctx?.clientId);
+        saveAppModel(model, process.cwd());
+        const targets = checkTargets(model, url, maxPages);
+        const everything = checkTargets(model, url, Number.MAX_SAFE_INTEGER);
+        const cov = coverageReport(model);
+        return {
+          pages: targets.map((t) => ({ url: t.url, name: t.name, task: checkInstruction(t.url) })),
+          controlsFound: cov.interactiveElements.total,
+          capped: targets.length < everything.length,
+          findings: model.findings ?? [],
+        };
+      } finally {
+        this.busy = false;
+      }
+    });
+
     // vibe.coverage.get — A51: read-only per-route covered/uncovered breakdown
     // from the same ledger, via discovery/coverage.ts's coverageReport() (never
     // hand-rolled here). Same host-scoping contract as vibe.map.get above.
@@ -791,6 +842,26 @@ export class VibeService {
    * re-engages the driver on the original task when the replay fails and
    * re-emits the script (that part DOES spend model budget, which is why the
    * panel calls it "Repair" and keeps it a separate button). */
+  /** A24: walk a site in the user's attached Chrome. Opens a tab of its own
+   * (the user's cookies still apply — they are the profile's, not the tab's)
+   * so the page they are reading is never steered out from under them. */
+  private async crawlSite(url: string, maxPages: number, clientId?: number): Promise<AppModel> {
+    const session = await openBrowserSession(
+      { via: 'extension' as const },
+      { bridge: this.bridge, ...(clientId !== undefined && { clientId }) },
+    );
+    try {
+      return await discoverApp({
+        baseUrl: url,
+        fetcher: browserFetcher(session.browser, { sameOrigin: new URL(url).origin }),
+        previousModel: loadAppModel(process.cwd()),
+        crawl: { maxPages },
+      });
+    } finally {
+      await session.close().catch(() => {});
+    }
+  }
+
   private async executeReplay(name: string, heal: boolean, tabId?: number, clientId?: number): Promise<void> {
     const controller = new AbortController();
     this.activeRun = controller;

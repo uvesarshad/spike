@@ -826,6 +826,90 @@ async function runLiteFromPanel(port, msg) {
   }
 }
 
+
+/* ---------------------------------------------------------------------------
+ * A24: "Check this site" without the desktop helper.
+ *
+ * The helper walks the site in a real Chrome. Without one, the worker asks the
+ * site for its pages directly — those requests carry the user's cookies, so a
+ * signed-in site still answers as itself — and follows the links it finds one
+ * hop at a time. It cannot see a page that draws itself with JavaScript, and
+ * it stops early on purpose, which is what the cap note tells the user.
+ * ------------------------------------------------------------------------ */
+
+/** Pages one check looks at when there is no desktop helper. */
+const LITE_CHECK_PAGES = 10;
+
+/** Kept character-for-character in step with src/discovery/site-check.ts's
+ * checkInstruction — both are the words one page is asked to check, and a
+ * check must ask the same question whether or not the helper is installed. */
+function checkInstructionFor(address) {
+  return (
+    `Open ${address} and look at it. Do not click, type or submit anything. ` +
+    'Report a problem if the page fails to load, shows an error message, has text or images that are obviously broken or missing, ' +
+    'or has buttons and links that clearly lead nowhere. If it looks fine, say so.'
+  );
+}
+
+/** Same-site links in a page's markup, absolute and de-fragmented. */
+function sameSiteLinks(html, baseUrl, origin) {
+  const out = [];
+  const re = /<a\b[^>]*\bhref\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi;
+  let m;
+  while ((m = re.exec(html))) {
+    const raw = m[1].replace(/^['"]|['"]$/g, '').trim();
+    if (!raw || raw.startsWith('#') || /^(javascript|mailto|tel):/i.test(raw)) continue;
+    try {
+      const u = new URL(raw, baseUrl);
+      if (u.origin !== origin) continue;
+      u.hash = '';
+      out.push(u.toString());
+    } catch { /* not a usable address */ }
+  }
+  return out;
+}
+
+/** Rough count of the things on a page a person can operate. Only ever used
+ * for the "and N controls" half of the summary sentence. */
+function countControls(html) {
+  const m = html.match(/<(a\b[^>]*\bhref|button|input|select|textarea)\b/gi);
+  return m ? m.length : 0;
+}
+
+async function findPagesInBrowser(seedUrl, maxPages) {
+  const origin = new URL(seedUrl).origin;
+  const queue = [seedUrl];
+  const seen = new Set();
+  const pages = [];
+  let controlsFound = 0;
+  let capped = false;
+
+  while (queue.length) {
+    if (pages.length >= maxPages) { capped = queue.length > 0; break; }
+    const url = queue.shift();
+    if (seen.has(url)) continue;
+    seen.add(url);
+    let html = '';
+    try {
+      const res = await fetch(url, { credentials: 'include', redirect: 'follow' });
+      const type = res.headers.get('content-type') || '';
+      if (!type.includes('html')) continue;
+      html = await res.text();
+    } catch {
+      continue; // a dead end, not a reason to abandon the check
+    }
+    const u = new URL(url);
+    pages.push({ url, name: u.pathname || '/', task: checkInstructionFor(url) });
+    controlsFound += countControls(html);
+    for (const link of sameSiteLinks(html, url, origin)) {
+      if (!seen.has(link)) queue.push(link);
+    }
+  }
+  if (!pages.length) throw new Error('I could not reach any pages on that site.');
+  return { pages, controlsFound, capped };
+}
+
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'vibe-panel') return;
   panelPorts.add(port);
@@ -976,6 +1060,42 @@ chrome.runtime.onConnect.addListener((port) => {
             });
           } catch (e) {
             port.postMessage({ kind: 'flows-error', message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        // A24: "Check this site" — the zero-input level. Find the pages worth
+        // looking at; the panel then runs them one at a time through the same
+        // machinery a document's flow list uses.
+        case 'check-site': {
+          const url = typeof msg.url === 'string' ? msg.url : '';
+          if (!url) { port.postMessage({ kind: 'check-error', message: 'Open the site you want checked in this tab first.' }); break; }
+          if (bridgeHealthy()) {
+            try {
+              const r = await sendRequest('vibe.check.site', { url });
+              port.postMessage({
+                kind: 'check-pages',
+                pages: (r && Array.isArray(r.pages)) ? r.pages : [],
+                controlsFound: (r && r.controlsFound) || 0,
+                capped: !!(r && r.capped),
+              });
+            } catch (e) {
+              port.postMessage({ kind: 'check-error', message: String(e && e.message ? e.message : e) });
+            }
+            break;
+          }
+          // No desktop helper. A check then runs entirely inside the browser,
+          // with no place to park a long job, so it stays short and says so.
+          try {
+            const found = await findPagesInBrowser(url, LITE_CHECK_PAGES);
+            port.postMessage({
+              kind: 'check-pages',
+              pages: found.pages,
+              controlsFound: found.controlsFound,
+              capped: found.capped,
+              liteCap: LITE_CHECK_PAGES,
+            });
+          } catch (e) {
+            port.postMessage({ kind: 'check-error', message: String(e && e.message ? e.message : e) });
           }
           break;
         }

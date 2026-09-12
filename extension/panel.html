@@ -400,6 +400,15 @@
         <button id="runBtn" class="run-btn" type="button">Run test</button>
         <button id="stopBtn" class="stop-btn" type="button" hidden>Stop</button>
       </div>
+      <!-- A24: the no-input way in. Nothing to write, nothing to pick: it finds
+           the pages on the site and looks at each one. -->
+      <div class="run-row">
+        <button id="checkSiteBtn" class="suggestion-card" type="button">
+          <span class="suggestion-emoji" data-icon="search"></span>
+          <span class="suggestion-text">Check this site — look at every page and tell me what's broken</span>
+        </button>
+      </div>
+      <div id="checkSiteNote" class="run-note" hidden></div>
       <!-- A20: Chrome raises its own "started debugging this browser" bar the
            moment a test attaches. Nothing explained it, and closing it kills
            the run. Said once, for the first three tests only. -->
