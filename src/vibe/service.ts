@@ -395,6 +395,18 @@ export class VibeService {
       // detectFixAgent) so the panel can decide client-side whether to offer
       // auto-fix at all.
       const fixAgentAvailable = Boolean(await detectFixAgent());
+      // A13: the panel used to echo the user's pin for the model that clicks,
+      // which is a lie whenever that pin can't actually run here (no key, CLI
+      // not installed, the on-device model on a machine that can't host it) —
+      // the ladder quietly falls through to something else, often a paid
+      // model, and nothing said so. Ask the router which adapter really leads
+      // the per-step role. Never fatal: an unanswerable probe just omits it.
+      let resolvedNavigatorName: string | undefined;
+      try {
+        resolvedNavigatorName = await createPlanningRouter({}).resolveLead('plan-step');
+      } catch {
+        resolvedNavigatorName = undefined;
+      }
       const providers = PROVIDER_ORDER.map((id) => {
         const vaultName = VAULT_KEY_FOR[id];
         const needsKey = Boolean(vaultName);
@@ -420,6 +432,9 @@ export class VibeService {
       return {
         planner: settings.planner,
         navigator: settings.navigator,
+        // A13: same field (and same meaning) the browser-only path already
+        // reports — what will ACTUALLY drive the per-step role.
+        resolvedNavigatorName,
         debugMode: settings.debugMode,
         debugAgent: settings.debugAgent,
         videoAssertions: settings.videoAssertions ?? false,

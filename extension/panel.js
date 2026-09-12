@@ -548,6 +548,12 @@ function setBridge(msg) {
   refreshKeyGate();
 }
 
+/* A13: what the header says when the on-device model can't run here. It used to
+ * promise a "cloud free tier" — there has not been one since the free CLI quota
+ * closed, and the browser-only path never had one at all, so the sentence was
+ * telling people their tests were free while they were being billed. */
+const NO_ONDEVICE_AI_LINE = "On-device AI isn't available on this computer — tests will use your AI key.";
+
 function setNano(availability) {
   const a = String(availability || '').toLowerCase();
   nanoAvailability = a;
@@ -572,17 +578,19 @@ function setNano(availability) {
       showDownloadBtn = !nanoDownloading;
       break;
     case 'downloading':
-      text = 'On-device AI: downloading — testing still works via cloud free tier';
+      // A13: there is no free rung left to fall back to — the honest line is
+      // that the run is paid for with the user's own key until this finishes.
+      text = 'On-device AI: downloading — until it\'s ready, tests will use your AI key';
       showOnboard = true;
       showDownloadBtn = false;
       break;
     case 'unavailable':
-      text = 'On-device AI: unavailable — testing still works via cloud free tier';
+      text = NO_ONDEVICE_AI_LINE;
       showOnboard = true;
       showGate = true;
       break;
     default:
-      text = 'On-device AI: unavailable — testing still works via cloud free tier';
+      text = NO_ONDEVICE_AI_LINE;
       break;
   }
   nanoLine.textContent = text;
@@ -627,7 +635,7 @@ function renderNanoProgress(status) {
       ? `Downloading on-device AI… (${s.state})`
       : 'Downloading on-device AI…';
   }
-  nanoLine.textContent = 'On-device AI: downloading — testing still works via cloud free tier';
+  nanoLine.textContent = "On-device AI: downloading — until it's ready, tests will use your AI key";
 }
 
 function hideNanoProgress() {
@@ -1655,7 +1663,17 @@ function refreshAccordionSummaries() {
   if (navSum) {
     const info = providerInfo(selectedNavProvider());
     const label = (info && info.id) || selectedNavProvider();
-    navSum.textContent = selectedNavModel() || defaultModelFor(info, selectedNavMode(), 'navigator') || label;
+    const pinned = selectedNavModel() || defaultModelFor(info, selectedNavMode(), 'navigator') || label;
+    // A13: a pin that can't run here (no key, a command-line tool that isn't
+    // installed, on-device AI on a machine that can't host it) is skipped and
+    // something else — often a model you pay for — drives instead. Say which,
+    // rather than showing a choice that isn't in effect.
+    const resolved = currentConfig && currentConfig.resolvedNavigatorName;
+    const differs =
+      resolved &&
+      String(resolved).toLowerCase() !== String(selectedNavProvider()).toLowerCase() &&
+      String(resolved).toLowerCase() !== String(pinned).toLowerCase();
+    navSum.textContent = differs ? `${pinned} · actually using: ${resolved}` : pinned;
   }
   if (brainSum) {
     if (setSameAsNav.checked) { brainSum.textContent = 'same as Navigator'; }

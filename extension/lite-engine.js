@@ -5261,6 +5261,17 @@ var ModelRouter = class {
     if (cap === "plan-goals") return this.plannerAdapter ?? this.pinnedAdapter;
     return this.pinnedAdapter;
   }
+  /** A13: which adapter will ACTUALLY lead `cap` — as opposed to what the user
+   * pinned. A pin that isn't among the live candidates (a model with no key,
+   * a CLI that isn't installed, the on-device model on a machine that can't
+   * run it) is simply dropped by candidates(), and the ladder falls through to
+   * something else. Showing the pin in that situation tells the user a model
+   * is driving that isn't, and hides the fact that a paid one is. undefined
+   * means nothing at all can serve the role. */
+  async resolveLead(cap) {
+    const ladder = await this.candidates(cap);
+    return ladder[0]?.name;
+  }
   async candidates(cap) {
     const supported = this.adapters.filter((a) => a.supports(cap));
     const ready = await Promise.all(supported.map((a) => a.available().catch(() => false)));
@@ -5474,7 +5485,7 @@ var ModelRouter = class {
     const ladder = await this.candidates(cap);
     if (ladder.length === 0) {
       throw new Error(
-        "no planner available \u2014 install the Google CLI (free quota) or set GEMINI_API_KEY (BYOK)"
+        "no planner available \u2014 install the claude or codex CLI, or set ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY"
       );
     }
     let lastError = null;

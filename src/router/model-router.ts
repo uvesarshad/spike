@@ -318,6 +318,18 @@ export class ModelRouter {
     return this.pinnedAdapter;
   }
 
+  /** A13: which adapter will ACTUALLY lead `cap` — as opposed to what the user
+   * pinned. A pin that isn't among the live candidates (a model with no key,
+   * a CLI that isn't installed, the on-device model on a machine that can't
+   * run it) is simply dropped by candidates(), and the ladder falls through to
+   * something else. Showing the pin in that situation tells the user a model
+   * is driving that isn't, and hides the fact that a paid one is. undefined
+   * means nothing at all can serve the role. */
+  async resolveLead(cap: Capability): Promise<string | undefined> {
+    const ladder = await this.candidates(cap);
+    return ladder[0]?.name;
+  }
+
   private async candidates(cap: Capability): Promise<ModelAdapter[]> {
     // Probe availability in PARALLEL (the ladder is ~9 adapters; serial awaits —
     // some spawning a CLI or doing a localhost fetch — needlessly stack up). Order
@@ -567,8 +579,11 @@ export class ModelRouter {
   ): Promise<unknown> {
     const ladder = await this.candidates(cap);
     if (ladder.length === 0) {
+      // A13: the old text pointed at the Google CLI's free quota, which ended on
+      // 2026-06-18 — following it got the user nowhere. Name the routes that
+      // actually work today.
       throw new Error(
-        'no planner available — install the Google CLI (free quota) or set GEMINI_API_KEY (BYOK)',
+        'no planner available — install the claude or codex CLI, or set ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY',
       );
     }
     let lastError: Error | null = null;
