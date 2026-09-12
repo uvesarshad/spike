@@ -16178,20 +16178,22 @@ async function runLite(opts) {
       const nano = new LiteNano(opts.nanoDeps);
       const a = await nano.availability().catch(() => "unavailable");
       if (a === "available") {
-        progress("rung 0: Gemini Nano available \u2014 warming up");
+        progress("On-device AI is ready \u2014 warming it up (free)");
         await nano.warmup().catch(() => {
         });
         adapters.push(new NanoAdapter(nano));
       } else {
-        progress(`rung 0: Gemini Nano ${a} \u2014 visual checks fall to the cloud model`);
+        progress(`On-device AI isn't available \u2014 "does this look right?" checks will use your AI key`);
       }
     }
     const { adapters: ladder, plannerName, navigatorName } = buildLiteLadder(opts.keys, opts.planner, opts.navigator);
     adapters.push(...ladder);
-    progress(`navigator: ${navigatorName ?? opts.navigator.provider} \xB7 brain: ${plannerName ?? opts.planner.provider} (BYOK; lite mode \u2014 no daemon)`);
+    progress(
+      `Using ${navigatorName ?? opts.navigator.provider} to click and type, ${plannerName ?? opts.planner.provider} to plan \u2014 both on your AI key`
+    );
     const router = new ModelRouter(adapters, { navigatorAdapter: navigatorName, plannerAdapter: plannerName });
     const artifacts = new BrowserArtifactStore();
-    progress(`run ${artifacts.runId}: "${opts.task}" on ${opts.url}`);
+    progress(`Testing "${opts.task}" on ${opts.url}`);
     const report = await runDriverLoop(browser, router, artifacts, opts.task, opts.url, {
       maxSteps: opts.maxSteps ?? 40,
       onStep: opts.onStep,
@@ -16207,7 +16209,9 @@ async function runLite(opts) {
       // moment of typing and never written anywhere.
       ...opts.secrets && { vault: { get: (name) => opts.secrets?.[name] || void 0 } }
     });
-    progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1e3)}s)`);
+    progress(
+      `Done \u2014 ${report.verdict} after ${report.steps.length} steps (${Math.round(report.durationMs / 1e3)}s)`
+    );
     const bundle = artifacts.exportBundle();
     const done = {
       ...slimReport(report),

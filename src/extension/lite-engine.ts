@@ -301,22 +301,27 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       const nano = new LiteNano(opts.nanoDeps);
       const a = await nano.availability().catch(() => 'unavailable' as const);
       if (a === 'available') {
-        progress('rung 0: Gemini Nano available — warming up');
+        // A18: everything the user reads here is plain English — these lines
+        // scroll past during a run and used to leak internal ladder vocabulary.
+        progress('On-device AI is ready — warming it up (free)');
         await nano.warmup().catch(() => {});
         adapters.push(new NanoAdapter(nano));
       } else {
-        progress(`rung 0: Gemini Nano ${a} — visual checks fall to the cloud model`);
+        progress("On-device AI isn't available — \"does this look right?\" checks will use your AI key");
       }
     }
 
     // rung 2 — BYOK ladder, with both pins: navigator (plan-step) + brain (plan-goals).
     const { adapters: ladder, plannerName, navigatorName } = buildLiteLadder(opts.keys, opts.planner, opts.navigator);
     adapters.push(...ladder);
-    progress(`navigator: ${navigatorName ?? opts.navigator.provider} · brain: ${plannerName ?? opts.planner.provider} (BYOK; lite mode — no daemon)`);
+    progress(
+      `Using ${navigatorName ?? opts.navigator.provider} to click and type, ` +
+        `${plannerName ?? opts.planner.provider} to plan — both on your AI key`,
+    );
 
     const router = new ModelRouter(adapters, { navigatorAdapter: navigatorName, plannerAdapter: plannerName });
     const artifacts = new BrowserArtifactStore();
-    progress(`run ${artifacts.runId}: "${opts.task}" on ${opts.url}`);
+    progress(`Testing "${opts.task}" on ${opts.url}`);
 
     const report = await runDriverLoop(browser, router, artifacts, opts.task, opts.url, {
       maxSteps: opts.maxSteps ?? 40,
@@ -333,7 +338,10 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       // moment of typing and never written anywhere.
       ...(opts.secrets && { vault: { get: (name: string) => opts.secrets?.[name] || undefined } }),
     });
-    progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);
+    progress(
+      `Done — ${report.verdict} after ${report.steps.length} steps ` +
+        `(${Math.round(report.durationMs / 1000)}s)`,
+    );
 
     const bundle = artifacts.exportBundle();
     const done: Record<string, unknown> = {

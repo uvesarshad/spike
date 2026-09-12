@@ -422,6 +422,16 @@ body {
   cursor: pointer;
 }
 .consent-text { flex: 1; min-width: 0; }
+/* A18: spend cap, promoted next to the click-and-type switch. */
+.spend-row { cursor: default; }
+.spend-input-wrap {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.spend-currency { color: var(--ink-2); font-size: 12px; }
+.spend-input { max-width: 5.5rem; }
 .consent-note {
   margin-top: 6px;
   font-size: 11px;

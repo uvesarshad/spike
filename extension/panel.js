@@ -565,6 +565,9 @@ function setBridge(msg) {
   // daemon-gated UI: the auto-fix toggle warning + the download-clip button
   refreshAutoFixGate();
   refreshClipVisibility();
+  // A18: which model choices are even offered depends on the helper being there
+  // to run them, so a connect/disconnect has to re-filter an open Settings screen.
+  if (settingsModal && !settingsModal.hidden) refreshSettingsVisibility();
 
   const healthyNow = bridgeHealthy();
   if (healthyNow && !wasBridgeHealthyForSiteMap) {
@@ -1712,21 +1715,52 @@ function defaultModelFor(info, mode, role) {
   return info.apiModelDefault || 'default model';
 }
 
+/** A18: without Spike Core (the optional desktop helper) the browser-only path
+ * can't drive a locally-installed command-line tool or a local model server, so
+ * offering those choices only sells a run that limps to "not sure". Hide the
+ * ones it can't run — `liteUsable` on each provider says which. On-device AI is
+ * the exception: it is flagged unusable only as the model that PLANS, and the
+ * Navigator card is exactly where it belongs. */
+function offerOnlyRunnableChoices(refs) {
+  const helper = bridgeHealthy();
+  let movedOff = false;
+  refs.provider.querySelectorAll('option').forEach((opt) => {
+    const info = providerInfo(opt.value);
+    const runnable = helper || opt.value === 'nano' || !info || info.liteUsable !== false;
+    opt.hidden = !runnable;
+    opt.disabled = !runnable;
+    if (!runnable && refs.provider.value === opt.value) movedOff = true;
+  });
+  // a saved pin we just hid would otherwise stay selected but invisible
+  if (movedOff) {
+    const first = Array.from(refs.provider.options).find((o) => !o.disabled);
+    if (first) refs.provider.value = first.value;
+  }
+  return helper;
+}
+
 /** Show/hide the mode radios, key row, model placeholder and (nav-only) nano
  * note/download for ONE card, per its current selection. */
 function refreshCardVisibility(refs) {
+  const helper = offerOnlyRunnableChoices(refs);
   const provider = refs.provider.value;
   const info = providerInfo(provider);
   const modes = (info && Array.isArray(info.modes)) ? info.modes : [];
 
   // mode radios: hide entirely for single-mode providers (nano, ollama, openrouter)
   const hasApi = modes.includes('api');
-  const hasCli = modes.includes('cli');
+  // A18: a command-line tool needs Spike Core to run it; without one, don't
+  // offer the choice at all (it fails only once a run is already going).
+  const hasCli = modes.includes('cli') && helper;
   const showModes = hasApi && hasCli;
   refs.modeRow.hidden = !showModes;
   refs.modeRow.querySelectorAll(`input[name="${refs.modeName}"]`).forEach((el) => {
     if (el.value === 'api') el.disabled = !hasApi;
     if (el.value === 'cli') el.disabled = !hasCli;
+    // a saved "command-line tool" pin with no Spike Core to run it would stay
+    // silently checked behind a hidden row and hide the key box with it
+    if (el.value === 'cli' && !hasCli && el.checked) el.checked = false;
+    if (el.value === 'api' && hasApi && !hasCli) el.checked = true;
   });
 
   const mode = chosenMode(provider, refs.modeName);
@@ -1776,7 +1810,10 @@ function refreshSameAsNav() {
   if (same) {
     const info = providerInfo(selectedNavProvider());
     const providerLabel = (info && info.id) || selectedNavProvider();
-    const modelLabel = selectedNavModel() || defaultModelFor(info, selectedNavMode(), 'navigator');
+    // A18: a BLANK model box does NOT mean "the Navigator's model" — the engine
+    // resolves an empty model per ROLE, so the brain lands on the smart default
+    // (Sonnet), not on the navigator's cheap one. Say what will actually run.
+    const modelLabel = selectedNavModel() || defaultModelFor(info, selectedNavMode(), 'brain');
     setSameAsNavNoteText.textContent =
       `Brain will use the Navigator's setup: ${providerLabel} (${selectedNavMode()}, ${modelLabel}).`;
   }
@@ -2225,6 +2262,18 @@ if (setNavNanoDownload) {
     nanoDownloading = true;      // keep it hidden across re-renders until ready
     setNavNanoDownload.hidden = true;
     postToSW({ kind: 'nano-download' });
+  });
+}
+
+// A18: the spend cap lives on the main screen now, not inside the Settings
+// screen's Save, so it has to persist itself. `config-set` is merged field by
+// field on both paths (desktop helper and browser-only), so sending the one
+// field is safe.
+if (setSpendCap) {
+  setSpendCap.addEventListener('change', () => {
+    const raw = setSpendCap.value.trim();
+    const n = Number(raw);
+    postToSW({ kind: 'config-set', spendCapUsd: raw !== '' && n > 0 ? n : 0 });
   });
 }
 

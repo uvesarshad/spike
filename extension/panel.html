@@ -212,14 +212,14 @@
         <div class="settings-acc" data-acc="debug">
           <button id="accDebugHead" class="settings-acc-head" type="button" aria-expanded="false" aria-controls="accDebugBody">
             <span class="settings-acc-caret" data-icon="chevron"></span>
-            <span class="settings-acc-title">Debugging</span>
+            <span class="settings-acc-title">Safety &amp; cost</span>
             <span id="accDebugSummary" class="settings-acc-summary"></span>
           </button>
           <div id="accDebugBody" class="settings-acc-body" hidden>
             <label id="setAutoFixRow" class="settings-toggle-row" for="setAutoFix">
               <span class="settings-toggle-copy">
                 <span class="settings-toggle-label">Auto-fix with my coding agent</span>
-                <span class="settings-toggle-sub">Off: show me a prompt to paste. On: hand the fix to a coding agent (needs Spike Core).</span>
+                <span class="settings-toggle-sub">Off: I write you a fix to paste into your coding tool. On: I hand the fix straight to your coding agent (needs Spike Core, the optional desktop helper).</span>
               </span>
               <span class="switch">
                 <input id="setAutoFix" class="switch-input" type="checkbox" />
@@ -233,8 +233,8 @@
 
             <label class="settings-toggle-row" for="setVideoAssert">
               <span class="settings-toggle-copy">
-                <span class="settings-toggle-label">Video assertions</span>
-                <span class="settings-toggle-sub">Off: judge a screenshot (fast, $0-first). On: record a short clip for "looks right" checks and send it to a paid vision model — slower and costs money. Use for transient UI (toasts, animations).</span>
+                <span class="settings-toggle-label">Check moving things with a short video</span>
+                <span class="settings-toggle-sub">Off: I judge "does this look right?" from a screenshot — faster and cheaper. On: I record a few seconds of video instead and send it to your AI key — slower and costs more. Turn it on for things that flash by, like pop-up messages and animations.</span>
               </span>
               <span class="switch">
                 <input id="setVideoAssert" class="switch-input" type="checkbox" />
@@ -244,21 +244,13 @@
 
             <label class="settings-toggle-row" for="setStrictOracles">
               <span class="settings-toggle-copy">
-                <span class="settings-toggle-label">Deterministic verdicts (strict oracle mode)</span>
-                <span class="settings-toggle-sub">On (recommended): a broken invariant, a failed assertion, or a metamorphic-relation mismatch forces the verdict to fail — the model can't hallucinate a pass. Off: the model's own judgment always wins.</span>
+                <span class="settings-toggle-label">Strict checks</span>
+                <span class="settings-toggle-sub">On (recommended): a real error on the page always counts as a fail, even if the AI thinks it passed. Off: the AI's own judgment decides on its own.</span>
               </span>
               <span class="switch">
                 <input id="setStrictOracles" class="switch-input" type="checkbox" />
                 <span class="switch-track"><span class="switch-thumb"></span></span>
               </span>
-            </label>
-
-            <label class="settings-toggle-row" for="setSpendCap">
-              <span class="settings-toggle-copy">
-                <span class="settings-toggle-label">Spend cap (USD)</span>
-                <span class="settings-toggle-sub">Optional. Stop a run once its estimated model spend passes this amount. Leave blank for no cap. Estimate only — not exact billing.</span>
-              </span>
-              <input id="setSpendCap" class="settings-input" type="number" min="0" step="0.10" inputmode="decimal" placeholder="no cap" style="max-width:6.5rem" />
             </label>
 
             <div id="connectApp" class="connect-app" hidden>
@@ -366,6 +358,19 @@
           <small>Off = look-only mode: I look and report, never click or type.</small></span>
       </label>
       <div id="consentNote" class="consent-note" hidden></div>
+
+      <!-- A18: the spend cap sits next to the click-and-type switch, because the
+           two together are "how far may this go?" — not buried in a settings
+           accordion. Saved the moment it changes (same config-set the Settings
+           screen sends, one field at a time). -->
+      <label class="consent-row spend-row" for="setSpendCap">
+        <span class="consent-text">Stop a test if it looks like costing more than<br />
+          <small>Leave blank for no limit. It's an estimate, not your exact bill.</small></span>
+        <span class="spend-input-wrap">
+          <span class="spend-currency">$</span>
+          <input id="setSpendCap" class="settings-input spend-input" type="number" min="0" step="0.10" inputmode="decimal" placeholder="no limit" />
+        </span>
+      </label>
 
       <div class="run-row">
         <button id="runBtn" class="run-btn" type="button">Run test</button>
