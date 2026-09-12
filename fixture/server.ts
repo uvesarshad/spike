@@ -1,7 +1,9 @@
 ﻿/* Dogfood fixture — a small interactive shop with an intentional, toggleable bug.
  *
  * Flow: /login (test@test.com / pw) → /products (add to cart, sessionStorage)
- *       → /cart (spike B's discount logic) → /checkout → /success
+ *       → /cart (spike B's discount logic, per-row remove) → /checkout → /success
+ * Every page carries a "Cart (N)" header badge that goes up on add and down on
+ * remove — the count-delta shape the Tier-2 relation checks (A2).
  *
  * Bug mode (FIXTURE_BUG=on or startFixture(port, true)):
  *   - buildOrder() omits `total` → "Place order" throws reading order.total
@@ -37,7 +39,22 @@ const STYLE = `<style>
   .inline-error{color:#a40000;font-size:13px;display:none}
 </style>`;
 
-const NAV = `<nav><b>Acme Shop</b><span>Fixture app</span></nav>`;
+const NAV = `<nav><b>Acme Shop</b><span>Fixture app</span><span id="cart-badge">Cart (0)</span></nav>`;
+
+/* Header cart badge — "Cart (N)", the single most common shape a real
+ * storefront has and the one the count-delta relation reasons about: N must
+ * go UP by one when an item is added and DOWN by one when one is removed, and
+ * must not move otherwise. Defined before any page script so pages can call
+ * renderCartBadge() straight after they mutate the cart. */
+const CART_BADGE = `<script>
+window.renderCartBadge = function () {
+  const el = document.getElementById('cart-badge');
+  if (!el) return;
+  const n = JSON.parse(sessionStorage.getItem('cart') || '[]').length;
+  el.textContent = 'Cart (' + n + ')';
+};
+window.renderCartBadge();
+</script>`;
 
 const ERROR_LISTENER = `<script>
 window.addEventListener('error', () => {
@@ -49,7 +66,7 @@ window.addEventListener('error', () => {
 function page(title: string, body: string): string {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title>${STYLE}</head><body>
 <div id="crash-banner" class="error-banner">Application error: a client-side exception has occurred (see the browser console for more information).</div>
-${NAV}<div class="wrap">${body}</div>${ERROR_LISTENER}</body></html>`;
+${NAV}${CART_BADGE}<div class="wrap">${body}</div>${ERROR_LISTENER}</body></html>`;
 }
 
 function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, string> {
@@ -93,7 +110,10 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
       <button id="open-support-tab">Open support in a new tab</button>
       <script>
       const cart = JSON.parse(sessionStorage.getItem('cart') || '[]');
-      const render = () => document.getElementById('cart-status').textContent = 'Cart: ' + cart.length + ' items';
+      const render = () => {
+        document.getElementById('cart-status').textContent = 'Cart: ' + cart.length + ' items';
+        window.renderCartBadge();
+      };
       document.querySelectorAll('.add').forEach(b => b.addEventListener('click', () => {
         cart.push({ name: b.dataset.name, price: Number(b.dataset.price) });
         sessionStorage.setItem('cart', JSON.stringify(cart));
@@ -144,17 +164,32 @@ function pages(bug: boolean, variant: FixtureVariant = 'v1'): Record<string, str
       <script>
       const cart = JSON.parse(sessionStorage.getItem('cart') || '[]');
       const ul = document.getElementById('items');
-      let total = 0;
-      for (const item of cart) {
-        total += item.price;
-        const li = document.createElement('li');
-        li.textContent = item.name + ' — $' + item.price.toFixed(2);
-        ul.appendChild(li);
+      // Each row carries its own remove control, so the header badge has a way
+      // to go DOWN as well as up — the -1 half of the cart-count relation.
+      function render() {
+        ul.innerHTML = '';
+        let total = 0;
+        cart.forEach((item, i) => {
+          total += item.price;
+          const li = document.createElement('li');
+          li.appendChild(document.createTextNode(item.name + ' — $' + item.price.toFixed(2) + ' '));
+          const btn = document.createElement('button');
+          btn.textContent = 'Remove ' + item.name + ' from cart';
+          btn.addEventListener('click', () => {
+            cart.splice(i, 1);
+            sessionStorage.setItem('cart', JSON.stringify(cart));
+            render();
+          });
+          li.appendChild(btn);
+          ul.appendChild(li);
+        });
+        // spike B's silent-discount logic: 10% off at $100+
+        if (total >= 100) total *= 0.9;
+        sessionStorage.setItem('total', String(total));
+        document.getElementById('cart-total').textContent = 'Total: $' + total.toFixed(2);
+        window.renderCartBadge();
       }
-      // spike B's silent-discount logic: 10% off at $100+
-      if (total >= 100) total *= 0.9;
-      sessionStorage.setItem('total', String(total));
-      document.getElementById('cart-total').textContent = 'Total: $' + total.toFixed(2);
+      render();
       document.getElementById('checkout').addEventListener('click', () => location.href = '/checkout');
       </script>`,
     ),

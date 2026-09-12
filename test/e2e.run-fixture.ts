@@ -31,7 +31,13 @@ async function runAgainstFixture(bug: boolean) {
       // the run could never log in, so "expecting pass" and "expecting a
       // captured error" were both unreachable and this suite had been failing
       // silently. Opting out here is the whole point of the fixture.
-      config: { ...cfg, readOnly: false },
+      // strictOracles is on by default and is stated explicitly here because
+      // this suite now GATES on it: the fixture carries a "Cart (N)" header
+      // badge, and before A2 any page with one was force-failed (two mutually
+      // exclusive cart relations were proposed from the same badge, so one
+      // always violated and gated the verdict). A healthy run must still pass
+      // with the deterministic checks deciding the verdict.
+      config: { ...cfg, readOnly: false, strictOracles: true },
       // This gate exists to exercise the FULL AI stack (brain → navigator →
       // ports → verdict) against both fixture modes. Once A1 landed a recorded
       // script in generated-tests/, the pre-run matcher started recognising
@@ -50,6 +56,20 @@ const healthy = await runAgainstFixture(false);
 console.log(JSON.stringify({ verdict: healthy.verdict, reason: healthy.reason, steps: healthy.steps.map((s) => s.description) }, null, 2));
 check('healthy run verdict is pass', healthy.verdict === 'pass');
 check('healthy run has no console_error', healthy.console_error === null);
+
+// A2: the cart badge must not be able to fail a healthy storefront. Two checks:
+// nothing about the badge gated the verdict, and the badge was actually read
+// around the add-to-cart click (otherwise the fixture variant isn't exercised
+// and the first check would pass vacuously).
+const cartRelationErrors = healthy.steps
+  .flatMap((s) => s.invariants ?? [])
+  .filter((v) => v.rule.startsWith('metamorphic:') && v.severity === 'error');
+if (cartRelationErrors.length) console.log(JSON.stringify(cartRelationErrors, null, 2));
+check('healthy run has no cart-count violation gating the verdict', cartRelationErrors.length === 0);
+check(
+  'healthy run read the cart badge before and after the add-to-cart click',
+  healthy.steps.some((s) => typeof s.countsBefore?.cart === 'number' && typeof s.countsAfter?.cart === 'number'),
+);
 
 console.log('\n=== e2e 2/2: bug-on fixture — expecting fail with evidence ===');
 const broken = await runAgainstFixture(true);
