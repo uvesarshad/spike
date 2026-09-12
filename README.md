@@ -239,6 +239,17 @@ What each add-on unlocks:
 | `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
 | `spike dashboard` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats |
 
+## Testing an app behind a login
+
+**The primary strategy: test on the tab you're already logged in on.** Open the app in Chrome, sign in as you normally would, then open the side panel on that tab and describe what to test. The run uses that tab's session, so everything you can see, the agent can see — no credentials to hand over, no login flow to automate, and it works with any sign-in method your app has, including single sign-on. The tab card in the panel says so: *I'll test this page logged in as you*.
+
+The alternatives, when you need the login itself tested:
+
+- **Email and password** — put the credentials in the vault (`spike secret set TEST_USER …`, `spike secret set TEST_PASSWORD …`, or the panel's "Test login" card) and refer to them in the task as `{{secret:TEST_USER}}` / `{{secret:TEST_PASSWORD}}`. They are typed into the page and never shown to any model.
+- **A saved session** — `spike run … --storage-state <file>` reuses cookies and local storage captured from an earlier signed-in session.
+- **A code emailed to you** — see the next section.
+- **"Sign in with Google / Microsoft / GitHub / Apple"** — these open a separate popup window. From the command line that window is followed automatically; from the side panel it isn't yet, and the run will stop and tell you to sign in on the tab first (which is the first option above, and the one that always works).
+
 ## Email verification and one-time codes
 
 Signup, password-reset and magic-link flows end in an email. Point Spike at a real mailbox and it will read the message and pull the code out itself; leave it unset and the agent is simply never told it can wait for email, so it won't plan a step that can't work.

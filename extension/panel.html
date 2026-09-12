@@ -288,6 +288,11 @@
         <div class="tab-meta">
           <span id="tabTitle" class="tab-title">Loading tab…</span>
           <span id="tabHost" class="tab-host"></span>
+          <!-- A9: the primary way to test anything behind a login. Testing runs
+               on THIS tab, with this tab's session, so whatever you are already
+               signed into, the agent is signed into too. Saying it here is what
+               stops people trying to make the agent log in for them. -->
+          <span class="tab-host">I'll test this page logged in as you</span>
         </div>
       </div>
       <div id="tabWarning" class="tab-warning" hidden>
