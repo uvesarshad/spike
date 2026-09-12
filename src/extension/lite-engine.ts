@@ -80,6 +80,11 @@ export interface LiteRunOptions {
   /** A1 (P0) headline feature: deterministic verdicts — forwarded to
    * LoopOptions. Mirrors readOnly's forwarding shape; product default true. */
   strictOracles?: boolean;
+  /** A17 (P1): the panel's "What should be true at the end? (optional)" text,
+   * in the user's own words — forwarded to LoopOptions.expectations so both
+   * models are told to prove it rather than form a general impression of the
+   * page. Absent/blank (the usual case) leaves the run exactly as it was. */
+  expectations?: string;
   /** A5: the test-login values the user saved in the panel, by name
    * (TEST_USER / TEST_PASSWORD). Extension-only mode has no encrypted store on
    * disk, so these come from the browser's own storage — but the rule is the
@@ -333,6 +338,8 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       spendCapUsd: opts.spendCapUsd,
       // A1 (P0) — see LiteRunOptions.strictOracles above.
       strictOracles: opts.strictOracles,
+      // A17 (P1) — see LiteRunOptions.expectations above.
+      ...(opts.expectations?.trim() && { expectations: opts.expectations.trim() }),
       // A5 — the panel's saved test login, if any. Same contract as the desktop
       // helper's encrypted store: read-only, looked up by name, resolved at the
       // moment of typing and never written anywhere.

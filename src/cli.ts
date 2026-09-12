@@ -221,6 +221,7 @@ program
   // grind before the smarter model is asked to re-think, so it belongs next to
   // --max-steps where anyone tuning a run will look.
   .option('--per-goal-max-steps <n>', 'how many steps one part of the task may take before the smarter model is asked to re-plan (default 12, never more than --max-steps)', (v) => parseInt(v, 10))
+  .option('--expect <text>', 'what should be true once the task is done, in plain English (e.g. "the cart shows 2 items and the total reads $49.99"). Each one is checked against the page instead of being eyeballed, so the verdict is about your wording, not a general look at the page')
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
   .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond --url\'s own (repeatable) — --url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain', collectRepeatable, [])
   .option('--action-cache', 'enable the verified file-backed action cache for this run')
@@ -235,7 +236,7 @@ program
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
   .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent for this non-interactive run', false)
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string | undefined, opts: { url: string; spec?: string; maxSteps?: number; perGoalMaxSteps?: number; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
+  .action(async (task: string | undefined, opts: { url: string; spec?: string; maxSteps?: number; perGoalMaxSteps?: number; expect?: string; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
     // A7 (P0): exactly one input — a sentence or a document, never neither.
     if (!task && !opts.spec) {
       console.error('Tell me what to test: either a sentence in quotes, or --spec <file> with a document describing the flows.');
@@ -250,6 +251,9 @@ program
     const qaRunOpts = {
       maxSteps: opts.maxSteps,
       perGoalMaxSteps: opts.perGoalMaxSteps,
+      // A17 (P1): --expect turns "have a look at this page" into "prove this
+      // sentence is true of it". Blank/absent leaves the run as it was.
+      ...(opts.expect?.trim() && { expectations: opts.expect.trim() }),
       // A1 (P0): only an explicit --read-only turns look-only mode on here —
       // naming --url is itself the go-ahead to drive that page, so the flag's
       // absence must NOT re-impose the safe-by-default config value.

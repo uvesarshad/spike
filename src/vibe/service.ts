@@ -7,7 +7,7 @@
  * as `vibe.*` events.
  *
  * Reverse-RPC methods registered here:
- *   vibe.run    {task, url, allowHost?, allowHosts?} → {accepted:true}
+ *   vibe.run    {task, url, allowHost?, allowHosts?, expect?} → {accepted:true}
  *                             (then async vibe.progress/done/error events;
  *                             allowHosts = A14's already-consented extra sites)
  *   vibe.status {}          → {busy:boolean}
@@ -341,12 +341,19 @@ export class VibeService {
       // state is saved for this site and handed to later tests against it, so a
       // test doesn't have to sign in again every time.
       const rememberLogin = Boolean((params as { rememberLogin?: unknown }).rememberLogin);
+      // A17: the panel's "What should be true at the end?" text. Free-form by
+      // design — it is shown to the models as the run's success condition, never
+      // executed — so it is only trimmed and length-capped.
+      const rawExpect = (params as { expect?: unknown }).expect;
+      const expectations = typeof rawExpect === 'string' && rawExpect.trim()
+        ? rawExpect.trim().slice(0, 2000)
+        : undefined;
       if (!task || !url) throw new Error('vibe.run requires { task, url }');
       this.busy = true;
       // Fire-and-forget the actual run; the request returns immediately.
       // ctx.clientId binds the whole run (browser calls + UI events) to the
       // Chrome whose panel asked — a second connected Chrome stays untouched.
-      void this.execute(task, url, tabId, allowHost, ctx?.clientId, readOnly, extraHosts, rememberLogin);
+      void this.execute(task, url, tabId, allowHost, ctx?.clientId, readOnly, extraHosts, rememberLogin, expectations);
       return { accepted: true };
     });
 
@@ -922,6 +929,9 @@ export class VibeService {
     extraHosts: string[] = [],
     /** A25: reuse (and refresh) this site's remembered sign-in. */
     rememberLogin = false,
+    /** A17: what the user said must be true once the test is done, in their own
+     * words. Absent → the run is the general page check it always was. */
+    expectations?: string,
   ): Promise<void> {
     const controller = new AbortController();
     this.activeRun = controller;
@@ -1003,6 +1013,8 @@ export class VibeService {
         // pay for a fresh AI pass — it consumed saved tests (the pre-run
         // matcher) but never produced one.
         record: true,
+        // A17: the user's own success sentence, proved against the page.
+        ...(expectations && { expectations }),
         onProgress: progress,
         onStep: (info) => this.bridge.sendEvent('vibe.step', info as unknown as Record<string, unknown>, target),
         signal: controller.signal,

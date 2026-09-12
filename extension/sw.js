@@ -795,6 +795,9 @@ async function runLiteFromPanel(port, msg) {
       // is the look-only switch — it decides THIS run. Absent (older panel) →
       // fall back to the stored setting.
       readOnly: typeof msg.readOnly === 'boolean' ? msg.readOnly : settings.readOnly,
+      // A17: the user's own "what should be true at the end?" sentence, when
+      // they wrote one — the test proves it rather than eyeballing the page.
+      ...(typeof msg.expect === 'string' && msg.expect.trim() ? { expectations: msg.expect.trim() } : {}),
       spendCapUsd: settings.spendCapUsd,  // safety: abort if estimated paid spend exceeds this
       strictOracles: settings.strictOracles, // A1: deterministic verdicts, safe-by-default ON
       onProgress: (line) => broadcastToPanels({ kind: 'progress', line }),
@@ -949,6 +952,10 @@ chrome.runtime.onConnect.addListener((port) => {
             // session on disk; forwarded only when the user ticked the box, so
             // an older helper simply ignores an absent flag.
             if (msg.rememberLogin === true) runParams.rememberLogin = true;
+            // A17: the user's own "what should be true at the end?" sentence.
+            // Forwarded only when they wrote one, so an older helper simply
+            // never sees it and behaves as before.
+            if (typeof msg.expect === 'string' && msg.expect.trim()) runParams.expect = msg.expect.trim();
             const result = await sendRequest('vibe.run', runParams);
             port.postMessage({ kind: 'accepted', ...(result || {}) });
           } catch (e) {

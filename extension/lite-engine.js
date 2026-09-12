@@ -16249,6 +16249,8 @@ async function runLite(opts) {
       spendCapUsd: opts.spendCapUsd,
       // A1 (P0) — see LiteRunOptions.strictOracles above.
       strictOracles: opts.strictOracles,
+      // A17 (P1) — see LiteRunOptions.expectations above.
+      ...opts.expectations?.trim() && { expectations: opts.expectations.trim() },
       // A5 — the panel's saved test login, if any. Same contract as the desktop
       // helper's encrypted store: read-only, looked up by name, resolved at the
       // moment of typing and never written anywhere.

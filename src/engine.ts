@@ -145,6 +145,14 @@ export interface QaRunOptions {
    * write it to this path — the capture half of the auth fixture. Absent →
    * no capture (unchanged behavior). */
   saveStorageStatePath?: string;
+  /** A17 (P1): what the caller says must be true once the task is done, in
+   * their own words ("the cart shows 2 items", "the total reads $49.99").
+   * Shown to both models as REQUIRED FINAL CHECKS, which turns a run from a
+   * page-health smoke test into a checked assertion. Absent (the common case)
+   * leaves the run exactly as it was. Set by `spike run --expect "…"`, the
+   * `qa_run` tool's `expect` input, and the panel's "What should be true at
+   * the end?" field. */
+  expectations?: string;
 }
 
 export interface QaRunResult extends Report {
@@ -1186,6 +1194,12 @@ async function runFreshAiPass(
         readOnly,
         spendCapUsd: cfg.spendCapUsd,
         strictOracles: cfg.strictOracles,
+        // A17 (P1): what the caller said must be true at the end, and the
+        // per-project tuning for the deterministic page checks (words that are
+        // legitimate on THIS app, checks to skip). Both were readable from a
+        // config file and a run input but never reached the driver.
+        ...(opts.expectations?.trim() && { expectations: opts.expectations }),
+        ...(cfg.invariants && { invariants: cfg.invariants }),
         // A9 (P0): the inbox. Nothing ever built one before, so wait_for_email
         // failed on every real run even with a provider configured. Absent
         // (the default) also strips the verb from the navigator's prompt and

@@ -68,6 +68,15 @@ export async function startMcpServer(): Promise<void> {
             'One realistic flow costs 5-10 actions, so raise this for a long or multi-page journey ' +
             '— or split the work across `flows`, which gives each flow its own budget.',
         ),
+      expect: z
+        .string()
+        .optional()
+        .describe(
+          'what should be true once the task is done, in plain English ' +
+            '(e.g. "the cart shows 2 items and the total reads $49.99"). Each one is checked against the page ' +
+            'instead of being eyeballed, so the verdict answers your wording rather than giving a general ' +
+            'impression of the page. With `flows` or `spec`, it applies to every flow.',
+        ),
       readOnly: z
         .boolean()
         .optional()
@@ -77,8 +86,13 @@ export async function startMcpServer(): Promise<void> {
             'set true to inspect a page without changing anything.',
         ),
     },
-    async ({ task, url, flows, spec, maxSteps, readOnly }) => {
-      const runOpts = { maxSteps, ...(readOnly !== undefined && { readOnly }) };
+    async ({ task, url, flows, spec, maxSteps, readOnly, expect }) => {
+      const runOpts = {
+        maxSteps,
+        ...(readOnly !== undefined && { readOnly }),
+        // A17 (P1): the caller's own success sentence, checked rather than eyeballed.
+        ...(expect?.trim() && { expectations: expect.trim() }),
+      };
       const given = [task, flows, spec].filter((v) => v !== undefined).length;
       if (given !== 1) {
         return {

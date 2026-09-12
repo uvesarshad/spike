@@ -7,7 +7,7 @@
  * 'vibe-panel'. The SW relays our run/status/nano/bridge-status requests to the
  * daemon and broadcasts the daemon's vibe.* events back to us.
  *
- *   panel -> SW : { kind:'run', task, tabId, url, allowHost?, allowHosts? }
+ *   panel -> SW : { kind:'run', task, tabId, url, allowHost?, allowHosts?, expect? }
  *                 { kind:'decompose', spec, url }  (A7: document → flow list)
  *                 { kind:'artifact', path }        (A15: fetch one screenshot)
  *                 { kind:'bundle' }                (A15: everything, zipped)
@@ -89,6 +89,9 @@ const liteChip = $('liteChip');
 const debugBarNote = $('debugBarNote');
 const nanoLine = $('nanoLine');
 const taskInput = $('task');
+// A17: the optional success sentence — what the user says must be true once the
+// test is done. Blank (the usual case) leaves the test exactly as it was.
+const expectInput = $('expect');
 const runBtn = $('runBtn');
 const errorBanner = $('errorBanner');
 const feed = $('feed');
@@ -3306,6 +3309,10 @@ function buildRunMessage(task) {
   const lookOnly = (flowQueue && flowQueue.lookOnly) || !consentToggle.checked;
   const runMsg = { kind: 'run', task, tabId: activeTab.id, url: activeTab.url, readOnly: lookOnly };
   lastStartedTask = task;
+  // A17: the success sentence, when the user wrote one. A site check (nobody
+  // typed a task) is a general look at the site, so it carries none.
+  const expectText = !(flowQueue && flowQueue.lookOnly) && expectInput ? String(expectInput.value || '').trim() : '';
+  if (expectText) runMsg.expect = expectText;
   if (!lookOnly) {
     const host = hostOf(activeTab.url);
     if (host) runMsg.allowHost = host;

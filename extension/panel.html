@@ -375,6 +375,13 @@
       <textarea id="task" class="text-area" rows="3"
                 placeholder="e.g. Add an item to the cart and complete checkout"></textarea>
 
+      <!-- A17: the success sentence, in the user's own words. Given one, the
+           test proves it against the page instead of forming a general
+           impression of it. Left blank, the test behaves exactly as before. -->
+      <label id="expectLabel" class="field-label" for="expect">What should be true at the end? (optional)</label>
+      <input id="expect" class="text-input" type="text"
+             placeholder="e.g. the cart shows 2 items and the total reads $49.99" />
+
       <label class="consent-row" for="consentToggle">
         <input id="consentToggle" class="consent-check" type="checkbox" checked />
         <span class="consent-text">Allow the agent to click &amp; type on this site<br />
