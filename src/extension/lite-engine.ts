@@ -30,7 +30,7 @@ import {
   type ProviderId,
   type QaSettings,
 } from '../vibe/settings-data.js';
-import { slimReport, type Report } from '../report/report.js';
+import { headlineScreenshot, slimReport, type Report } from '../report/report.js';
 import { decomposeSpec, MAX_FLOWS, type FlowUnit } from '../driver/spec-decompose.js';
 import { renderPlainReport, buildFixPrompt } from '../vibe/fix-prompt.js';
 import { explainReason } from '../vibe/reason-text.js';
@@ -305,6 +305,9 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       // A14: same field the desktop helper sends — the panel is a plain page
       // script and can't import the translation table itself.
       reasonExplained: explainReason(report.reason),
+      // A15: which picture the result card should show. The bytes stay in the
+      // bundle; the worker serves them on request.
+      screenshotPath: headlineScreenshot(report),
       fixPrompt: buildFixPrompt(report),
       durationMs: report.durationMs,
     };

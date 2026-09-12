@@ -406,6 +406,12 @@
       </div>
       <!-- A7: one row per flow when the run came from a pasted document. -->
       <div id="flowResults" class="flow-results" hidden></div>
+      <!-- A15: the picture. The failing step when there is one, the final state
+           of the page when the test passed. -->
+      <figure id="shotWrap" class="shot-wrap" hidden>
+        <img id="shotImg" class="shot-img" alt="" />
+        <figcaption id="shotCaption" class="shot-caption"></figcaption>
+      </figure>
       <pre id="plainReport" class="plain-report"></pre>
 
       <button id="clipBtn" class="clip-btn" type="button" hidden>

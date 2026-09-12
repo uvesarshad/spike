@@ -9,6 +9,7 @@
  *
  *   panel -> SW : { kind:'run', task, tabId, url, allowHost?, allowHosts? }
  *                 { kind:'decompose', spec, url }  (A7: document → flow list)
+ *                 { kind:'artifact', path }        (A15: fetch one screenshot)
  *                 { kind:'cancel' }
  *                 { kind:'fix' }
  *                 { kind:'clip' }
@@ -139,6 +140,11 @@ const verdictHeadline = $('verdictHeadline');
 const verdictFault = $('verdictFault');
 const verdictNext = $('verdictNext');
 const allowHostBtn = $('allowHostBtn');
+
+// A15: the screenshot in the result card.
+const shotWrap = $('shotWrap');
+const shotImg = $('shotImg');
+const shotCaption = $('shotCaption');
 
 // settings
 const settingsBtn = $('settingsBtn');
@@ -483,6 +489,13 @@ function onPortMessage(msg) {
       break;
     case 'nano-progress':
       renderNanoProgress(msg.status);
+      break;
+    case 'artifact':
+      onArtifact(msg);
+      break;
+    case 'artifact-error':
+      // The picture is a bonus, never the point — drop it quietly.
+      if (msg.path === shotWanted) hideShot();
       break;
     case 'clip':
       onClipReceived(msg);
@@ -1229,6 +1242,42 @@ allowHostBtn.addEventListener('click', () => {
   postToSW(buildRunMessage(task));
 });
 
+// ---- A15: the picture ------------------------------------------------------
+//
+// Nothing ever showed one. The panel had no reference to a screenshot at all,
+// and the fix prompt named one by bare filename — meaningless to someone using
+// a web-based coding tool. A picture of the page where it broke is the single
+// most useful thing in a bug report, and every run was already taking them.
+
+/** The path we are currently waiting on, so a late answer for a previous run
+ * can't paint itself over a newer result. */
+let shotWanted = null;
+
+function hideShot() {
+  shotWanted = null;
+  shotWrap.hidden = true;
+  shotImg.removeAttribute('src');
+  shotCaption.textContent = '';
+}
+
+/** Ask the worker for the one screenshot worth showing for this result. */
+function requestShot(params) {
+  const wanted = params && typeof params.screenshotPath === 'string' ? params.screenshotPath : '';
+  if (!wanted) { hideShot(); return; }
+  shotWanted = wanted;
+  const failed = String(params.verdict || '').toLowerCase() !== 'pass';
+  shotCaption.textContent = failed ? 'The page where it broke' : 'How the page looked at the end';
+  shotImg.alt = shotCaption.textContent;
+  postToSW({ kind: 'artifact', path: wanted });
+}
+
+function onArtifact(msg) {
+  if (!msg || msg.path !== shotWanted) return;
+  if (!msg.dataBase64) { hideShot(); return; }
+  shotImg.src = `data:${msg.mime || 'image/png'};base64,${msg.dataBase64}`;
+  shotWrap.hidden = false;
+}
+
 /** A14: headline / attribution / next step under the verdict badge. */
 const WHOSE_FAULT_TEXT = {
   'your app': 'This looks like a problem in your app.',
@@ -1277,6 +1326,9 @@ function renderResult(params) {
   // A7: when the run came from a pasted document, the card leads with one row
   // per flow — the single report below is the flow that most needs attention.
   renderFlowOutcome(params.flowOutcome);
+
+  // A15: the failing step's screenshot (or the final one on a pass).
+  requestShot(params);
 
   const reportText = params.plainReport || params.reason || '(no report)';
   plainReport.textContent = reportText;
@@ -2470,6 +2522,7 @@ flowsRunBtn.addEventListener('click', () => {
   flowResults.hidden = true;
   resetFixUi();
   clearFeed();
+  hideShot();
   flowQueue = { flows, index: 0, results: [], cancelled: false };
   runNextFlow();
 });
@@ -2629,6 +2682,7 @@ function startRun(task) {
   hideError();
   resultCard.hidden = true;
   flowResults.hidden = true;
+  hideShot();
   resetFixUi();
   clearFeed();
   addProgressLine(`Asking the agent to test: ${activeTab.url}`);

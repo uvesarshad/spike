@@ -216,6 +216,26 @@ export interface Report {
 
 /** The verdict an MCP/CLI caller pays for, plus (A5a) a compact spend summary
  * so the panel can render a meter without re-deriving it from model_trace. */
+/** A15 (P1): the ONE screenshot worth putting in front of the reader.
+ *
+ * Nothing ever showed a picture: the panel had no reference to a screenshot at
+ * all, and the fix prompt cited one by bare filename ("Screenshot: step-06.png")
+ * — meaningless to someone using a web-based coding tool. Every screenshot the
+ * run took is already in `evidence_paths`; this just picks the useful one: the
+ * failing step's when the run failed, otherwise the last frame, which is the
+ * final state a passing run ended on. undefined when nothing was captured. */
+export function headlineScreenshot(r: Report): string | undefined {
+  const shots = (r.evidence_paths ?? []).filter((p) => /\.png$/i.test(p));
+  if (!shots.length) return undefined;
+  const idx = r.failing_step?.index;
+  if (typeof idx === 'number') {
+    const tag = `step-${String(idx).padStart(2, '0')}.png`;
+    const hit = shots.find((p) => p.endsWith(tag));
+    if (hit) return hit;
+  }
+  return shots[shots.length - 1];
+}
+
 export function slimReport(r: Report): Pick<Report, 'verdict' | 'failing_step' | 'console_error' | 'evidence_paths' | 'reason' | 'spendSummary'> {
   return {
     verdict: r.verdict,

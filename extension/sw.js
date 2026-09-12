@@ -947,6 +947,29 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           break;
         }
+        // A15: the bytes of ONE screenshot from the last run, so the result
+        // card can show the failing step instead of naming a file.
+        case 'artifact': {
+          const wanted = typeof msg.path === 'string' ? msg.path : '';
+          if (!wanted) { port.postMessage({ kind: 'artifact-error', path: wanted }); break; }
+          if (daemonConnected()) {
+            try {
+              const r = await sendRequest('vibe.artifact.get', { path: wanted });
+              port.postMessage({ kind: 'artifact', path: wanted, mime: (r && r.mime) || 'image/png', dataBase64: r && r.dataBase64 });
+            } catch (e) {
+              port.postMessage({ kind: 'artifact-error', path: wanted, message: String(e && e.message ? e.message : e) });
+            }
+            break;
+          }
+          // No desktop helper: the screenshots live in the last run's in-memory
+          // bundle. They're session-only, so a worker restart loses them — the
+          // panel just hides the picture in that case.
+          const shots = lastLiteBundle && Array.isArray(lastLiteBundle.screenshots) ? lastLiteBundle.screenshots : [];
+          const hit = shots.find((s) => s && typeof s.name === 'string' && (s.name === wanted || wanted.endsWith(s.name)));
+          if (hit) port.postMessage({ kind: 'artifact', path: wanted, mime: 'image/png', dataBase64: hit.base64 });
+          else port.postMessage({ kind: 'artifact-error', path: wanted, message: 'that screenshot is no longer available' });
+          break;
+        }
         case 'nano-download': {
           await handleNanoDownload();
           break;

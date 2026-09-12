@@ -19,6 +19,9 @@
  *                             async vibe.fix-progress/-done events)
  *   vibe.cancel {}          → {cancelled:boolean}  (aborts the active run)
  *   vibe.clip   {}          → {name, mime, dataBase64}  (last saved replay clip)
+ *   vibe.artifact.get {path} → {name, mime, dataBase64}  (A15: one screenshot
+ *                             from the LAST run — the path must be one that run
+ *                             produced, so this is not a read-any-file method)
  *   vibe.map.get      {host?} → {present:false} | {present:true, baseUrl?, routeCount,
  *                                stateCount, lastMappedAt}  (A51: read-only summary of
  *                                .spike/app-model.json for `host`, when it matches the
@@ -53,7 +56,7 @@ import type { BridgeServer } from '../bridge/bridge-server.js';
 import { createPlanningRouter, qaRun, type QaRunOptions } from '../engine.js';
 import { loadConfig } from '../config.js';
 import { decomposeSpec } from '../driver/spec-decompose.js';
-import { slimReport, type Report } from '../report/report.js';
+import { headlineScreenshot, slimReport, type Report } from '../report/report.js';
 import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
 import { explainReason } from './reason-text.js';
 import { dispatchFix, isAutoFixAcceptedFor, detectFixAgent, NO_PROJECT_FOLDER_MESSAGE } from './auto-fix.js';
@@ -183,6 +186,10 @@ export class VibeService {
   /** Absolute path of the clip saved by the most recent run (replay.mp4|.webm).
    * Null until a run produces one; vibe.clip serves it back to the panel. */
   private lastClipPath: string | null = null;
+  /** A15: the evidence the LAST run produced. vibe.artifact.get will serve a
+   * file only if it is in here — the panel can therefore ask for a screenshot
+   * by path without that method becoming a read-anything-on-disk hole. */
+  private lastEvidencePaths = new Set<string>();
 
   constructor(private readonly bridge: BridgeServer) {}
 
@@ -331,6 +338,31 @@ export class VibeService {
       }
       const ext = path.extname(p).toLowerCase();
       const mime = ext === '.mp4' ? 'video/mp4' : 'video/webm';
+      return { name: path.basename(p), mime, dataBase64: buf.toString('base64') };
+    });
+
+    // vibe.artifact.get — A15: one file from the LAST run, as bytes, so the
+    // result card can show the failing screenshot inline instead of naming it.
+    // The path must be one this run actually produced (lastEvidencePaths): the
+    // panel is a trusted client, but a method that reads an arbitrary path off
+    // the user's disk on request is not something to leave lying on a
+    // localhost socket.
+    this.bridge.onRequest('vibe.artifact.get', async (params, ctx) => {
+      if (!this.bridge.isAuthenticated(ctx.clientId)) {
+        throw new Error('vibe.artifact.get: unauthenticated client');
+      }
+      const raw = (params as { path?: unknown }).path;
+      const p = typeof raw === 'string' ? raw : '';
+      if (!p || !this.lastEvidencePaths.has(p)) throw new Error('that file is not part of the last run');
+      const ext = path.extname(p).toLowerCase();
+      const mime = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : '';
+      if (!mime) throw new Error('only screenshots can be fetched this way');
+      let buf: Buffer;
+      try {
+        buf = fs.readFileSync(p);
+      } catch {
+        throw new Error('that file is no longer on disk');
+      }
       return { name: path.basename(p), mime, dataBase64: buf.toString('base64') };
     });
 
@@ -673,6 +705,9 @@ export class VibeService {
       } else {
         // Stash a failure so the panel can offer "fix it"; clear on success.
         this.lastFailedReport = report.verdict === 'pass' ? null : report;
+        // A15: exactly this run's files become fetchable, and the previous
+        // run's stop being so.
+        this.lastEvidencePaths = new Set(report.evidence_paths ?? []);
         this.bridge.sendEvent('vibe.done', {
           ...slimReport(report),
           plainReport: renderPlainReport(report),
@@ -681,6 +716,11 @@ export class VibeService {
           // headline / attribution / next step. Null when the table doesn't
           // know this reason — the panel then shows the raw text, as before.
           reasonExplained: explainReason(report.reason),
+          // A15: which picture the result card should show — the failing step's
+          // when there is one, otherwise the final frame. The panel asks for the
+          // bytes separately (vibe.artifact.get) so a passing run's payload
+          // doesn't carry a megabyte of base64 nobody looks at.
+          screenshotPath: headlineScreenshot(report),
           fixPrompt: buildFixPrompt(report),
           durationMs: report.durationMs,
           ...(clipPath ? { clipPath } : {}),

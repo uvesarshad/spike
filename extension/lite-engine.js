@@ -6334,6 +6334,17 @@ init_buffer_shim();
 
 // src/report/report.ts
 init_buffer_shim();
+function headlineScreenshot(r) {
+  const shots = (r.evidence_paths ?? []).filter((p) => /\.png$/i.test(p));
+  if (!shots.length) return void 0;
+  const idx = r.failing_step?.index;
+  if (typeof idx === "number") {
+    const tag = `step-${String(idx).padStart(2, "0")}.png`;
+    const hit = shots.find((p) => p.endsWith(tag));
+    if (hit) return hit;
+  }
+  return shots[shots.length - 1];
+}
 function slimReport(r) {
   return {
     verdict: r.verdict,
@@ -16062,6 +16073,9 @@ async function runLite(opts) {
       // A14: same field the desktop helper sends — the panel is a plain page
       // script and can't import the translation table itself.
       reasonExplained: explainReason(report.reason),
+      // A15: which picture the result card should show. The bytes stay in the
+      // bundle; the worker serves them on request.
+      screenshotPath: headlineScreenshot(report),
       fixPrompt: buildFixPrompt(report),
       durationMs: report.durationMs
     };
