@@ -313,7 +313,64 @@
       </div>
     </section>
 
-    <section class="inputs">
+    <!-- E1: the first three screens, on one screen.
+         Before this, a brand-new user landed on the full panel and the only
+         thing that worked was a banner pointing at a Settings screen asking
+         for two separate keys. This asks for one key, says what it is about to
+         test, and shows the one switch that matters — then gets out of the way
+         for good the moment a key is saved. Everything granular is still one
+         tap away behind "Advanced"; nothing was removed, only moved back. -->
+    <section id="firstRun" class="first-run" hidden>
+      <div class="first-run-title">Two minutes and you're testing</div>
+
+      <div class="first-run-step">
+        <span class="first-run-num">1</span>
+        <div class="first-run-body">
+          <div class="field-label">Paste your AI key</div>
+          <div class="first-run-key-line">
+            <input id="firstRunKey" class="text-input" type="password" autocomplete="off" spellcheck="false"
+                   placeholder="sk-ant-… , AIza… or sk-…" />
+            <button id="firstRunKeySave" class="first-run-save" type="button">Save</button>
+          </div>
+          <div class="first-run-note">One key from Anthropic, Google or OpenAI is all it takes — I work out which it is and use it for everything. You can give each job its own key later.</div>
+          <div id="firstRunKeyStatus" class="first-run-status" hidden></div>
+        </div>
+      </div>
+
+      <div class="first-run-step">
+        <span class="first-run-num">2</span>
+        <div class="first-run-body">
+          <div class="field-label">This is what I'll test</div>
+          <div class="tab-card">
+            <span id="firstRunFavicon" class="tab-favicon" data-icon="globe"></span>
+            <div class="tab-meta">
+              <span id="firstRunTabTitle" class="tab-title">Loading tab…</span>
+              <span id="firstRunTabHost" class="tab-host"></span>
+              <span class="tab-host">I'll test this page logged in as you</span>
+            </div>
+          </div>
+          <div id="firstRunTabWarning" class="tab-warning" hidden>
+            Switch to the tab with your site, then come back here.
+          </div>
+        </div>
+      </div>
+
+      <div class="first-run-step">
+        <span class="first-run-num">3</span>
+        <div class="first-run-body">
+          <div class="field-label">How far can I go?</div>
+          <label class="consent-row" for="firstRunConsent">
+            <input id="firstRunConsent" class="consent-check" type="checkbox" checked />
+            <span class="consent-text">Allow the agent to click &amp; type on this site<br />
+              <small>Off = look-only mode: I look and report, never click or type.</small></span>
+          </label>
+        </div>
+      </div>
+
+      <button id="firstRunAdvanced" class="first-run-advanced" type="button">Advanced — pick a different model for each job</button>
+    </section>
+
+    <section id="inputsSection" class="inputs">
       <div class="field-label">Testing this tab</div>
       <div id="tabCard" class="tab-card">
         <span id="tabFavicon" class="tab-favicon" data-icon="globe"></span>

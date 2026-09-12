@@ -159,6 +159,19 @@ const flowResults = $('flowResults');
 const checkSiteBtn = $('checkSiteBtn');
 const checkSiteNote = $('checkSiteNote');
 
+// E1: the three-step first run (see the "first run" block further down).
+const inputsSection = $('inputsSection');
+const firstRun = $('firstRun');
+const firstRunKey = $('firstRunKey');
+const firstRunKeySave = $('firstRunKeySave');
+const firstRunKeyStatus = $('firstRunKeyStatus');
+const firstRunFavicon = $('firstRunFavicon');
+const firstRunTabTitle = $('firstRunTabTitle');
+const firstRunTabHost = $('firstRunTabHost');
+const firstRunTabWarning = $('firstRunTabWarning');
+const firstRunConsent = $('firstRunConsent');
+const firstRunAdvanced = $('firstRunAdvanced');
+
 // A14: the plain-English "what happened / whose problem / what to do" block
 // under the verdict badge, plus the one-click cross-site consent button.
 const verdictWhy = $('verdictWhy');
@@ -888,6 +901,8 @@ function renderTabCard() {
 
   tabWarning.hidden = testable;
   refreshConsent();
+  // E1: the first-run screen shows the same tab card, so it moves with this one.
+  if (firstRunVisible()) renderFirstRunTab();
   refreshRunEnabled();
   requestSiteMap();
   requestSavedTests(false);
@@ -1438,6 +1453,13 @@ function showKeyCta(message) {
 /** Show the call-to-action as soon as we know there's no key, and take it back
  * down the moment one is saved. Never disturbs a banner showing something else. */
 function refreshKeyGate() {
+  refreshFirstRun();
+  // E1: while the three-step first run is up it IS the prompt for a key —
+  // a banner saying the same thing over the top of it is just noise.
+  if (firstRunVisible()) {
+    if (keyCtaShown) hideError();
+    return;
+  }
   if (missingAiKey()) {
     // already up (this runs on every status poll) or a different banner is
     // showing → leave it alone
@@ -1446,6 +1468,159 @@ function refreshKeyGate() {
     hideError();
   }
 }
+
+// ---- E1: the three-step first run ------------------------------------------
+//
+// A brand-new user used to land on the whole panel — suggestions, a task box,
+// a spend cap, a "check this site" button — none of which could do anything
+// yet, plus a banner pointing at a Settings screen that asked for TWO separate
+// keys before a single test could run.
+//
+// Now the first open is three things and nothing else: paste one key, see what
+// is about to be tested, and say whether clicking is allowed. One key covers
+// both jobs, because that is what nearly everyone wants. Nothing was taken
+// away — every per-job control is still there, one tap behind "Advanced", for
+// anyone who wants a different model or a different key for each.
+
+/** Which provider a pasted key belongs to, from its opening characters:
+ * Anthropic keys start `sk-ant-`, OpenRouter's `sk-or-`, Google's `AIza` and
+ * OpenAI's `sk-`. '' means "not a shape I know", which is the only case where
+ * the user is asked to pick anything. */
+function providerFromKey(raw) {
+  const key = String(raw || '').trim();
+  if (!key) return '';
+  if (/^sk-ant-/.test(key)) return 'claude';
+  if (/^sk-or-/.test(key)) return 'openrouter';
+  if (/^AIza/.test(key)) return 'gemini';
+  if (/^sk-/.test(key)) return 'gpt';
+  return '';
+}
+
+/** True when there is no stored key at all — the only situation this screen is
+ * for. A config we haven't fetched yet is never treated as empty: we don't put
+ * a beginner's screen in front of someone on a guess. */
+function noKeyStoredAnywhere() {
+  const list = (currentConfig && Array.isArray(currentConfig.providers)) ? currentConfig.providers : null;
+  if (!list) return false;
+  return !list.some((p) => p && p.hasKey);
+}
+
+function firstRunVisible() {
+  return !!(firstRun && !firstRun.hidden);
+}
+
+/** Show the three-step screen while nothing is stored and a key is what the
+ * next test would be missing; collapse into the normal panel the moment one is
+ * saved, and never come back while it is there. */
+function refreshFirstRun() {
+  if (!firstRun || !inputsSection) return;
+  const show = noKeyStoredAnywhere() && missingAiKey();
+  if (firstRun.hidden === show) {
+    firstRun.hidden = !show;
+    inputsSection.hidden = show;
+    if (show && firstRunConsent) firstRunConsent.checked = consentToggle.checked;
+  }
+  if (show) renderFirstRunTab();
+}
+
+/** Step 2: the same tab card the normal panel shows, so what gets tested is
+ * never a surprise. */
+function renderFirstRunTab() {
+  if (!firstRunTabTitle) return;
+  if (firstRunConsent) firstRunConsent.checked = consentToggle.checked;
+  if (!activeTab) {
+    firstRunTabTitle.textContent = 'No active tab';
+    firstRunTabHost.textContent = '';
+    firstRunFavicon.innerHTML = qaIcon('globe');
+    firstRunTabWarning.hidden = false;
+    return;
+  }
+  firstRunTabTitle.textContent = activeTab.title || activeTab.url || 'Untitled tab';
+  const testable = isTestableUrl(activeTab.url);
+  firstRunTabHost.textContent = testable ? hostOf(activeTab.url) : (activeTab.url || '');
+  const fav = activeTab.favIconUrl;
+  if (fav && /^https?:\/\//i.test(fav)) {
+    firstRunFavicon.textContent = '';
+    const img = document.createElement('img');
+    img.src = fav;
+    img.alt = '';
+    img.addEventListener('error', () => { firstRunFavicon.innerHTML = qaIcon('globe'); });
+    firstRunFavicon.appendChild(img);
+  } else {
+    firstRunFavicon.innerHTML = qaIcon('globe');
+  }
+  firstRunTabWarning.hidden = testable;
+}
+
+/** The provider whose key save is in flight from this screen. */
+let firstRunSavingProvider = null;
+
+function setFirstRunStatus(text, isError) {
+  if (!firstRunKeyStatus) return;
+  firstRunKeyStatus.textContent = text || '';
+  firstRunKeyStatus.hidden = !text;
+  firstRunKeyStatus.classList.toggle('err', !!isError);
+}
+
+function saveFirstRunKey() {
+  if (!firstRunKey) return;
+  const key = (firstRunKey.value || '').trim();
+  if (!key) {
+    setFirstRunStatus('Paste your key above first.', true);
+    return;
+  }
+  const provider = providerFromKey(key);
+  if (!provider) {
+    setFirstRunStatus(
+      "That doesn't look like a key I recognise. Anthropic keys start sk-ant-, Google's start AIza, OpenAI's start sk-. If yours is from somewhere else, open Advanced and pick it there.",
+      true,
+    );
+    return;
+  }
+  firstRunSavingProvider = provider;
+  if (firstRunKeySave) firstRunKeySave.disabled = true;
+  setFirstRunStatus('Saving…', false);
+  postToSW({ kind: 'set-key', provider, key });
+}
+
+/** The one key landed. Point BOTH jobs at it and let the screen collapse.
+ * The model is deliberately left blank: each job then gets that provider's own
+ * sensible model — a fast cheap one for the clicking, a stronger one for the
+ * planning — instead of one model doing both jobs badly. */
+function onFirstRunKeySaved(msg) {
+  if (!firstRunSavingProvider || !msg || msg.provider !== firstRunSavingProvider) return;
+  if (firstRunKeySave) firstRunKeySave.disabled = false;
+  if (!msg.ok) {
+    setFirstRunStatus(msg.message ? ('I could not save that key: ' + msg.message) : 'I could not save that key.', true);
+    return;
+  }
+  firstRunSavingProvider = null;
+  const role = { provider: msg.provider, mode: 'api', model: '' };
+  postToSW({ kind: 'config-set', planner: { ...role }, navigator: { ...role } });
+  // whatever the user set on step 3 is the switch the panel carries forward
+  consentToggle.checked = !firstRunConsent || firstRunConsent.checked;
+  refreshConsent();
+  setFirstRunStatus('Saved.', false);
+  firstRunKey.value = '';
+}
+
+if (firstRunKeySave) firstRunKeySave.addEventListener('click', saveFirstRunKey);
+if (firstRunKey) {
+  firstRunKey.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); saveFirstRunKey(); }
+  });
+  firstRunKey.addEventListener('input', () => { if (firstRunKeyStatus && !firstRunKeyStatus.hidden) setFirstRunStatus('', false); });
+}
+// Step 3 is the SAME switch the rest of the panel uses — mirrored, not a
+// second setting, so nothing can disagree with anything.
+if (firstRunConsent) {
+  firstRunConsent.addEventListener('change', () => {
+    consentToggle.checked = firstRunConsent.checked;
+    refreshConsent();
+  });
+}
+// Everything granular lives where it always did.
+if (firstRunAdvanced) firstRunAdvanced.addEventListener('click', () => openSettings({ focusKey: true }));
 
 // ---- result card -----------------------------------------------------------
 // ---- A14: the cross-site hop -----------------------------------------------
@@ -2579,6 +2754,9 @@ function onKeySaved(msg) {
     if (!msg.ok) primarySaveFailed = true;
     settlePrimarySave();
   }
+  // E1: the same reply finishes the three-step first run, when that is what
+  // asked for the key.
+  onFirstRunKeySaved(msg);
   // a key that just landed clears the "add a key" prompt on the main screen
   refreshKeyGate();
 }
