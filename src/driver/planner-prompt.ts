@@ -56,6 +56,10 @@ function formatHistory(history: StepRecord[]): string {
       const bits = [`${s.index}. ${s.description} → ${s.ok ? 'ok' : `FAILED: ${s.error ?? 'unknown'}`}`];
       bits.push(...consoleLines(s.console).map((l) => `   ${l}`));
       bits.push(...networkLines(s.network).map((l) => `   ${l}`));
+      // A16 (P1): the deterministic page checks a step tripped — most notably
+      // "that click changed nothing on the page". Capped like every other
+      // evidence channel so a noisy page cannot dominate the prompt.
+      bits.push(...(s.invariants ?? []).slice(0, MAX_EVIDENCE_LINES).map((v) => `   check: ${v.detail.slice(0, 200)}`));
       if (s.visual) bits.push(`   visual verdict: ${s.visual.verdict} — ${s.visual.summary.slice(0, 150)}`);
       return bits.join('\n');
     })

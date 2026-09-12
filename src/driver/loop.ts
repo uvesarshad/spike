@@ -485,6 +485,36 @@ async function collectInvariants(browser: BrowserPort, record: StepRecord): Prom
   if (violations.length) record.invariants = violations;
 }
 
+/** A16 (P1): "the button does nothing" — by far the most common bug in a
+ * hand-assembled app, and until now the one thing this tool computed on every
+ * single click and then threw away.
+ *
+ * verifyActionEffect() already answers the question ("did this click change its
+ * own target, the URL, or an alert/status/dialog region?"); its answer only
+ * decided whether the step was worth remembering for a later $0 re-run. An
+ * unwired submit button therefore sailed through as a green step.
+ *
+ * This records the answer as a WARNING on the step, so it reaches the saved
+ * report and the action history both models read. Deliberately NOT a failure
+ * and deliberately not part of the verdict: a click can legitimately change
+ * only something we cannot observe (a background save, a purely visual hover
+ * state), and the false-positive rate has never been measured against a real
+ * passing run. Promote it to an error once there is field data to justify it. */
+function noteDeadInteraction(record: StepRecord, reason: string): void {
+  const what = record.target?.name
+    ? `"${record.target.name}"`
+    : record.target?.role
+      ? `the ${record.target.role}`
+      : 'the element';
+  const violation: InvariantViolation = {
+    rule: 'dead-interaction',
+    severity: 'warn',
+    detail: `clicking ${what} changed nothing on the page`,
+    evidence: reason.slice(0, 200),
+  };
+  record.invariants = [...(record.invariants ?? []), violation];
+}
+
 /** A22 (P2): a step that FAILED gets a screenshot, immediately.
  *
  * Screenshots were previously taken at only three moments — the finish
@@ -1367,8 +1397,8 @@ export async function runDriverLoop(
       }
 
       // ---- execute ----
-      const cacheBefore =
-        actionCache &&
+      const cacheEligible =
+        !!actionCache &&
         a === actions.length - 1 &&
         action.type !== 'finish' &&
         action.type !== 'assert_visual' &&
@@ -1377,9 +1407,13 @@ export async function runDriverLoop(
         // replayed cache hit can reproduce — never cache it (mirrors wait/
         // assert_visual/finish above; see actionIntentForKey/toCachedActionValue
         // in cache/action-cache.ts, which reject it outright).
-        action.type !== 'wait_for_email'
-          ? await captureActionEffectState(browser).catch(() => null)
-          : null;
+        action.type !== 'wait_for_email';
+      // A16 (P1): a click's before/after reading is now taken whether or not
+      // this run remembers actions for later — the same comparison answers
+      // "was this button wired up at all?" (see noteDeadInteraction), which is
+      // worth a reading of its own.
+      const cacheBefore =
+        cacheEligible || action.type === 'click' ? await captureActionEffectState(browser).catch(() => null) : null;
       // one `browser.action` telemetry span per executed action (no-op sink by
       // default). Attributes are non-secret (type/step/kind only — never type
       // text, urls beyond host, or targets); redaction is a second safety net.
@@ -1699,11 +1733,14 @@ export async function runDriverLoop(
         }
       }
 
-      if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
+      if (cacheBefore && record.ok && !skippedReadOnly) {
         try {
           const cacheAfter = await captureActionEffectState(browser);
           const effect = verifyActionEffect(cacheBefore, cacheAfter, action, record.target);
-          if (effect.ok) {
+          // A16 (P1): warn-only, and independent of whether this action is
+          // worth remembering for a $0 re-run.
+          if (!effect.ok && action.type === 'click') noteDeadInteraction(record, effect.reason);
+          if (effect.ok && cacheEligible && actionCache) {
             const key = buildActionCacheKey({
               url: batchUrl,
               goal: goals[currentGoal] ?? task,

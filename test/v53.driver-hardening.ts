@@ -96,6 +96,20 @@ class SimpleBrowser implements BrowserPort {
     // failure A1's test relies on.
     return { root, text: 'document "App"\n  button "Submit"', truncated: false };
   }
+  /** A16: the driver now takes a cheap before/after reading around every click
+   * to notice a button that does nothing. Real ports answer that from their
+   * last snapshot, so this double does too — and the throw-on-Nth-call counter
+   * above keeps counting only the driver's OWN page reads, which is what the
+   * crash-recovery check below is written against. */
+  async peekAxTree(): Promise<AxSnapshot> {
+    const root: AxNode = {
+      id: 'root',
+      role: 'document',
+      name: 'App',
+      children: [{ id: 'n1', role: 'button', name: 'Submit' }],
+    };
+    return { root, text: 'document "App"\n  button "Submit"', truncated: false };
+  }
   async click(): Promise<void> {}
   async type(): Promise<void> {}
   async hover(): Promise<void> {}
