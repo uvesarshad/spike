@@ -1,4 +1,4 @@
-/* V88 — `spike doctor`'s line builder (A21, P1).
+/* V90 — `spike doctor`'s line builder (A21, P1).
  *
  * There was no preflight at all: "will a run work on this machine, and what
  * will it be allowed to do?" could only be answered by starting a run and
@@ -189,7 +189,7 @@ function lineFor(sections: DoctorSection[], labelFragment: string): string | und
 }
 
 const failed = checks.filter(([, ok]) => !ok);
-console.log(`\nv88: ${checks.length - failed.length}/${checks.length} passed`);
+console.log(`\nv90: ${checks.length - failed.length}/${checks.length} passed`);
 if (failed.length) {
   console.error('FAILED: ' + failed.map(([l]) => l).join(', '));
   process.exit(1);
