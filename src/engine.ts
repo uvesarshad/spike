@@ -691,9 +691,16 @@ async function pollNanoAvailable(
  * come from the Vault (anthropic/openai/openrouter) with an env fallback; Gemini
  * also honors the legacy cfg.geminiApiKey.
  *
- * A role pinned to nano (navigator default) resolves to name 'nano', which the
- * router simply won't find among plan-step candidates yet → it falls through to
- * the next available per-step adapter (Nano plan-step is a later phase).
+ * A role pinned to nano (navigator default) resolves to the name 'nano'. This
+ * ladder never builds a Nano adapter itself (see above: everything EXCEPT
+ * rung-0 Nano) — Nano DOES support plan-step as the navigator
+ * (router/adapters/nano.ts's `supports()`), but the caller (openSession)
+ * constructs and prepends the real NanoAdapter onto `adapters` separately,
+ * only when Nano is actually available for this session. So a navigator
+ * pinned to 'nano' resolves against that prepended instance whenever Nano is
+ * up; only when this session opened without Nano (unavailable, or a headless
+ * run that opted out) does 'nano' fail to resolve here, and the router falls
+ * through to the next available per-step adapter instead.
  */
 /* A9 (P0) — the inbox for this run.
  *
@@ -1207,11 +1214,16 @@ async function runFreshAiPass(
 
     const lastAxForOracles = await (browser.peekAxTree?.() ?? browser.axTree()).catch(() => undefined);
     // A33 (A24 Tier 2): record which metamorphic relations this app's shape
-    // suggests. Detection is deterministic and free; EXECUTION is not wired,
-    // because a relation needs paired observations across two deliberately
-    // varied runs and the driver produces one. Recording the proposals is what
-    // makes the "propose once, then run forever" workflow possible — inventing
-    // a fake single-run check would not.
+    // suggests, for the "propose once, then run forever" workflow — a relation
+    // spotted here can be re-checked on every later run of the same flow
+    // without re-detecting it. EXECUTION against THIS run's own history is
+    // already wired, just not here: driver/loop.ts (A2) checks every detected
+    // relation against axToObservation's run-start/run-end pair (or, for a
+    // count-delta relation, the before/after reading bracketing the actual
+    // landed add/remove click) and folds any violation onto the last step's
+    // `invariants`. This second, history-less detectRelationCandidates call
+    // only re-derives proposals from the FINAL page shape so they can be
+    // recorded for reuse, not to execute anything a second time.
     if (lastAxForOracles) {
       const proposals = detectRelationCandidates(lastAxForOracles);
       if (proposals.length) {

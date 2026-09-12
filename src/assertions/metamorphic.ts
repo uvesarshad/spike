@@ -15,9 +15,9 @@
  * deterministic-speed.md A24, 26-08-08-options-autonomy-layer.md A24 Tier 2):
  *   - RELIABLE as pure math, low false-positive risk: addItemIncrementsCount,
  *     removeItemDecrementsCount, sortPreservesSet, filterIsSubset,
- *     paginationPagesDisjoint, checkPaginationUnion. Each checks an exact,
- *     unambiguous set/count property; if the inputs are captured correctly
- *     there is nothing fuzzy about the verdict.
+ *     paginationPagesDisjoint. Each checks an exact, unambiguous set/count
+ *     property; if the inputs are captured correctly there is nothing fuzzy
+ *     about the verdict.
  *   - SPECULATIVE: loginLogoutLoginReturnsToSameState and
  *     sameUrlTwiceSameState. "Same state" is only as good as the caller's
  *     Observation.state blob, and legitimate per-visit noise (a "welcome
@@ -221,10 +221,11 @@ export const filterIsSubset: Relation = {
 };
 
 /** Adjacent pagination pages contain disjoint items — call once per adjacent
- * (page N, page N+1) pair. For the separate "union of all pages equals the
- * whole" property (inherently n-ary, not a before/after pair), see
- * checkPaginationUnion below — it deliberately doesn't fit the two-
- * observation Relation shape and isn't forced into it. */
+ * (page N, page N+1) pair. The separate "union of all pages equals the whole"
+ * property is inherently n-ary, not a before/after pair, so it doesn't fit
+ * this two-observation Relation shape; nothing in this codebase currently
+ * checks it (an earlier checkPaginationUnion() helper for it was removed
+ * 2026-09, A34 — it was never called outside its own unit test). */
 export const paginationPagesDisjoint: Relation = {
   id: 'pagination-pages-disjoint',
   label: 'Adjacent pagination pages never share an item.',
@@ -243,25 +244,6 @@ export const paginationPagesDisjoint: Relation = {
     return null;
   },
 };
-
-/** Pure n-ary helper (not a Relation — there is no single before/after pair
- * for "union of every page"): the union of all given pages' items must equal
- * the expected full set. */
-export function checkPaginationUnion(pages: string[][], expectedTotal: string[]): RelationViolation | null {
-  const union = new Set<string>();
-  for (const page of pages) for (const item of page) union.add(item);
-  const total = asSet(expectedTotal);
-  if (!setsEqual(union, total)) {
-    const missing = [...total].filter((x) => !union.has(x));
-    const extra = [...union].filter((x) => !total.has(x));
-    return {
-      relation: 'pagination-union-is-whole',
-      detail: 'The union of all pages does not equal the expected full item set.',
-      evidence: { missing, extra },
-    };
-  }
-  return null;
-}
 
 /** Login -> logout -> login returns to the same observable state. Only the
  * two "logged in" observations (right after each login) are compared; the

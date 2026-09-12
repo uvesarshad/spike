@@ -267,6 +267,31 @@ function rootCauseLines(consoleError: string | null, calls: NetworkEntry[]): str
   return out;
 }
 
+/** A34: cap on how many deterministic page checks ride along in the fix
+ * prompt — same reasoning as MAX_EVIDENCE_LINES elsewhere: a noisy page must
+ * not blow out the prompt. */
+const MAX_FIX_PROMPT_CHECKS = 8;
+
+/** A34: deterministic page-health/interaction checks (A16/A24) recorded
+ * across the run's steps — "clicking X changed nothing", a same-origin
+ * server error, rendered "undefined" text, etc. This is the exact same
+ * InvariantViolation evidence the models driving the run already read (see
+ * driver/planner-prompt.ts's formatHistory) — surfacing it here too means the
+ * human (or coding agent) reading the fix prompt sees the same signal, not a
+ * strictly weaker one. Capped and pulled from every step, not just the
+ * failing one: a dead-click warning often lands on an earlier step than the
+ * one that ultimately failed. */
+function pageChecks(report: Report): string[] {
+  const out: string[] = [];
+  for (const s of report.steps) {
+    for (const v of s.invariants ?? []) {
+      out.push(v.detail);
+      if (out.length >= MAX_FIX_PROMPT_CHECKS) return out;
+    }
+  }
+  return out;
+}
+
 /** Path portion of a URL for readability; falls back to the raw string. */
 function safeRoute(url: string): string {
   try {
@@ -394,6 +419,8 @@ export function buildFixPrompt(report: Report, opts: FixPromptOptions = {}): str
     if (headline && p === headline) continue;
     lines.push(`- Screenshot: ${baseName(p)}`);
   }
+  const checks = pageChecks(report);
+  for (const c of checks) lines.push(`- Automated page check: ${c}`);
   lines.push('');
 
   // Likely root cause

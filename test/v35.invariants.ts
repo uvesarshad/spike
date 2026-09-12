@@ -12,9 +12,7 @@
  */
 
 import assert from 'node:assert/strict';
-import type { AxSnapshot } from '../src/ports/browser-port.js';
 import {
-  checkAxInvariants,
   checkDrainInvariants,
   checkProbeInvariants,
   INVARIANT_PROBE_JS,
@@ -326,53 +324,6 @@ for (const junk of [null, undefined, 'a string', 42, [], true, { renderedUndefin
   });
   const evidence = violations.find((v) => v.rule === 'rendered-undefined')?.evidence ?? '';
   check('long evidence is truncated', evidence.length <= 201);
-}
-
-// ---------------------------------------------------------------------------
-// checkAxInvariants
-// ---------------------------------------------------------------------------
-
-{
-  const ax: AxSnapshot = {
-    text: '',
-    truncated: false,
-    root: {
-      id: 'n0',
-      role: 'RootWebArea',
-      name: 'Fixture',
-      children: [
-        { id: 'n1', role: 'button', name: '' },
-        { id: 'n2', role: 'button', name: 'Place order' },
-        { id: 'n3', role: 'textbox', value: 'hello' },
-      ],
-    },
-  };
-  const violations = checkAxInvariants(ax);
-  check('unlabelled-control fires for an unnamed button', has(violations, 'unlabelled-control'));
-  check(
-    'unlabelled-control does not fire for a named button or a textbox with a value',
-    violations.filter((v) => v.rule === 'unlabelled-control').length === 1,
-  );
-}
-
-{
-  const ax: AxSnapshot = {
-    text: '',
-    truncated: false,
-    root: { id: 'n0', role: 'RootWebArea', name: 'Fixture', children: [{ id: 'n1', role: 'heading', name: 'Checkout' }] },
-  };
-  const violations = checkAxInvariants(ax);
-  check('checkAxInvariants is clean when nothing interactive is unlabelled', violations.length === 0);
-}
-
-{
-  const ax: AxSnapshot = {
-    text: '',
-    truncated: false,
-    root: { id: 'n0', role: 'RootWebArea', name: 'Fixture', children: [{ id: 'n1', role: 'button', name: '' }] },
-  };
-  const violations = checkAxInvariants(ax, { disabled: ['unlabelled-control'] });
-  check('config.disabled suppresses an AX rule', violations.length === 0);
 }
 
 // ---------------------------------------------------------------------------

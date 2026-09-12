@@ -479,13 +479,16 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
  * drained evidence and stamp any violations onto the record.
  *
  * Called at all three drain sites (main batch, cached-action, finish pass) so
- * evidence is uniform regardless of how the step was produced. Deliberately
- * NON-FATAL for now: violations are recorded and fed to the planner as
- * evidence, but do not decide the verdict — the oracle has never been dogfooded
- * against a real passing run (A1), and auto-failing on it before then would
- * silently change outcomes on a codebase whose only recorded runs are failures.
- * Flipping error-severity violations into a hard fail is the follow-up, once a
- * green baseline exists to measure the false-positive rate against.
+ * evidence is uniform regardless of how the step was produced. This function
+ * itself only RECORDS violations onto the step — evidence fed to whatever
+ * reads the step history (the models driving the run, via
+ * planner-prompt.ts's formatHistory; the fix prompt, via
+ * vibe/fix-prompt.ts's pageChecks) — it never fails anything by itself.
+ * Whether an error-severity violation actually FAILS the run is decided once,
+ * after the whole run finishes, over the complete step list: see
+ * findStrictOracleViolation and the `strictOracles` option (default true,
+ * A1) below — turning it off restores the original evidence-only behavior
+ * where the model's own verdict stands untouched.
  *
  * Best-effort throughout: a port with no `probeInvariants` (extension
  * transport) still gets the drain-derived rules, and a probe that throws is
@@ -586,10 +589,51 @@ function drainHasPageError(consoleEntries: { level: string }[], networkEntries: 
   );
 }
 
+/** A34: role/state signals that mark an error regardless of the page's own
+ * language — "alert"/"alertdialog"/"status" is the ARIA convention for a
+ * banner announcing something went wrong, and an "invalid" state (aria-
+ * invalid) marks a field the page itself flagged as bad input. Neither
+ * depends on the text containing an English word. */
+const ALERT_LIKE_ROLES = new Set(['alert', 'alertdialog', 'status']);
+
+/** Parse one line of the serialized AX tree ("n5 role \"name\" (states)",
+ * see capture/axtree.ts's serializeAxTree) into its role/name/states,
+ * best-effort — a line that doesn't match the expected shape (a truncation
+ * marker, an id-only line) yields all-undefined fields rather than throwing. */
+function parseAxLine(line: string): { role?: string; name?: string; states?: string[] } {
+  const trimmed = line.trim();
+  const head = trimmed.match(/^\S+\s+(\S+)(?:\s+"([^"]*)")?/);
+  const statesMatch = trimmed.match(/\(([^)]*)\)\s*$/);
+  return {
+    role: head?.[1],
+    name: head?.[2],
+    states: statesMatch ? statesMatch[1].split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : undefined,
+  };
+}
+
 /** Best-effort: pull a visible alert/error line out of the last snapshot's tree
- * text so even the uncertain path can say WHY (e.g. "Invalid email or password"). */
-function visibleErrorText(axText: string | undefined): string | null {
+ * text so even the uncertain path can say WHY (e.g. "Invalid email or password").
+ *
+ * A34: the original version only matched literal English "error"/"invalid"
+ * substrings, so a non-English page (or one whose copy just doesn't use those
+ * words) never surfaced anything here even when it visibly flagged an error.
+ * A structural pass now runs FIRST and is language-agnostic: a node with an
+ * alert-like role, or an interactive control carrying an "invalid" AX state
+ * (aria-invalid), counts regardless of what its text says. The English-word
+ * scan remains as a fallback for pages that show an error with neither
+ * signal (e.g. a plain paragraph reading "Error: something went wrong"). */
+export function visibleErrorText(axText: string | undefined): string | null {
   if (!axText) return null;
+
+  for (const line of axText.split('\n')) {
+    const { role, name, states } = parseAxLine(line);
+    const isAlertRole = role ? ALERT_LIKE_ROLES.has(role.toLowerCase()) : false;
+    const isInvalidControl = states?.includes('invalid') ?? false;
+    if (!isAlertRole && !isInvalidControl) continue;
+    const text = (name ?? line.trim()).trim();
+    if (text) return text;
+  }
+
   // prefer lines whose role looks like an alert/static text AND mention
   // error/invalid; fall back to any line mentioning error/invalid.
   let fallback: string | null = null;

@@ -9,7 +9,6 @@
  *  - masks suppress a dynamic-content (timestamp) diff
  *  - network-shape diff catches a status-class change and a disappeared request
  *  - baseline save/load/bless round-trip
- *  - compareEnvironments needs no baseline
  *  - every metamorphic relation, both satisfied and violated
  *  - pattern detection proposes a cart relation only when the run actually
  *    clicked an add/remove control (A2), never both directions at once, and
@@ -23,7 +22,6 @@ import path from 'node:path';
 import type { AxNode, AxSnapshot, NetworkEntry } from '../src/ports/browser-port.js';
 import {
   blessBaseline,
-  compareEnvironments,
   compareToBaseline,
   diffAxStructure,
   diffNetworkShape,
@@ -34,7 +32,6 @@ import {
 } from '../src/assertions/differential.js';
 import {
   addItemIncrementsCount,
-  checkPaginationUnion,
   checkRelation,
   detectRelationCandidates,
   filterIsSubset,
@@ -230,17 +227,6 @@ async function run() {
     const reloaded = await loadBaseline('checkout', tmpDir);
     const afterBlessCompare = compareToBaseline({ ax: snapshotB, network: networkA }, reloaded as Baseline);
     check('after blessing, the previously-drifted snapshot now compares clean', afterBlessCompare.clean === true);
-
-    // -------------------------------------------------------------------
-    // compareEnvironments needs no baseline at all
-    // -------------------------------------------------------------------
-    const envA = { ax: snapshotA, network: networkA };
-    const envB = { ax: snapshotA, network: networkA };
-    const envClean = compareEnvironments(envA, envB);
-    check('compareEnvironments on two identical live environments is clean, no baseline involved', envClean.clean === true && envClean.mode === 'environment');
-
-    const envDrift = compareEnvironments(envA, { ax: snapshotB, network: networkA });
-    check('compareEnvironments surfaces divergence between two live environments', envDrift.clean === false);
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }
@@ -299,15 +285,6 @@ async function run() {
     const page1: Observation = { items: ['a', 'b', 'c'] };
     const page2: Observation = { items: ['c', 'd', 'e'] };
     check('pagination-pages-disjoint: violated (overlap)', checkRelation(paginationPagesDisjoint, page1, page2)?.relation === 'pagination-pages-disjoint');
-  }
-  {
-    const pages = [
-      ['a', 'b'],
-      ['c', 'd'],
-      ['e'],
-    ];
-    check('checkPaginationUnion: satisfied (union equals whole)', checkPaginationUnion(pages, ['a', 'b', 'c', 'd', 'e']) === null);
-    check('checkPaginationUnion: violated (missing item)', checkPaginationUnion(pages, ['a', 'b', 'c', 'd', 'e', 'f'])?.relation === 'pagination-union-is-whole');
   }
   {
     const before: Observation = { state: { loggedInAs: 'alice', cart: ['x'] } };

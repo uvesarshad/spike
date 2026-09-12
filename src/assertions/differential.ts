@@ -1,7 +1,6 @@
-/* Tier 1 differential oracle (A24) — compare a run against a baseline (or
- * against a second live environment) instead of against a human-written
- * expectation. Two independent surfaces, both pure/deterministic, no model
- * call, no browser:
+/* Tier 1 differential oracle (A24) — compare a run against a baseline instead
+ * of against a human-written expectation. Two independent surfaces, both
+ * pure/deterministic, no model call, no browser:
  *
  *  - AxStructuralDiff (diffAxStructure) — structural diff over two
  *    AxSnapshots. This codebase is already AX-first (src/capture/axtree.ts,
@@ -15,20 +14,27 @@
  *
  * The blessing problem (see module doc on saveBaseline/blessBaseline below)
  * is the central design tension of this tier: diffing across TIME needs a
- * human to bless intentional changes, which fights autonomy; diffing across
- * ENVIRONMENTS needs no blessing at all, because both sides are live
- * simultaneously and divergence IS the signal. Both are first-class here —
- * compareToBaseline() and compareEnvironments() — per the design doc's
- * recommendation to make the environment mode a peer, not an afterthought.
+ * human to bless intentional changes, which fights autonomy. An earlier
+ * compareEnvironments() — diffing two LIVE environments (e.g. staging vs
+ * prod) instead of against a stored baseline, which needs no blessing since
+ * both sides are live simultaneously and divergence IS the signal — was
+ * removed 2026-09 (A34): the product itself (engine.ts) only ever calls
+ * compareToBaseline; compareEnvironments was exercised solely by its own unit
+ * test and never reached a real run. Reintroduce it if something actually
+ * needs a live-vs-live comparison.
  *
  * Confidence: the audit (26-08-08-audit-deterministic-speed.md, A24) rates
  * Tier 0 + Tier 1 together as capturing "most of what an autonomous system
  * can catch without human intent" — this tier is considered solid, not
  * speculative, PROVIDED masks are configured for whatever the target app
  * renders that legitimately changes every run (timestamps, prices, ids,
- * request-id headers baked into URLs). Without masking, false positives from
- * pure data churn are expected and are the reason the collection-collapsing
- * logic below exists (see canonicalizeChildren). */
+ * request-id headers baked into URLs). `DiffMask` below is how a caller would
+ * supply those, but as of 2026-09 (A34) nothing in the product actually does:
+ * engine.ts's own compareToBaseline call and cli.ts's blessBaseline call both
+ * pass no masks. Until a real masks source is wired through (a config field,
+ * a CLI flag), expect false positives from ordinary per-run data churn on any
+ * real app — the collection-collapsing logic below (canonicalizeChildren)
+ * softens some of that, but not all of it. */
 
 import type { AxNode, AxSnapshot, NetworkEntry } from '../ports/browser-port.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -360,17 +366,6 @@ export function compareToBaseline(current: ComparisonInput, baseline: Baseline, 
   const axChanges = diffAxStructure(baseline.ax, current.ax, effectiveMasks).changes;
   const network = diffNetworkShape(baseline.network, current.network, effectiveMasks);
   return { mode: 'baseline', axChanges, network, clean: isClean(axChanges, network) };
-}
-
-/** Diff across ENVIRONMENTS (staging vs prod, PR preview vs main): the
- * escape from the blessing problem, per the design doc. Both sides are live
- * simultaneously, so there is no "which one is right" question to defer to a
- * human — divergence itself IS the signal, and this needs no baseline store
- * at all. First-class alongside compareToBaseline, not a fallback. */
-export function compareEnvironments(a: ComparisonInput, b: ComparisonInput, masks?: DiffMask[]): DifferentialResult {
-  const axChanges = diffAxStructure(a.ax, b.ax, masks).changes;
-  const network = diffNetworkShape(a.network, b.network, masks);
-  return { mode: 'environment', axChanges, network, clean: isClean(axChanges, network) };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 /* Tier 0 invariant oracle (A24) — assertions true of essentially every correct
- * page, requiring zero human-written expectation. Three independent surfaces:
+ * page, requiring zero human-written expectation. Two independent surfaces:
  *
  *  - checkDrainInvariants()  — derived from console/network drains the loop
  *    already collects every step (src/capture/console-network.ts). No page
@@ -12,8 +12,11 @@
  *    parses whatever the probe returned — the probe runs in a hostile page
  *    and may be tampered with, throw, or return junk, so parsing is fully
  *    defensive and never throws.
- *  - checkAxInvariants() — a light structural pass over the AX snapshot the
- *    loop already has every step (no extra page evaluation at all).
+ *
+ * (A third surface, checkAxInvariants() — a structural pass over the AX
+ * snapshot flagging unlabelled interactive controls — was removed 2026-09
+ * (A34): it was never called anywhere outside its own unit test, so it never
+ * actually reached a real run.)
  *
  * These are deterministic and cost no model call — the highest-value primitive
  * an autonomous run can fail on, because "the AI thought it looked fine" is
@@ -22,7 +25,7 @@
  * docs/plan/26-08-08-options-autonomy-layer.md (A24 section) for the design
  * rationale and the full tier list (this module is Tier 0 only). */
 
-import type { AxNode, AxSnapshot, ConsoleEntry, NetworkEntry } from '../ports/browser-port.js';
+import type { ConsoleEntry, NetworkEntry } from '../ports/browser-port.js';
 
 export interface InvariantViolation {
   rule: string; // stable kebab-case id, e.g. 'rendered-undefined'
@@ -410,59 +413,6 @@ export function checkProbeInvariants(raw: unknown, config?: InvariantConfig): In
       evidence: truncateEvidence(rec.id),
     });
   }
-
-  return out;
-}
-
-// ---- Tier 0c: AX-structural invariants ------------------------------------
-
-const INTERACTIVE_AX_ROLES = new Set([
-  'button',
-  'textbox',
-  'searchbox',
-  'combobox',
-  'checkbox',
-  'radio',
-  'switch',
-  'link',
-  'menuitem',
-  'tab',
-  'slider',
-]);
-
-function walkAx(node: AxNode, visit: (n: AxNode) => void, budget: { n: number }): void {
-  if (budget.n <= 0) return;
-  budget.n--;
-  visit(node);
-  for (const child of node.children ?? []) walkAx(child, visit, budget);
-}
-
-/** Optional: structural checks over the AX snapshot the loop already has —
- * no extra page evaluation. Currently a light a11y subset (unlabelled
- * interactive controls); the DOM-level checks (duplicate ids, empty regions,
- * etc.) live in checkProbeInvariants because they need real DOM access. */
-export function checkAxInvariants(ax: AxSnapshot, config?: InvariantConfig): InvariantViolation[] {
-  const out: InvariantViolation[] = [];
-  const cap = new Capped(config);
-  if (!ax || !ax.root) return out;
-
-  walkAx(
-    ax.root,
-    (node) => {
-      const role = (node.role ?? '').toLowerCase();
-      if (!INTERACTIVE_AX_ROLES.has(role)) return;
-      const name = (node.name ?? '').trim();
-      const value = (node.value ?? '').trim();
-      if (name || value) return;
-      cap.push(out, {
-        rule: 'unlabelled-control',
-        severity: 'warn',
-        detail: `An interactive "${role}" control has no accessible name.`,
-        evidence: truncateEvidence(`${role}${node.id ? ' (' + node.id + ')' : ''}`),
-      });
-    },
-    { n: 20_000 },
-  );
 
   return out;
 }
