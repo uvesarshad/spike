@@ -4,11 +4,15 @@
  *  - checkDrainInvariants()  — derived from console/network drains the loop
  *    already collects every step (src/capture/console-network.ts). No page
  *    evaluation, so this is free even on steps that don't screenshot.
+ *  - checkSubmitEffect() — E10's third semantic check: an accepted form
+ *    submission that left the page exactly as it was. Uses the drains plus the
+ *    same before/after page reading the dead-click check reads.
  *  - INVARIANT_PROBE_JS / checkProbeInvariants() — an in-page probe (string
  *    literal executed via CDP Runtime.evaluate, same pattern as
  *    src/ports/runner-assets.ts) that inspects the live DOM for rendered
  *    "undefined"/"NaN"/etc, broken images, layout overflow, empty required
- *    regions, stuck loading states, and duplicate ids. checkProbeInvariants
+ *    regions, stuck loading states, duplicate ids, and (E10) raw translation
+ *    keys on screen plus broken values where a price belongs. checkProbeInvariants
  *    parses whatever the probe returned — the probe runs in a hostile page
  *    and may be tampered with, throw, or return junk, so parsing is fully
  *    defensive and never throws.
