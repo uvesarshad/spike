@@ -349,6 +349,14 @@ export interface BrowserPort {
    * mousemove-driven UI (custom drag handles, hover-tracking widgets), 'down'/
    * 'up' to compose gestures the click()/dragAndDrop() helpers don't cover. */
   mouse(kind: 'move' | 'down' | 'up', x: number, y: number): Promise<void>;
+  /** A23 (P1): scroll the page (or, given a nodeId from the current snapshot,
+   * that element's own scroll container) one screenful up or down. Without it
+   * anything below the fold — infinite lists, lazy-loaded sections, a long
+   * modal body — is simply unreachable: the only page the driver ever sees is
+   * the part that happens to be on screen. OPTIONAL so a transport that has no
+   * way to scroll can omit it; the driver fails the step with a clear message
+   * rather than pretending it scrolled. */
+  scroll?(direction: 'up' | 'down', nodeId?: string): Promise<void>;
   /** Open a new tab/target at `url` WITHOUT switching the active session to it;
    * returns an opaque id usable with switchTab()/closeTab(). */
   openTab(url: string): Promise<string>;

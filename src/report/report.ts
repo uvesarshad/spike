@@ -273,6 +273,8 @@ export function describeAction(a: Action): string {
       return `blur ${a.nodeId}`;
     case 'mouse':
       return `mouse ${a.kind} at (${a.x}, ${a.y})`;
+    case 'scroll':
+      return `scrolled ${a.direction}`;
     case 'open_tab':
       return `open tab ${a.url}`;
     case 'switch_tab':

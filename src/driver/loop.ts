@@ -370,6 +370,9 @@ function stepKind(action: Action): StepKind {
       return 'blur';
     case 'mouse':
       return 'mouse';
+    // A23 (P1): scrolling reads as looking around, not as a mouse gesture.
+    case 'scroll':
+      return 'navigate';
     case 'open_tab':
     case 'switch_tab':
     case 'close_tab':
@@ -458,6 +461,8 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
       return `Blur ${tgt ?? action.nodeId}`;
     case 'mouse':
       return `Mouse ${action.kind} at (${Math.round(action.x)}, ${Math.round(action.y)})`;
+    case 'scroll':
+      return `Scroll ${action.direction}${action.nodeId ? ` inside ${tgt ?? action.nodeId}` : ''}`;
     case 'open_tab':
       return `Open new tab: ${action.url}`;
     case 'switch_tab':
@@ -2331,6 +2336,11 @@ async function executeOnce(browser: BrowserPort, action: Action): Promise<void> 
       return browser.blur(action.nodeId);
     case 'mouse':
       return browser.mouse(action.kind, action.x, action.y);
+    // A23 (P1): optional on the transport — say so plainly instead of silently
+    // pretending the page moved.
+    case 'scroll':
+      if (!browser.scroll) throw new Error('this browser connection cannot scroll the page');
+      return browser.scroll(action.direction, action.nodeId);
     case 'wait':
       return sleep(action.ms);
     // A28 (P1): drag_and_drop is now dispatched through executeWithRetry

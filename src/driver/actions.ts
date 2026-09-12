@@ -29,6 +29,12 @@ export const ActionSchema = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('blur'), nodeId: z.string() }),
   z.object({ type: z.literal('mouse'), kind: z.enum(['move', 'down', 'up']), x: z.number(), y: z.number() }),
+  // A23 (P1): scrolling. Without it, infinite-scroll lists, lazy-loaded
+  // sections and anything below the fold were simply unreachable — the page
+  // the driver saw was only ever the part that happened to be on screen.
+  // `nodeId` scrolls that element into view first (an inner scroll container,
+  // a long modal body); omitted, it scrolls the page itself.
+  z.object({ type: z.literal('scroll'), direction: z.enum(['up', 'down']), nodeId: z.string().optional() }),
   z.object({ type: z.literal('open_tab'), url: z.string() }),
   z.object({ type: z.literal('switch_tab'), tabId: z.string() }),
   z.object({ type: z.literal('close_tab'), tabId: z.string() }),
@@ -165,6 +171,7 @@ export const PLAN_JSON_SCHEMA = {
               'drag_and_drop',
               'blur',
               'mouse',
+              'scroll',
               'open_tab',
               'switch_tab',
               'close_tab',
@@ -212,6 +219,7 @@ export const PLAN_JSON_SCHEMA = {
           sourceId: { type: 'string', description: 'drag_and_drop: nodeId to press on' },
           targetId: { type: 'string', description: 'drag_and_drop: nodeId to release on' },
           kind: { type: 'string', enum: ['move', 'down', 'up'], description: 'mouse: which discrete event to dispatch' },
+          direction: { type: 'string', enum: ['up', 'down'], description: 'scroll: which way to scroll' },
           x: { type: 'number', description: 'mouse: page x coordinate' },
           y: { type: 'number', description: 'mouse: page y coordinate' },
           tabId: { type: 'string', description: 'switch_tab/close_tab: id returned by a prior open_tab' },

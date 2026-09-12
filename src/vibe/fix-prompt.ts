@@ -72,6 +72,8 @@ export function humanizeStep(step: StepRecord): string {
       return `moved focus away from ${targetPhrase ?? 'a field'}`;
     case 'mouse':
       return `moved the mouse (${a.kind}) to (${a.x}, ${a.y})`;
+    case 'scroll':
+      return `scrolled ${a.direction} the page`;
     case 'open_tab':
       return `opened a new tab at ${a.url}`;
     case 'switch_tab':

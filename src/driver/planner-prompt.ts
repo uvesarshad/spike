@@ -106,6 +106,8 @@ export const ACTION_RULES_AND_VOCABULARY = `- Interact via nodeIds from the tree
 - Use drag_and_drop for mouse-driven drag interactions (sortable lists, sliders, custom drop zones) — press on sourceId, glide to targetId, release. It does NOT fire native HTML5 draggable dragstart/drop events (those need an OS gesture); only use it on UI that reacts to raw mouse events.
 - Use blur to move focus off a field (fires blur/change handlers some forms rely on for validation).
 - Use mouse for a single discrete mouse event ("move"/"down"/"up") at page coordinates x,y — for gestures click()/hover()/dragAndDrop() don't cover.
+- Use scroll when what you need is below (or above) what the tree shows — long pages, lazy-loaded sections, infinite lists. Give a nodeId to scroll inside that element (a long modal body, an inner list); omit it to scroll the whole page. The tree you see next describes the page AFTER scrolling.
+- If a cookie/consent banner or a modal is covering the page, dismiss it first, then continue the goal.
 - Use open_tab to open a URL in a NEW tab without leaving the current one; it returns an id you'll see quoted in the next step's history (e.g. "Open new tab (id: 7A2B)") — copy that id VERBATIM into a later switch_tab/close_tab. Use switch_tab to make another tab the active one (this ends the batch — the tree you see next describes the NEW tab). Use close_tab to close a tab you are NOT currently on.
 - Use script for a short (<=20 step) sequence of ordinary actions (navigate/click/type/hover/press_key/select_option/reload/go_back/wait/assert_dom/extract/upload_file/drag_and_drop/blur/mouse) you want to run back-to-back as ONE step without waiting for a reply between each — useful for a fixed multi-field flow you already know by heart. It CANNOT contain assert_visual, finish, or another script, and every field must be a plain value (no code, no expressions) — an invalid script is rejected outright and counts as a failed step.
 - Console errors / failed network requests after an action are strong evidence the app is broken — investigate or finish with verdict "fail" and cite them.
@@ -137,6 +139,7 @@ Action types:
 - {"type":"drag_and_drop","sourceId":string,"targetId":string}
 - {"type":"blur","nodeId":string}
 - {"type":"mouse","kind":"move"|"down"|"up","x":number,"y":number}
+- {"type":"scroll","direction":"up"|"down","nodeId":string} // nodeId optional (omit = scroll the page)
 - {"type":"open_tab","url":string}
 - {"type":"switch_tab","tabId":string}
 - {"type":"close_tab","tabId":string}

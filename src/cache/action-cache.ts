@@ -198,6 +198,10 @@ export function toCachedActionValue(action: Action, target?: StepTarget): Cached
     case 'drag_and_drop':
     case 'blur':
     case 'mouse':
+    // A23 (P1): scrolling is a way of LOOKING at the page, not a step of the
+    // journey — replaying it would re-do a viewport nudge whose starting point
+    // no longer exists. Rejected like the mouse/tab primitives above.
+    case 'scroll':
     case 'open_tab':
     case 'switch_tab':
     case 'close_tab':
@@ -605,6 +609,8 @@ function actionIntentForKey(action: Action, target?: StepTarget): string {
       return `blur:${tgt}`;
     case 'mouse':
       return `mouse:${action.kind}:${action.x},${action.y}`;
+    case 'scroll':
+      return `scroll:${action.direction}:${tgt}`;
     case 'open_tab':
       return `open_tab:${normalizeUrlForActionCache(action.url)}`;
     case 'switch_tab':

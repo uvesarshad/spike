@@ -39,6 +39,15 @@ export interface LiteBrowserDeps {
   onCursor(params: Record<string, unknown>): void;
 }
 
+/** A23 (P1): how much of the visible page one scroll action covers. Just under
+ * a full screen so a sticky header/footer never hides the seam. */
+const SCROLL_SCREENFUL_FRACTION = 0.85;
+/** A23 (P1): fallback size for a page that won't report its own viewport. */
+const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
+/** A23 (P1): hard cap on a full-page capture, so an endless feed can't produce
+ * an image too large to send to a model or hold in memory. */
+const MAX_SCREENSHOT_HEIGHT_PX = 4000;
+
 export class LiteExtensionBrowser implements BrowserPort {
   private shim: CdpShim | null = null;
   private capture: CaptureBuffers | null = null;
@@ -367,8 +376,95 @@ export class LiteExtensionBrowser implements BrowserPort {
     await sleep(100);
   }
 
+  /** A23 (P1): move one screenful up or down.
+   *
+   * Dispatched as a real wheel event at a point on (or inside) whatever is
+   * being scrolled, rather than setting a scroll position behind the page's
+   * back — an inner list, a virtualised table or a custom scroller then reacts
+   * exactly the way it would for a person, including firing the handlers that
+   * load the next batch of content. Given a nodeId, the wheel lands over that
+   * element; without one, over the middle of what is on screen. */
+  async scroll(direction: 'up' | 'down', nodeId?: string): Promise<void> {
+    const viewport = await this.viewportSize();
+    let x = Math.round(viewport.width / 2);
+    let y = Math.round(viewport.height / 2);
+    if (nodeId) {
+      const center = await this.centerOf(this.backendNodeId(nodeId)).catch(() => null);
+      if (center) {
+        x = Math.round(center.x);
+        y = Math.round(center.y);
+      }
+    }
+    const distance = Math.round(viewport.height * SCROLL_SCREENFUL_FRACTION);
+    await this.c.Input.dispatchMouseEvent({
+      type: 'mouseWheel',
+      x,
+      y,
+      deltaX: 0,
+      deltaY: direction === 'down' ? distance : -distance,
+    });
+    await sleep(250); // let lazily-loaded content land
+  }
+
+  /** Best-effort size of what is currently on screen. A page mid-navigation
+   * (or a transport that won't answer) falls back to a conventional desktop
+   * size — every use here is a coordinate or a distance, so a stale guess
+   * costs a slightly-off scroll, never a failure. */
+  private async viewportSize(): Promise<{ width: number; height: number }> {
+    try {
+      const metrics = (await this.c.Page.getLayoutMetrics()) as {
+        cssVisualViewport?: { clientWidth?: number; clientHeight?: number };
+        layoutViewport?: { clientWidth?: number; clientHeight?: number };
+      };
+      const vp = metrics.cssVisualViewport ?? metrics.layoutViewport;
+      const width = vp?.clientWidth;
+      const height = vp?.clientHeight;
+      if (typeof width === 'number' && width > 0 && typeof height === 'number' && height > 0) {
+        return { width, height };
+      }
+    } catch {
+      /* fall through to the default below */
+    }
+    return { width: DEFAULT_VIEWPORT.width, height: DEFAULT_VIEWPORT.height };
+  }
+
+  /** A23 (P1): capture the WHOLE page, not just the part that happens to be on
+   * screen. A verdict judged from the top of a long page missed everything
+   * below the fold — including, routinely, the error the run was looking for.
+   * Height is capped so an endless feed cannot produce an image too large to
+   * hand to a model or to hold in memory; a page that won't report its own size
+   * falls back to the old on-screen-only capture. */
+  private async fullPageCaptureParams(): Promise<Record<string, unknown>> {
+    const base: Record<string, unknown> = { format: 'png' };
+    try {
+      const metrics = (await this.c.Page.getLayoutMetrics()) as {
+        cssContentSize?: { width?: number; height?: number };
+        contentSize?: { width?: number; height?: number };
+      };
+      const content = metrics.cssContentSize ?? metrics.contentSize;
+      const width = content?.width;
+      const height = content?.height;
+      if (!(typeof width === 'number' && width > 0 && typeof height === 'number' && height > 0)) return base;
+      return {
+        ...base,
+        captureBeyondViewport: true,
+        clip: {
+          x: 0,
+          y: 0,
+          width: Math.round(width),
+          height: Math.min(Math.round(height), MAX_SCREENSHOT_HEIGHT_PX),
+          scale: 1,
+        },
+      };
+    } catch {
+      return base;
+    }
+  }
+
   async screenshot(): Promise<Buffer> {
-    const { data } = await this.c.Page.captureScreenshot({ format: 'png' });
+    // A23 (P1): the whole page — see fullPageCaptureParams().
+    const params = await this.fullPageCaptureParams();
+    const { data } = await this.c.Page.captureScreenshot(params as never);
     return Buffer.from(data, 'base64');
   }
 
