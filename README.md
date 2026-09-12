@@ -122,7 +122,8 @@ node dist/cli.js run --spec ./docs/release-2.3.md --url http://localhost:9401/
 node dist/cli.js replay --all --json
 ```
 
-Register as an MCP tool in Claude Code:
+Register it as an MCP tool — see [Registering as an MCP tool](#registering-as-an-mcp-tool)
+below for every editor. From a source checkout like this one:
 
 ```bash
 claude mcp add spike -- node /path/to/repo/dist/mcp-server.js
@@ -154,7 +155,7 @@ node dist/cli.js run "log in as test@test.com with password pw and complete chec
 node dist/cli.js replay --all --json
 ```
 
-Register as an MCP tool in Claude Code:
+Register it as an MCP tool (see [Registering as an MCP tool](#registering-as-an-mcp-tool)):
 
 ```powershell
 claude mcp add spike -- node C:\path\to\repo\dist\mcp-server.js
@@ -237,9 +238,51 @@ What each add-on unlocks:
 | `spike daemon` | Start the vibe-mode daemon: the bridge the extension side panel connects to |
 | `spike fix <runId>` | Print the fix prompt for a finished run — or with `--apply`, hand it to your coding agent headlessly |
 | `spike secret` | Manage the local encrypted vault — secrets are typed via `{{secret:NAME}}`, never reach any model |
-| `spike mcp` | Start the MCP stdio server (register in a coding agent as command `spike`, args `["mcp"]`) |
+| `spike mcp` | Start the MCP stdio server — register it as command `spike`, args `["mcp"]` (see [Registering as an MCP tool](#registering-as-an-mcp-tool)) |
 | `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
 | `spike dashboard` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats |
+
+## Registering as an MCP tool
+
+There are exactly two forms, and which one you use depends only on whether the
+`spike` binary is on your PATH.
+
+**Installed globally** (`npm i -g spike-agent`) — command `spike`, args `["mcp"]`:
+
+```bash
+claude mcp add spike -- spike mcp
+```
+
+**From a source checkout** — no `spike` on PATH, so point Node at the built
+server (run `npm run build` first):
+
+```bash
+claude mcp add spike -- node /path/to/repo/dist/mcp-server.js
+```
+
+**Cursor** — `.cursor/mcp.json` in the project (or `~/.cursor/mcp.json` for every
+project):
+
+```json
+{
+  "mcpServers": {
+    "spike": {
+      "command": "spike",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+From a checkout, swap those two lines for `"command": "node"` and
+`"args": ["/path/to/repo/dist/mcp-server.js"]`.
+
+**Codex and Windsurf** take the same `{command, args}` pair in their own MCP
+config (`~/.codex/config.toml` under `[mcp_servers.spike]`, Windsurf's
+`mcp_config.json` under `mcpServers`) — the command and args never change, only
+the file they go in.
+
+Either way the agent gets one tool, `qa_run`.
 
 ## Running a suite
 

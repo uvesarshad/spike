@@ -1137,7 +1137,7 @@ program
 
 program
   .command('mcp')
-  .description('start the MCP stdio server (register in a coding agent as: command "spike", args ["mcp"])')
+  .description('start the MCP stdio server — register it in your coding agent as command "spike", args ["mcp"] (or command "node", args ["<repo>/dist/mcp-server.js"] from a source checkout); see the README for Claude Code / Cursor / Codex / Windsurf')
   .action(async () => {
     const { startMcpServer } = await import('./mcp-server.js');
     await startMcpServer();
