@@ -446,12 +446,15 @@ body {
 }
 .spend-currency { color: var(--ink-2); font-size: 12px; }
 .spend-input { max-width: 5.5rem; }
+/* A36: this note describes what the next run will do — look-only, or acting on
+   the site as you. Both are ordinary states, so it is styled as information;
+   the amber it used to carry read as an alarm on every site someone tested. */
 .consent-note {
   margin-top: 6px;
   font-size: 11px;
-  color: var(--amber);
-  background: rgba(245, 194, 74, .08);
-  border: 1px solid rgba(245, 194, 74, .28);
+  color: var(--ink-2);
+  background: var(--raised);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   padding: 7px 10px;
 }

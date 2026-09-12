@@ -1353,6 +1353,10 @@ chrome.runtime.onConnect.addListener((port) => {
 // about: pages are refused.
 const SENSITIVE_SCHEMES = ['chrome:', 'chrome-extension:', 'devtools:', 'edge:', 'view-source:', 'about:'];
 
+// A36: what the user sees when they try to test one of those pages.
+const RESTRICTED_PAGE_MESSAGE =
+  "Chrome doesn't allow testing on this page (browser pages, the Web Store, other extensions). Open your site in a tab.";
+
 async function attachDebugger(tabId) {
   if (attached.has(tabId)) return;
   // activeTab-narrowed build (A15 store-rejection fallback, no <all_urls>):
@@ -1375,7 +1379,11 @@ async function attachDebugger(tabId) {
   try { scheme = new URL(url).protocol; } catch { /* opaque/new-tab urls */ }
   log('attaching debugger to tab', tabId, url || '(unknown url)');
   if (url !== 'about:blank' && SENSITIVE_SCHEMES.includes(scheme)) {
-    throw new Error(`attachDebugger: refusing to attach to a ${scheme} page (tab ${tabId})`);
+    // A36: this surfaces straight to the user, so it says what happened and
+    // what to do about it. The scheme that tripped it goes to the log, where
+    // it is useful, instead of into a message nobody can act on.
+    log('refusing to attach: restricted page', scheme, 'tab', tabId);
+    throw new Error(RESTRICTED_PAGE_MESSAGE);
   }
   await new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, DEBUGGER_VERSION, () => {

@@ -1142,8 +1142,11 @@ function refreshConsent() {
   } else if (isLocalHost(host)) {
     consentNote.hidden = true;
   } else {
+    // A36: testing a site you don't own is the NORMAL case, not a hazard, so
+    // this says what will happen in plain words and is styled as information
+    // rather than a warning.
     consentNote.hidden = false;
-    consentNote.textContent = 'third-party site — the agent will interact with it as you';
+    consentNote.textContent = 'I\u2019ll act on this site as you \u2014 signed in as you, with your permissions';
   }
 }
 
@@ -3326,7 +3329,7 @@ function startRun(task) {
     return;
   }
   if (!activeTab || !isTestableUrl(activeTab.url)) {
-    showError('Open the page you want to test in this tab (an http/https page).');
+    showError('Switch to the tab with your site, then come back here.');
     return;
   }
   // A7: in document mode "Run" does not drive anything — it works out the list
