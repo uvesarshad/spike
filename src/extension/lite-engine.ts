@@ -19,6 +19,7 @@ import { NanoAdapter } from '../router/adapters/nano.js';
 import { LiteExtensionBrowser, type LiteBrowserDeps } from './lite-extension-browser.js';
 import { LiteNano, type LiteNanoDeps } from './lite-nano.js';
 import { BrowserArtifactStore, type ArtifactBundle } from './browser-artifacts.js';
+import { makeZip, type ZipEntry } from '../report/zip.js';
 import {
   defaultModelFor,
   isSafeModelId,
@@ -32,7 +33,7 @@ import {
 } from '../vibe/settings-data.js';
 import { headlineScreenshot, slimReport, type Report } from '../report/report.js';
 import { decomposeSpec, MAX_FLOWS, type FlowUnit } from '../driver/spec-decompose.js';
-import { renderPlainReport, buildFixPrompt } from '../vibe/fix-prompt.js';
+import { renderPlainReport, buildFixPrompt, dataUri, MAX_FIX_PROMPT_IMAGE_BYTES } from '../vibe/fix-prompt.js';
 import { explainReason } from '../vibe/reason-text.js';
 
 // Re-export the pure helpers sw.js (plain JS, module SW) needs, so it imports
@@ -234,6 +235,30 @@ export function buildLiteConfig(
  * here afterwards — that is the only way to honestly tell the user "your
  * document had more in it than I'm going to run", which asking for 8 in the
  * prompt would hide. No browser and no artifacts are involved. */
+/** A15: the last run's report + screenshots as ONE zip, for "Send to my
+ * developer". `exportBundle()` has existed since the browser-only engine
+ * landed and nothing ever called it — the evidence was there, just unreachable.
+ * Same archive layout as the desktop helper's: report.json at the root,
+ * screenshots under screenshots/. */
+export function zipLiteBundle(bundle: ArtifactBundle): Uint8Array {
+  const entries: ZipEntry[] = [{ path: 'report.json', data: new TextEncoder().encode(bundle.reportJson) }];
+  for (const shot of bundle.screenshots) {
+    // names are already "screenshots/step-NN.png"
+    entries.push({ path: shot.name, data: base64ToBytes(shot.base64) });
+  }
+  if (bundle.audit.length) {
+    entries.push({ path: 'audit.json', data: new TextEncoder().encode(JSON.stringify(bundle.audit, null, 2)) });
+  }
+  return makeZip(entries);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 export async function decomposeSpecLite(opts: {
   spec: string;
   keys: LiteKeys;
@@ -250,6 +275,17 @@ export async function decomposeSpecLite(opts: {
   });
   const cap = Math.max(1, Math.min(opts.maxFlows ?? LITE_MAX_FLOWS, MAX_FLOWS));
   return { flows: all.slice(0, cap), cap, truncated: all.length > cap, total: all.length };
+}
+
+/** A15: the failing screenshot as a data URI for the fix prompt, from the
+ * in-memory bundle, or undefined when it is too big to be worth pasting. */
+function liteFixThumbnail(report: Report, bundle: ArtifactBundle): string | undefined {
+  const p = headlineScreenshot(report);
+  if (!p) return undefined;
+  const shot = bundle.screenshots.find((s) => p.endsWith(s.name));
+  if (!shot) return undefined;
+  const uri = dataUri(shot.base64, 'image/png');
+  return uri.length <= MAX_FIX_PROMPT_IMAGE_BYTES ? uri : undefined;
 }
 
 export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
@@ -299,6 +335,7 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);
 
+    const bundle = artifacts.exportBundle();
     const done: Record<string, unknown> = {
       ...slimReport(report),
       plainReport: renderPlainReport(report),
@@ -308,10 +345,10 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       // A15: which picture the result card should show. The bytes stay in the
       // bundle; the worker serves them on request.
       screenshotPath: headlineScreenshot(report),
-      fixPrompt: buildFixPrompt(report),
+      fixPrompt: buildFixPrompt(report, { screenshotDataUri: liteFixThumbnail(report, bundle) }),
       durationMs: report.durationMs,
     };
-    return { report, bundle: artifacts.exportBundle(), done };
+    return { report, bundle, done };
   } finally {
     await browser.close();
   }

@@ -10,6 +10,7 @@
  *   panel -> SW : { kind:'run', task, tabId, url, allowHost?, allowHosts? }
  *                 { kind:'decompose', spec, url }  (A7: document → flow list)
  *                 { kind:'artifact', path }        (A15: fetch one screenshot)
+ *                 { kind:'bundle' }                (A15: everything, zipped)
  *                 { kind:'cancel' }
  *                 { kind:'fix' }
  *                 { kind:'clip' }
@@ -145,6 +146,7 @@ const allowHostBtn = $('allowHostBtn');
 const shotWrap = $('shotWrap');
 const shotImg = $('shotImg');
 const shotCaption = $('shotCaption');
+const bundleBtn = $('bundleBtn');
 
 // settings
 const settingsBtn = $('settingsBtn');
@@ -496,6 +498,12 @@ function onPortMessage(msg) {
     case 'artifact-error':
       // The picture is a bonus, never the point — drop it quietly.
       if (msg.path === shotWanted) hideShot();
+      break;
+    case 'bundle':
+      onBundleReceived(msg);
+      break;
+    case 'bundle-error':
+      onBundleError(msg.message);
       break;
     case 'clip':
       onClipReceived(msg);
@@ -1327,8 +1335,10 @@ function renderResult(params) {
   // per flow — the single report below is the flow that most needs attention.
   renderFlowOutcome(params.flowOutcome);
 
-  // A15: the failing step's screenshot (or the final one on a pass).
+  // A15: the failing step's screenshot (or the final one on a pass), and the
+  // one-file bundle for whoever is going to fix it.
   requestShot(params);
+  resetBundleBtn();
 
   const reportText = params.plainReport || params.reason || '(no report)';
   plainReport.textContent = reportText;
@@ -1457,19 +1467,60 @@ function onClipReceived(msg) {
     return;
   }
   try {
-    const blob = base64ToBlob(msg.dataBase64, msg.mime);
-    const objUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = objUrl;
-    a.download = msg.name || 'replay.webm';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    // revoke after the click has had a chance to start the download
-    setTimeout(() => { try { URL.revokeObjectURL(objUrl); } catch { /* noop */ } }, 4000);
+    saveBlob(base64ToBlob(msg.dataBase64, msg.mime), msg.name || 'replay.webm');
   } catch (e) {
     onClipError(String(e && e.message ? e.message : e));
   }
+}
+
+// ---- A15: "Send to my developer" -------------------------------------------
+//
+// Everything the test produced — the report, every screenshot, the replay clip
+// when there is one — as ONE file. Six separate downloads is not something you
+// can hand to somebody.
+
+let fetchingBundle = false;
+
+function resetBundleBtn() {
+  fetchingBundle = false;
+  bundleBtn.disabled = false;
+  bundleBtn.innerHTML = qaIcon('download') + '<span>Send to my developer</span>';
+}
+
+bundleBtn.addEventListener('click', () => {
+  if (fetchingBundle) return;
+  fetchingBundle = true;
+  bundleBtn.disabled = true;
+  bundleBtn.textContent = 'Packing…';
+  postToSW({ kind: 'bundle' });
+});
+
+function onBundleReceived(msg) {
+  resetBundleBtn();
+  if (!msg || !msg.dataBase64) { onBundleError('nothing came back'); return; }
+  try {
+    saveBlob(base64ToBlob(msg.dataBase64, msg.mime || 'application/zip'), msg.name || 'spike-test.zip');
+  } catch (e) {
+    onBundleError(String(e && e.message ? e.message : e));
+  }
+}
+
+function onBundleError(message) {
+  resetBundleBtn();
+  showError('Could not pack that up: ' + (message || 'unknown error'));
+}
+
+/** Hand a blob to the browser as a download. */
+function saveBlob(blob, filename) {
+  const objUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = objUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // revoke after the click has had a chance to start the download
+  setTimeout(() => { try { URL.revokeObjectURL(objUrl); } catch { /* noop */ } }, 4000);
 }
 
 function onClipError(message) {

@@ -1376,3 +1376,6 @@ body {
   border-radius: var(--radius-sm);
 }
 .shot-caption { font-size: 11px; color: var(--muted); }
+
+/* A15: the row of result-card downloads. */
+.result-actions { display: flex; flex-flow: row wrap; gap: 8px; }

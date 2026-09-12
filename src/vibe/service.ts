@@ -19,6 +19,8 @@
  *                             async vibe.fix-progress/-done events)
  *   vibe.cancel {}          → {cancelled:boolean}  (aborts the active run)
  *   vibe.clip   {}          → {name, mime, dataBase64}  (last saved replay clip)
+ *   vibe.bundle.get {}      → {name, mime, dataBase64}  (A15: the last run's
+ *                             whole artifacts/<runId>/ folder + its clip, zipped)
  *   vibe.artifact.get {path} → {name, mime, dataBase64}  (A15: one screenshot
  *                             from the LAST run — the path must be one that run
  *                             produced, so this is not a read-any-file method)
@@ -57,7 +59,8 @@ import { createPlanningRouter, qaRun, type QaRunOptions } from '../engine.js';
 import { loadConfig } from '../config.js';
 import { decomposeSpec } from '../driver/spec-decompose.js';
 import { headlineScreenshot, slimReport, type Report } from '../report/report.js';
-import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
+import { makeZip, type ZipEntry } from '../report/zip.js';
+import { renderPlainReport, buildFixPrompt, dataUri, MAX_FIX_PROMPT_IMAGE_BYTES } from './fix-prompt.js';
 import { explainReason } from './reason-text.js';
 import { dispatchFix, isAutoFixAcceptedFor, detectFixAgent, NO_PROJECT_FOLDER_MESSAGE } from './auto-fix.js';
 import { loadAppModel, coverageReport, type AppModel } from '../discovery/index.js';
@@ -146,6 +149,23 @@ interface RecStopResult { ok: boolean; reason?: string; webmBase64?: string; byt
  * URL (crawl-discovered routes always are; static-only routes may be bare
  * patterns like `/about` and are skipped). Undefined when neither yields a
  * parseable host — callers then treat the model as unscoped (serve it as-is). */
+/** A15: the failing screenshot as a data URI for the fix prompt, or undefined
+ * when there isn't one or it is too big to be worth pasting into a chat box.
+ * Reads the file eagerly only when it is small enough — the size check is done
+ * on disk first so a 3 MB full-page PNG is never loaded just to be discarded. */
+function fixPromptThumbnail(report: Report): string | undefined {
+  const p = headlineScreenshot(report);
+  if (!p) return undefined;
+  try {
+    // base64 is 4/3 of the byte length, plus the short "data:image/png;base64,"
+    // prefix — so bail before reading anything that obviously cannot fit.
+    if (fs.statSync(p).size * (4 / 3) > MAX_FIX_PROMPT_IMAGE_BYTES) return undefined;
+    return dataUri(fs.readFileSync(p).toString('base64'), 'image/png');
+  } catch {
+    return undefined;
+  }
+}
+
 function appModelHost(model: AppModel): string | undefined {
   if (model.baseUrl) {
     try {
@@ -190,6 +210,9 @@ export class VibeService {
    * file only if it is in here — the panel can therefore ask for a screenshot
    * by path without that method becoming a read-anything-on-disk hole. */
   private lastEvidencePaths = new Set<string>();
+  /** A15: the artifacts/<runId>/ folder of the last finished run — everything
+   * vibe.bundle.get is allowed to put in the zip. Null until a run finishes. */
+  private lastRunDir: string | null = null;
 
   constructor(private readonly bridge: BridgeServer) {}
 
@@ -364,6 +387,54 @@ export class VibeService {
         throw new Error('that file is no longer on disk');
       }
       return { name: path.basename(p), mime, dataBase64: buf.toString('base64') };
+    });
+
+    // vibe.bundle.get — A15: the whole of the last run's artifacts/<runId>/
+    // folder (report.json + every screenshot) plus its replay clip, as ONE zip,
+    // so "Send to my developer" is a single file rather than six downloads.
+    // Scoped to that one directory: it is read by listing the run folder, never
+    // by taking a path from the caller.
+    this.bridge.onRequest('vibe.bundle.get', async (params, ctx) => {
+      if (!this.bridge.isAuthenticated(ctx.clientId)) {
+        throw new Error('vibe.bundle.get: unauthenticated client');
+      }
+      void params;
+      const dir = this.lastRunDir;
+      if (!dir) throw new Error('no test has finished yet');
+      const entries: ZipEntry[] = [];
+      const walk = (abs: string, rel: string): void => {
+        let stat: fs.Stats;
+        try {
+          stat = fs.statSync(abs);
+        } catch {
+          return;
+        }
+        if (stat.isDirectory()) {
+          for (const name of fs.readdirSync(abs)) walk(path.join(abs, name), rel ? `${rel}/${name}` : name);
+          return;
+        }
+        try {
+          entries.push({ path: rel, data: new Uint8Array(fs.readFileSync(abs)) });
+        } catch {
+          /* a file that vanished mid-zip is not worth failing the whole bundle for */
+        }
+      };
+      walk(dir, '');
+      // The clip lives outside the run folder, so it is added by hand.
+      if (this.lastClipPath) {
+        try {
+          entries.push({ path: path.basename(this.lastClipPath), data: new Uint8Array(fs.readFileSync(this.lastClipPath)) });
+        } catch {
+          /* no clip on disk — the rest of the bundle still goes */
+        }
+      }
+      if (!entries.length) throw new Error('that test left nothing to send');
+      const zip = makeZip(entries);
+      return {
+        name: `spike-${path.basename(dir)}.zip`,
+        mime: 'application/zip',
+        dataBase64: Buffer.from(zip).toString('base64'),
+      };
     });
 
     // vibe.map.get — A51: read-only summary of the discovery layer's
@@ -708,6 +779,9 @@ export class VibeService {
         // A15: exactly this run's files become fetchable, and the previous
         // run's stop being so.
         this.lastEvidencePaths = new Set(report.evidence_paths ?? []);
+        // evidence_paths[0] is report.json inside artifacts/<runId>/ — its
+        // folder is the whole of what this run produced.
+        this.lastRunDir = report.evidence_paths?.[0] ? path.dirname(report.evidence_paths[0]) : null;
         this.bridge.sendEvent('vibe.done', {
           ...slimReport(report),
           plainReport: renderPlainReport(report),
@@ -721,7 +795,7 @@ export class VibeService {
           // bytes separately (vibe.artifact.get) so a passing run's payload
           // doesn't carry a megabyte of base64 nobody looks at.
           screenshotPath: headlineScreenshot(report),
-          fixPrompt: buildFixPrompt(report),
+          fixPrompt: buildFixPrompt(report, { screenshotDataUri: fixPromptThumbnail(report) }),
           durationMs: report.durationMs,
           ...(clipPath ? { clipPath } : {}),
         }, target);

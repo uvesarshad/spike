@@ -13,7 +13,7 @@ import { exitCodeForVerdict, INFRA_ERROR_EXIT_CODE } from './cli-exit-codes.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { allocateIsolatedSession, createPlanningRouter, isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
 import { decomposeSpec, renderFlowTable, runFlows } from './driver/spec-decompose.js';
-import { slimReport, type Report } from './report/report.js';
+import { headlineScreenshot, slimReport, type Report } from './report/report.js';
 import { findChrome } from './chrome/launch.js';
 import { buildDoctorReport, doctorExitCode, renderDoctorReport, type DoctorRoleProbe } from './doctor.js';
 import type { Capability } from './router/adapter.js';
@@ -1339,6 +1339,12 @@ function renderDashboardRun(report: Report & { replayMatch?: { name: string; sco
     .map((s) => `<tr><td>${s.index}</td><td>${s.ok ? 'ok' : 'FAIL'}</td><td>${escapeHtml(s.description)}</td><td>${escapeHtml(s.error ?? '')}</td></tr>`)
     .join('\n');
 
+  // A15 (P1): the dashboard showed model traces and step tables but never a
+  // picture, even though the run had already taken one of the exact moment it
+  // broke. Inlined as a data URI so the server stays a single read-only route
+  // with no static-file handler and no path off the report's own evidence list.
+  const shotHtml = dashboardScreenshotHtml(report);
+
   return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(report.runId)} — spike dashboard</title><style>${DASHBOARD_STYLE}</style></head><body>
     <a class="back" href="/">&larr; all runs</a>
     <h1 class="${verdictClass(report.verdict)}">${escapeHtml(report.runId)} — ${escapeHtml(report.verdict)}</h1>
@@ -1348,11 +1354,39 @@ function renderDashboardRun(report: Report & { replayMatch?: { name: string; sco
     <h2>model_trace</h2>
     <table><tr><th>step</th><th>capability</th><th>rung</th><th>adapter</th><th>latency</th><th>note</th></tr>${traceRows || '<tr><td colspan="6">(empty — deterministic replay, no planner calls)</td></tr>'}</table>
     ${report.assertion_trace ? `<h2>assertion_trace</h2><table><tr><th>step</th><th>policy</th><th>verdict</th><th>disagreement</th><th>summary</th></tr>${assertionRows}</table>` : ''}
+    ${shotHtml}
     <h2>steps</h2>
     <table><tr><th>#</th><th>ok</th><th>description</th><th>error</th></tr>${stepRows}</table>
     <h2>reason</h2>
     <pre>${escapeHtml(report.reason)}</pre>
   </body></html>`;
+}
+
+/** A15: the failing step's screenshot (or, on a pass, the final frame) as an
+ * inline <img>, or '' when there isn't one / it can't be read. Capped so a
+ * multi-megabyte full-page PNG doesn't make the page unusable — past the cap
+ * the filename is named instead, which is useful here because the reader is
+ * already on the machine holding the file. */
+const DASHBOARD_MAX_IMAGE_BYTES = 3 * 1024 * 1024;
+
+function dashboardScreenshotHtml(report: Report): string {
+  const p = headlineScreenshot(report);
+  if (!p) return '';
+  const failed = report.verdict !== 'pass';
+  const caption = failed ? 'The page where it broke' : 'How the page looked at the end';
+  try {
+    if (fs.statSync(p).size > DASHBOARD_MAX_IMAGE_BYTES) {
+      return `<h2>screenshot</h2><div class="sub">${escapeHtml(caption)} — too large to inline: ${escapeHtml(p)}</div>`;
+    }
+    const b64 = fs.readFileSync(p).toString('base64');
+    return (
+      `<h2>screenshot</h2><div class="sub">${escapeHtml(caption)}</div>` +
+      `<img src="data:image/png;base64,${b64}" alt="${escapeHtml(caption)}" ` +
+      'style="max-width:100%;border:1px solid #232838;border-radius:6px;display:block;margin-top:8px" />'
+    );
+  } catch {
+    return '';
+  }
 }
 
 function startDashboard(artifactsDir: string, port: number): void {

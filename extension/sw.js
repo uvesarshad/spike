@@ -29,7 +29,7 @@
  * static import below works. Pro mode (daemon present) is unchanged.
  */
 
-import { runLite, buildLiteConfig, DEFAULT_SETTINGS, decomposeSpecLite, LITE_MAX_FLOWS } from './lite-engine.js';
+import { runLite, buildLiteConfig, DEFAULT_SETTINGS, decomposeSpecLite, LITE_MAX_FLOWS, zipLiteBundle } from './lite-engine.js';
 
 // MANIFEST_VARIANT: token-replaced at pack time by scripts/pack-extension.ts
 // (see stageVariant() there) — 'default' ships with extension/manifest.json
@@ -968,6 +968,37 @@ chrome.runtime.onConnect.addListener((port) => {
           const hit = shots.find((s) => s && typeof s.name === 'string' && (s.name === wanted || wanted.endsWith(s.name)));
           if (hit) port.postMessage({ kind: 'artifact', path: wanted, mime: 'image/png', dataBase64: hit.base64 });
           else port.postMessage({ kind: 'artifact-error', path: wanted, message: 'that screenshot is no longer available' });
+          break;
+        }
+        // A15: everything the last test produced, as one zip — the file the
+        // user hands to whoever is going to fix it.
+        case 'bundle': {
+          if (daemonConnected()) {
+            try {
+              const r = await sendRequest('vibe.bundle.get', {});
+              port.postMessage({ kind: 'bundle', name: r && r.name, mime: (r && r.mime) || 'application/zip', dataBase64: r && r.dataBase64 });
+            } catch (e) {
+              port.postMessage({ kind: 'bundle-error', message: String(e && e.message ? e.message : e) });
+            }
+            break;
+          }
+          if (!lastLiteBundle) {
+            port.postMessage({ kind: 'bundle-error', message: "that test's files are no longer available — run it again to get a fresh copy." });
+            break;
+          }
+          try {
+            const zip = zipLiteBundle(lastLiteBundle);
+            let bin = '';
+            for (let i = 0; i < zip.length; i++) bin += String.fromCharCode(zip[i]);
+            port.postMessage({
+              kind: 'bundle',
+              name: `spike-${lastLiteBundle.runId || 'test'}.zip`,
+              mime: 'application/zip',
+              dataBase64: btoa(bin),
+            });
+          } catch (e) {
+            port.postMessage({ kind: 'bundle-error', message: String(e && e.message ? e.message : e) });
+          }
           break;
         }
         case 'nano-download': {

@@ -10,6 +10,7 @@ import { redactTaskText, redactTypedText } from '../report/redact.js';
 import { renderCoverageLine } from '../orchestrator/fan-out.js';
 import type { NetworkEntry } from '../ports/browser-port.js';
 import { plainReasonText } from './reason-text.js';
+import { headlineScreenshot } from '../report/report.js';
 
 /** Humanize a single step into "what the robot did", preferring the role+name
  * target over meaningless per-snapshot nodeIds. */
@@ -312,7 +313,25 @@ export function sanitizeForPrompt(text: string, maxLineLength = MAX_SANITIZED_LI
     .join('\n');
 }
 
-export function buildFixPrompt(report: Report): string {
+/** A15: how big an inline screenshot may get before it stops being worth it.
+ * A fix prompt is pasted into a chat box; past this it starts costing more
+ * context than the picture is worth, so the bare filename stands instead. */
+export const MAX_FIX_PROMPT_IMAGE_BYTES = 40 * 1024;
+
+export interface FixPromptOptions {
+  /** A15: the failing step's screenshot as a `data:image/png;base64,…` URI.
+   * The caller supplies it because only the caller can read the bytes (a file
+   * on disk for the desktop helper, an in-memory bundle in the browser).
+   * Embedded only when it fits under MAX_FIX_PROMPT_IMAGE_BYTES. */
+  screenshotDataUri?: string;
+}
+
+/** A15: `data:<mime>;base64,<…>` — the form a markdown image link needs. */
+export function dataUri(base64: string, mime = 'image/png'): string {
+  return `data:${mime};base64,${base64}`;
+}
+
+export function buildFixPrompt(report: Report, opts: FixPromptOptions = {}): string {
   if (report.verdict === 'pass') return '';
 
   const lines: string[] = [];
@@ -362,8 +381,19 @@ export function buildFixPrompt(report: Report): string {
   if (failRec) {
     lines.push(`- Failed at step ${did.findIndex((s) => s.index === failRec.index) + 1 || failRec.index + 1} (${new Date(failRec.ts).toISOString()})`);
   }
+  // A15: a bare "Screenshot: step-06.png" is meaningless to a web-based coding
+  // tool, which has no access to the user's disk. Inline the failing frame when
+  // it is small enough to be worth the context; otherwise keep the filenames,
+  // which are at least useful to someone working locally.
   const shots = report.evidence_paths.filter((p) => p.endsWith('.png'));
-  for (const p of shots) lines.push(`- Screenshot: ${baseName(p)}`);
+  const thumb = opts.screenshotDataUri;
+  const inlineOk = Boolean(thumb && thumb.startsWith('data:image/') && thumb.length <= MAX_FIX_PROMPT_IMAGE_BYTES);
+  const headline = inlineOk ? headlineScreenshot(report) : undefined;
+  if (inlineOk) lines.push(`- Screenshot of the failing step: ![failing step](${thumb})`);
+  for (const p of shots) {
+    if (headline && p === headline) continue;
+    lines.push(`- Screenshot: ${baseName(p)}`);
+  }
   lines.push('');
 
   // Likely root cause

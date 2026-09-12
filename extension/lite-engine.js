@@ -549,7 +549,7 @@ var require_buffer = __commonJS({
           case "hex":
             return len >>> 1;
           case "base64":
-            return base64ToBytes(string).length;
+            return base64ToBytes2(string).length;
           default:
             if (loweredCase) {
               return mustMatch ? -1 : utf8ToBytes(string).length;
@@ -854,7 +854,7 @@ var require_buffer = __commonJS({
       return blitBuffer(asciiToBytes(string), buf, offset, length);
     }
     function base64Write(buf, string, offset, length) {
-      return blitBuffer(base64ToBytes(string), buf, offset, length);
+      return blitBuffer(base64ToBytes2(string), buf, offset, length);
     }
     function ucs2Write(buf, string, offset, length) {
       return blitBuffer(utf16leToBytes(string, buf.length - offset), buf, offset, length);
@@ -1774,7 +1774,7 @@ var require_buffer = __commonJS({
       }
       return byteArray;
     }
-    function base64ToBytes(str) {
+    function base64ToBytes2(str) {
       return base64.toByteArray(base64clean(str));
     }
     function blitBuffer(src, dst, offset, length) {
@@ -15342,6 +15342,112 @@ var BrowserArtifactStore = class {
   }
 };
 
+// src/report/zip.ts
+init_buffer_shim();
+var CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    table[i] = c >>> 0;
+  }
+  return table;
+})();
+function crc32(data) {
+  let c = 4294967295;
+  for (let i = 0; i < data.length; i++) c = CRC_TABLE[(c ^ data[i]) & 255] ^ c >>> 8;
+  return (c ^ 4294967295) >>> 0;
+}
+function utf8(s) {
+  return new TextEncoder().encode(s);
+}
+var ByteWriter = class {
+  chunks = [];
+  length = 0;
+  push(bytes) {
+    this.chunks.push(bytes);
+    this.length += bytes.length;
+  }
+  u16(n) {
+    this.push(new Uint8Array([n & 255, n >>> 8 & 255]));
+  }
+  u32(n) {
+    this.push(new Uint8Array([n & 255, n >>> 8 & 255, n >>> 16 & 255, n >>> 24 & 255]));
+  }
+  concat() {
+    const out = new Uint8Array(this.length);
+    let at = 0;
+    for (const c of this.chunks) {
+      out.set(c, at);
+      at += c.length;
+    }
+    return out;
+  }
+};
+function makeZip(entries) {
+  const seen = /* @__PURE__ */ new Map();
+  for (const e of entries) {
+    const path6 = e.path.replace(/^[/\\]+/, "").replace(/\\/g, "/");
+    if (!path6) continue;
+    seen.set(path6, { path: path6, data: e.data });
+  }
+  const files = [...seen.values()];
+  const body = new ByteWriter();
+  const central = new ByteWriter();
+  const dosTime = 0;
+  const dosDate = 33;
+  for (const f of files) {
+    const name = utf8(f.path);
+    const crc = crc32(f.data);
+    const offset = body.length;
+    body.u32(67324752);
+    body.u16(20);
+    body.u16(2048);
+    body.u16(0);
+    body.u16(dosTime);
+    body.u16(dosDate);
+    body.u32(crc);
+    body.u32(f.data.length);
+    body.u32(f.data.length);
+    body.u16(name.length);
+    body.u16(0);
+    body.push(name);
+    body.push(f.data);
+    central.u32(33639248);
+    central.u16(20);
+    central.u16(20);
+    central.u16(2048);
+    central.u16(0);
+    central.u16(dosTime);
+    central.u16(dosDate);
+    central.u32(crc);
+    central.u32(f.data.length);
+    central.u32(f.data.length);
+    central.u16(name.length);
+    central.u16(0);
+    central.u16(0);
+    central.u16(0);
+    central.u16(0);
+    central.u32(0);
+    central.u32(offset);
+    central.push(name);
+  }
+  const cdOffset = body.length;
+  const cd = central.concat();
+  const out = new ByteWriter();
+  out.push(body.concat());
+  out.push(cd);
+  out.u32(101010256);
+  out.u16(0);
+  out.u16(0);
+  out.u16(files.length);
+  out.u16(files.length);
+  out.u32(cd.length);
+  out.u32(cdOffset);
+  out.u16(0);
+  return out.concat();
+}
+
 // src/vibe/settings-data.ts
 init_buffer_shim();
 var DEFAULT_SETTINGS = {
@@ -15889,7 +15995,11 @@ function sanitizeForPrompt(text, maxLineLength = MAX_SANITIZED_LINE_LENGTH) {
   const fenceSafe = stripped.replace(FENCE_RUN_RE, (run) => run.split("").join("\u200B"));
   return fenceSafe.split("\n").map((line) => line.length > maxLineLength ? `${line.slice(0, maxLineLength)}\u2026 [truncated]` : line).join("\n");
 }
-function buildFixPrompt(report) {
+var MAX_FIX_PROMPT_IMAGE_BYTES = 40 * 1024;
+function dataUri(base64, mime = "image/png") {
+  return `data:${mime};base64,${base64}`;
+}
+function buildFixPrompt(report, opts = {}) {
   if (report.verdict === "pass") return "";
   const lines = [];
   lines.push("Fix this bug found by automated browser testing:");
@@ -15930,7 +16040,14 @@ function buildFixPrompt(report) {
     lines.push(`- Failed at step ${did.findIndex((s) => s.index === failRec.index) + 1 || failRec.index + 1} (${new Date(failRec.ts).toISOString()})`);
   }
   const shots = report.evidence_paths.filter((p) => p.endsWith(".png"));
-  for (const p of shots) lines.push(`- Screenshot: ${baseName(p)}`);
+  const thumb = opts.screenshotDataUri;
+  const inlineOk = Boolean(thumb && thumb.startsWith("data:image/") && thumb.length <= MAX_FIX_PROMPT_IMAGE_BYTES);
+  const headline = inlineOk ? headlineScreenshot(report) : void 0;
+  if (inlineOk) lines.push(`- Screenshot of the failing step: ![failing step](${thumb})`);
+  for (const p of shots) {
+    if (headline && p === headline) continue;
+    lines.push(`- Screenshot: ${baseName(p)}`);
+  }
   lines.push("");
   lines.push("**Likely root cause**");
   for (const rc of rootCauseLines(report.console_error, calls)) lines.push(`- ${rc}`);
@@ -16016,6 +16133,22 @@ function buildLiteConfig(keys, settings, secrets = {}) {
     mode: "lite"
   };
 }
+function zipLiteBundle(bundle) {
+  const entries = [{ path: "report.json", data: new TextEncoder().encode(bundle.reportJson) }];
+  for (const shot of bundle.screenshots) {
+    entries.push({ path: shot.name, data: base64ToBytes(shot.base64) });
+  }
+  if (bundle.audit.length) {
+    entries.push({ path: "audit.json", data: new TextEncoder().encode(JSON.stringify(bundle.audit, null, 2)) });
+  }
+  return makeZip(entries);
+}
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
 async function decomposeSpecLite(opts) {
   const { adapters, plannerName, navigatorName } = buildLiteLadder(opts.keys, opts.planner, opts.navigator);
   const router = new ModelRouter(adapters, { navigatorAdapter: navigatorName, plannerAdapter: plannerName });
@@ -16025,6 +16158,14 @@ async function decomposeSpecLite(opts) {
   });
   const cap = Math.max(1, Math.min(opts.maxFlows ?? LITE_MAX_FLOWS, MAX_FLOWS));
   return { flows: all.slice(0, cap), cap, truncated: all.length > cap, total: all.length };
+}
+function liteFixThumbnail(report, bundle) {
+  const p = headlineScreenshot(report);
+  if (!p) return void 0;
+  const shot = bundle.screenshots.find((s) => p.endsWith(s.name));
+  if (!shot) return void 0;
+  const uri = dataUri(shot.base64, "image/png");
+  return uri.length <= MAX_FIX_PROMPT_IMAGE_BYTES ? uri : void 0;
 }
 async function runLite(opts) {
   const progress = opts.onProgress ?? (() => {
@@ -16067,6 +16208,7 @@ async function runLite(opts) {
       ...opts.secrets && { vault: { get: (name) => opts.secrets?.[name] || void 0 } }
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1e3)}s)`);
+    const bundle = artifacts.exportBundle();
     const done = {
       ...slimReport(report),
       plainReport: renderPlainReport(report),
@@ -16076,10 +16218,10 @@ async function runLite(opts) {
       // A15: which picture the result card should show. The bytes stay in the
       // bundle; the worker serves them on request.
       screenshotPath: headlineScreenshot(report),
-      fixPrompt: buildFixPrompt(report),
+      fixPrompt: buildFixPrompt(report, { screenshotDataUri: liteFixThumbnail(report, bundle) }),
       durationMs: report.durationMs
     };
-    return { report, bundle: artifacts.exportBundle(), done };
+    return { report, bundle, done };
   } finally {
     await browser.close();
   }
@@ -16091,7 +16233,8 @@ export {
   decomposeSpecLite,
   defaultModelFor,
   isSafeModelId,
-  runLite
+  runLite,
+  zipLiteBundle
 };
 /*! Bundled license information:
 
