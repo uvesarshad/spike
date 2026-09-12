@@ -313,7 +313,10 @@ export const INVARIANT_PROBE_JS = `
         // "Near a currency symbol" = in the same small text container, or in
         // the immediately neighbouring one. The container is capped so a whole
         // page of prose that happens to contain a "$" somewhere doesn't count.
-        if (brokenValues.length < PROBE_CAP) {
+        // Only VALUE-shaped text qualifies — a short label/number, not prose.
+        // Without that gate a sentence about undefined behaviour sitting on the
+        // same card as a price reads as a broken price.
+        if (brokenValues.length < PROBE_CAP && trimmed.length <= 48 && trimmed.split(/\\s+/).length <= 6) {
           var brokenHere = BROKEN_VALUE_RE.test(trimmed);
           var zeroHere = ZERO_PRICE_RE.test(trimmed);
           if (brokenHere || zeroHere) {
@@ -323,17 +326,19 @@ export const INVARIANT_PROBE_JS = `
                 var box = parent;
                 for (var hop = 0; hop < 3 && box; hop++) {
                   var boxText = box.textContent ? box.textContent.replace(/\\s+/g, ' ').trim() : '';
-                  if (boxText.length > 200) break;
+                  // Past a small card the container stops being "near".
+                  if (boxText.length > 120) break;
                   context = boxText || context;
                   if (CURRENCY_RE.test(context)) break;
-                  var sib = box.previousElementSibling || box.nextElementSibling;
-                  if (sib && sib.textContent) {
-                    var sibText = sib.textContent.replace(/\\s+/g, ' ').trim();
-                    if (sibText.length <= 80 && CURRENCY_RE.test(sibText)) {
-                      context = sibText + ' ' + context;
-                      break;
-                    }
+                  var sibs = [box.previousElementSibling, box.nextElementSibling];
+                  var hit = '';
+                  for (var s = 0; s < sibs.length; s++) {
+                    if (!sibs[s] || !sibs[s].textContent) continue;
+                    var sibText = sibs[s].textContent.replace(/\\s+/g, ' ').trim();
+                    // A label cell beside a value cell, not a paragraph beside it.
+                    if (sibText.length <= 40 && CURRENCY_RE.test(sibText)) { hit = sibText; break; }
                   }
+                  if (hit) { context = hit + ' ' + context; break; }
                   box = box.parentElement;
                 }
               } catch (e) {}

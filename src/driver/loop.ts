@@ -42,7 +42,7 @@ import {
 import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
 import { detectSsoPopupClick } from './sso-popup.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
-import { checkDrainInvariants, checkProbeInvariants, type InvariantConfig, type InvariantViolation } from '../assertions/invariants.js';
+import { checkDrainInvariants, checkProbeInvariants, checkSubmitEffect, type InvariantConfig, type InvariantViolation } from '../assertions/invariants.js';
 import { evaluateAssertion, type AssertionSpec } from '../assertions/dom-assertions.js';
 import { axToObservation, checkRelation, countDeltaDirection, detectRelationCandidates } from '../assertions/metamorphic.js';
 import { validateScriptSteps, runScriptSteps } from './script-runner/index.js';
@@ -535,6 +535,31 @@ function noteDeadInteraction(record: StepRecord, reason: string): void {
     evidence: reason.slice(0, 200),
   };
   record.invariants = [...(record.invariants ?? []), violation];
+}
+
+/** E10: "it saved, and then nothing happened" — the half-wired form.
+ *
+ * Companion to noteDeadInteraction above, and deliberately a separate rule:
+ * a dead click is one where NOTHING happened at all, while this one is the
+ * nastier case where the request really did go out and the server really did
+ * accept it, so every other check on the step comes back clean. checkSubmitEffect
+ * (assertions/invariants.ts) owns the actual decision; this only supplies the
+ * step's network readings and the same before/after page comparison the
+ * dead-click check uses, and stamps whatever comes back onto the step. */
+function noteInertSubmit(
+  record: StepRecord,
+  pageChanged: boolean,
+  url: string,
+  config?: InvariantConfig,
+): void {
+  const violations = checkSubmitEffect({
+    network: record.network,
+    pageChanged,
+    url,
+    ...(record.target?.name ? { targetName: record.target.name } : {}),
+    ...(config ? { config } : {}),
+  });
+  if (violations.length) record.invariants = [...(record.invariants ?? []), ...violations];
 }
 
 /** A22 (P2): a step that FAILED gets a screenshot, immediately.
@@ -1143,12 +1168,17 @@ export async function runDriverLoop(
           ts: Date.now(),
         };
         steps.push(record);
+        // E10: recorded inside the try (where the before/after reading lives)
+        // and consumed after the drains below, which is where the step's
+        // network readings finally exist. null = no reading was taken.
+        let cachedPageChanged: boolean | null = null;
         try {
           const before = await captureActionEffectState(browser);
           await executeCacheAction(browser, cachedAction, ax.root, runData, vault);
           await sleep(150);
           const after = await captureActionEffectState(browser);
           const effect = verifyActionEffect(before, after, cachedAction, target);
+          cachedPageChanged = effect.changes.length > 0;
           if (!effect.ok) {
             record.ok = false;
             record.error = `stale cached action: ${effect.reason}`;
@@ -1169,6 +1199,9 @@ export async function runDriverLoop(
         record.console = browser.drainConsole();
         record.network = browser.drainNetwork();
         await collectInvariants(browser, record, invariantConfig);
+        if (cachedPageChanged !== null && record.ok && (cachedAction.type === 'click' || cachedAction.type === 'press_key')) {
+          noteInertSubmit(record, cachedPageChanged, await browser.url().catch(() => ''), invariantConfig);
+        }
         await artifacts.appendAudit({
           ts: record.ts,
           runId: artifacts.runId,
@@ -1817,6 +1850,11 @@ export async function runDriverLoop(
           // A16 (P1): warn-only, and independent of whether this action is
           // worth remembering for a $0 re-run.
           if (!effect.ok && action.type === 'click') noteDeadInteraction(record, effect.reason);
+          // E10: the same reading answers "was this form submit inert?" —
+          // press_key is included because Enter in a field is a submit too.
+          if (action.type === 'click' || action.type === 'press_key') {
+            noteInertSubmit(record, effect.changes.length > 0, cacheAfter.url, invariantConfig);
+          }
           if (effect.ok && cacheEligible && actionCache) {
             const key = buildActionCacheKey({
               url: batchUrl,
