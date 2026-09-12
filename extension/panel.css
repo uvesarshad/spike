@@ -186,6 +186,20 @@ body {
 /* connected at the socket level, but the protocol handshake says the daemon
  * is too old to drive reliably — deliberately NOT green */
 .dot-warn { background: var(--amber); box-shadow: 0 0 0 4px rgba(245, 194, 74, .28); }
+/* A20: before any desktop helper has ever connected on this computer there is
+ * nothing wrong — testing works without one — so the header carries a neutral
+ * chip instead of an off/red dot that reads as "broken". */
+.lite-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: var(--pill);
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted);
+  font-size: 10.5px;
+  letter-spacing: .02em;
+  cursor: default;
+}
 .nano-line {
   margin-top: 10px;
   font-size: 11.5px;
@@ -440,6 +454,14 @@ body {
   border: 1px solid rgba(245, 194, 74, .28);
   border-radius: var(--radius-sm);
   padding: 7px 10px;
+}
+
+/* A20: the one-line explanation of Chrome's debugging bar, under the Run button. */
+.run-note {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
 }
 
 /* ---- run / stop ------------------------------------------------------------ */

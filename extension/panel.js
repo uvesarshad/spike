@@ -83,6 +83,10 @@ const STEP_ICON = {
 const $ = (id) => document.getElementById(id);
 const bridgeDot = $('bridgeDot');
 const bridgeUpdateNote = $('bridgeUpdateNote');
+// A20: the neutral header chip shown until a desktop helper has ever connected.
+const liteChip = $('liteChip');
+// A20: the one-line explanation of Chrome's debugging bar, under Run.
+const debugBarNote = $('debugBarNote');
 const nanoLine = $('nanoLine');
 const taskInput = $('task');
 const runBtn = $('runBtn');
@@ -126,6 +130,7 @@ const savedTestsSection = $('savedTestsSection');
 const savedTestsToggle = $('savedTestsToggle');
 const savedTestsList = $('savedTestsList');
 const savedTestsCount = $('savedTestsCount');
+const siteMapSection = $('siteMapSection');
 const siteMapToggle = $('siteMapToggle');
 const siteMapBody = $('siteMapBody');
 const siteMapContent = $('siteMapContent');
@@ -478,6 +483,7 @@ function onPortMessage(msg) {
       setBusy(false);
       // A4: "no key yet" is a setup problem, so the banner carries the way to fix it
       if (msg.code === 'no-key') showKeyCta(msg.message);
+      else if (isDebuggerBarClosed(msg.message)) showDebugBarClosed();
       else showError(msg.message || 'Something went wrong.');
       break;
     case 'cancelled':
@@ -550,6 +556,58 @@ function onPortMessage(msg) {
 }
 
 // ---- header state ----------------------------------------------------------
+// A20: has a desktop helper EVER connected in this browser profile? Kept in
+// local storage, because "no helper yet" and "the helper I installed is down"
+// are different situations and only the second one is a problem worth a red
+// dot. Read once at startup; set the first time a connection is seen.
+const HELPER_SEEN_KEY = 'spikeHelperSeen';
+let helperSeen = false;
+function loadHelperSeen() {
+  try {
+    chrome.storage.local.get(HELPER_SEEN_KEY, (res) => {
+      void chrome.runtime.lastError;
+      if (res && res[HELPER_SEEN_KEY]) {
+        helperSeen = true;
+        if (bridgeDot) bridgeDot.hidden = false;
+        if (liteChip) liteChip.hidden = true;
+      }
+    });
+  } catch { /* a panel with no storage still works, it just forgets */ }
+}
+function noteHelperSeen() {
+  if (helperSeen) return;
+  helperSeen = true;
+  try { chrome.storage.local.set({ [HELPER_SEEN_KEY]: true }); } catch { /* nicety */ }
+}
+
+// A20: Chrome puts up its own "Spike started debugging this browser" bar as
+// soon as a test attaches, and closing that bar kills the test. Nothing said
+// so. It is explained under the Run button for the first three tests and then
+// gets out of the way — after three, the bar is familiar.
+const RUN_COUNT_KEY = 'spikeRunCount';
+const DEBUG_BAR_NOTE_RUNS = 3;
+let runCount = 0;
+function refreshDebugBarNote() {
+  if (debugBarNote) debugBarNote.hidden = runCount >= DEBUG_BAR_NOTE_RUNS;
+}
+function loadRunCount() {
+  try {
+    chrome.storage.local.get(RUN_COUNT_KEY, (res) => {
+      void chrome.runtime.lastError;
+      const n = res && res[RUN_COUNT_KEY];
+      runCount = typeof n === 'number' && n > 0 ? n : 0;
+      refreshDebugBarNote();
+    });
+  } catch {
+    refreshDebugBarNote();
+  }
+}
+function noteRunStarted() {
+  runCount += 1;
+  try { chrome.storage.local.set({ [RUN_COUNT_KEY]: runCount }); } catch { /* nicety */ }
+  refreshDebugBarNote();
+}
+
 // A4: msg is the full bridge-status payload — { connected, protocolVersion,
 // compatible } — not just a boolean, so we can tell "no daemon" apart from
 // "daemon connected but too old to trust" and never show a plain green dot
@@ -567,12 +625,20 @@ function setBridge(msg) {
   bridgeProtocolVersion = connected ? (msg && msg.protocolVersion) || null : null;
   const outdated = connected && bridgeCompatible === false;
 
+  // A20: an off/red dot for the majority who never install the desktop helper
+  // said "something is broken" about a product that works fine without one.
+  // The dot appears only once a helper has actually been seen on this
+  // computer; until then the header carries the neutral "Lite" chip.
+  if (connected) noteHelperSeen();
+  const showDot = connected || helperSeen;
+  bridgeDot.hidden = !showDot;
+  if (liteChip) liteChip.hidden = showDot;
   bridgeDot.classList.toggle('dot-on', connected && !outdated);
   bridgeDot.classList.toggle('dot-warn', outdated);
   bridgeDot.classList.toggle('dot-off', !connected);
   bridgeDot.title = outdated
-    ? 'Desktop app is outdated — update it (see Settings)'
-    : connected ? 'Daemon connected' : 'Daemon not connected';
+    ? 'Spike Core needs an update — open Settings for the command'
+    : connected ? 'Spike Core is connected' : "Spike Core isn't running";
   if (bridgeUpdateNote) bridgeUpdateNote.hidden = !outdated;
 
   // daemon-gated UI: the auto-fix toggle warning + the download-clip button
@@ -590,6 +656,8 @@ function setBridge(msg) {
   // A19: the saved tests live with the helper — its arrival or departure
   // decides whether that card exists at all.
   requestSavedTests(true);
+  // A20: so does the site map card.
+  renderSiteMapCard();
   wasBridgeHealthyForSiteMap = healthyNow;
   // A4: with the desktop helper gone, a command-line model can no longer sign
   // in for itself — whether a key is needed can change with this dot.
@@ -807,6 +875,10 @@ function requestSiteMap() {
  * informational — no control here triggers a map/crawl from the panel. */
 function renderSiteMapCard() {
   if (!siteMapContent) return;
+  // A20: the whole card is built from a file Spike Core writes, and without one
+  // it could only ever say "run a command in a terminal" — which is not an
+  // instruction to give someone who never opened one. Hide it entirely instead.
+  if (siteMapSection) siteMapSection.hidden = !bridgeHealthy();
   siteMapContent.textContent = '';
 
   if (!lastMapInfo || !lastMapInfo.present) {
@@ -1248,6 +1320,24 @@ function showInterruptedRun(run) {
   const task = run && typeof run.task === 'string' ? run.task : '';
   if (task && !(taskInput.value || '').trim()) taskInput.value = task;
   showError('Your last test stopped when Chrome put the extension to sleep — run it again.', {
+    label: 'Run again',
+    onClick: () => {
+      hideError();
+      startRun(taskInput.value);
+    },
+  });
+}
+
+// A20: the user closed Chrome's "Spike started debugging this browser" bar (or
+// something else detached the debugger) and the test stopped where it stood.
+// The raw sentence named Chrome's debugging SESSION — an internal thing nobody
+// dismissed. Name the bar they actually clicked, and make starting over one tap.
+const DEBUG_BAR_CLOSED_MESSAGE = "The test stopped because Chrome's debugging bar was closed. Run again.";
+function isDebuggerBarClosed(message) {
+  return /debugging session was closed/i.test(String(message || ''));
+}
+function showDebugBarClosed() {
+  showError(DEBUG_BAR_CLOSED_MESSAGE, {
     label: 'Run again',
     onClick: () => {
       hideError();
@@ -2939,6 +3029,7 @@ function startRun(task) {
   addProgressLine(`Asking the agent to test: ${activeTab.url}`);
   // optimistic; the SW confirms with 'accepted' or 'error'
   setBusy(true);
+  noteRunStarted();
   postToSW(buildRunMessage(t));
 }
 
@@ -2965,6 +3056,8 @@ function requestInitialState() {
 }
 
 initTheme();
+loadHelperSeen();
+loadRunCount();
 loadActiveTab();
 requestInitialState();
 probeInstallReachable();
