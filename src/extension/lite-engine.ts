@@ -33,6 +33,7 @@ import {
 import { slimReport, type Report } from '../report/report.js';
 import { decomposeSpec, MAX_FLOWS, type FlowUnit } from '../driver/spec-decompose.js';
 import { renderPlainReport, buildFixPrompt } from '../vibe/fix-prompt.js';
+import { explainReason } from '../vibe/reason-text.js';
 
 // Re-export the pure helpers sw.js (plain JS, module SW) needs, so it imports
 // everything from one place (./lite-engine.js) and never reimplements provider logic.
@@ -301,6 +302,9 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
     const done: Record<string, unknown> = {
       ...slimReport(report),
       plainReport: renderPlainReport(report),
+      // A14: same field the desktop helper sends — the panel is a plain page
+      // script and can't import the translation table itself.
+      reasonExplained: explainReason(report.reason),
       fixPrompt: buildFixPrompt(report),
       durationMs: report.durationMs,
     };

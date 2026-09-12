@@ -53,6 +53,7 @@ import { loadConfig } from '../config.js';
 import { decomposeSpec } from '../driver/spec-decompose.js';
 import { slimReport, type Report } from '../report/report.js';
 import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
+import { explainReason } from './reason-text.js';
 import { dispatchFix, isAutoFixAcceptedFor, detectFixAgent, NO_PROJECT_FOLDER_MESSAGE } from './auto-fix.js';
 import { loadAppModel, coverageReport, type AppModel } from '../discovery/index.js';
 import {
@@ -647,6 +648,11 @@ export class VibeService {
         this.bridge.sendEvent('vibe.done', {
           ...slimReport(report),
           plainReport: renderPlainReport(report),
+          // A14: the panel can't import the translation table (it's a plain
+          // page script), so the verdict card is handed the already-translated
+          // headline / attribution / next step. Null when the table doesn't
+          // know this reason — the panel then shows the raw text, as before.
+          reasonExplained: explainReason(report.reason),
           fixPrompt: buildFixPrompt(report),
           durationMs: report.durationMs,
           ...(clipPath ? { clipPath } : {}),

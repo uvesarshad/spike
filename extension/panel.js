@@ -132,6 +132,13 @@ const flowsRunBtn = $('flowsRunBtn');
 const flowsCancelBtn = $('flowsCancelBtn');
 const flowResults = $('flowResults');
 
+// A14: the plain-English "what happened / whose problem / what to do" block
+// under the verdict badge, plus the one-click cross-site consent button.
+const verdictWhy = $('verdictWhy');
+const verdictHeadline = $('verdictHeadline');
+const verdictFault = $('verdictFault');
+const verdictNext = $('verdictNext');
+
 // settings
 const settingsBtn = $('settingsBtn');
 const settingsModal = $('settingsModal');
@@ -1141,6 +1148,27 @@ function refreshKeyGate() {
 }
 
 // ---- result card -----------------------------------------------------------
+/** A14: headline / attribution / next step under the verdict badge. */
+const WHOSE_FAULT_TEXT = {
+  'your app': 'This looks like a problem in your app.',
+  setup: "This isn't a problem in your app — it's a setup problem.",
+  'the test': "This isn't a problem in your app — the test couldn't get there.",
+};
+
+function renderVerdictWhy(params) {
+  const e = params && params.reasonExplained;
+  if (!e || !e.headline) {
+    verdictWhy.hidden = true;
+    return;
+  }
+  verdictHeadline.textContent = e.headline;
+  verdictFault.textContent = WHOSE_FAULT_TEXT[e.whoseFault] || '';
+  verdictFault.hidden = !verdictFault.textContent;
+  verdictNext.textContent = e.nextStep || '';
+  verdictNext.hidden = !verdictNext.textContent;
+  verdictWhy.hidden = false;
+}
+
 function renderResult(params) {
   const verdict = String(params.verdict || 'uncertain').toLowerCase();
   verdictBadge.className = 'verdict-badge';
@@ -1156,6 +1184,13 @@ function renderResult(params) {
     vIcon = 'uncertain'; vLabel = 'UNCERTAIN';
   }
   verdictBadge.innerHTML = qaIcon(vIcon) + '<span>' + vLabel + '</span>';
+
+  // A14: the driver's own reason strings were written for whoever was
+  // debugging the driver — several named a setting a panel user has no way to
+  // reach, and a rejected AI key read like a bug report about the user's own
+  // app. The helper (or the in-browser engine) hands over the translated
+  // version; anything the table doesn't know is left to the report below.
+  renderVerdictWhy(params);
 
   // A7: when the run came from a pasted document, the card leads with one row
   // per flow — the single report below is the flow that most needs attention.

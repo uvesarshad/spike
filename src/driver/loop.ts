@@ -1888,10 +1888,15 @@ export async function runDriverLoop(
       break; // reason already set to 'cancelled by user'
     }
     if (readOnlyBlock) {
+      // A14: this is a HOST block, not look-only mode. The two are different
+      // things — a host block fires even with look-only off, because the run
+      // wandered onto a site other than the one it was pointed at — and
+      // labelling it "read-only mode" sent people to a setting that had
+      // nothing to do with what stopped them.
       verdict = 'uncertain';
       reason =
-        `read-only mode: ${readOnlyBlock} is not in allowedHosts — ` +
-        'add it via SPIKE_ALLOWED_HOSTS or spike.config.json to allow interaction';
+        `blocked host: ${readOnlyBlock} is not on this run's allowed host list — ` +
+        `pass --allow-host ${readOnlyBlock} (or add it to allowedHosts in spike.config.json) to let the run act there`;
       break;
     }
     // A9 (P0): the popup sign-in wall. Not a bug in the app under test, so the

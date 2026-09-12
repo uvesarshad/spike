@@ -255,7 +255,9 @@ console.log('\n=== v13 3/3: read-only-by-default guard ===');
     allowedHosts: ['localhost', '127.0.0.1'],
   });
   check('read-only run ends verdict uncertain', report.verdict === 'uncertain');
-  check('read-only reason cites the guard + host', /read-only mode/.test(report.reason) && report.reason.includes('evil.example.com'));
+  // A14: this is a HOST block, not look-only mode — the two are different
+  // things and the reason no longer conflates them.
+  check('the reason names the host block + the host', /blocked host/.test(report.reason) && report.reason.includes('evil.example.com'));
   check('read-only: click never executed', browser.clicked.length === 0);
   check('read-only: step budget not burned (ended immediately)', report.steps.length === 0);
 }
@@ -274,7 +276,7 @@ console.log('\n=== v13 3/3: read-only-by-default guard ===');
     allowedHosts: ['localhost'],
   });
   check('A45: a bare allowedHosts entry no longer trusts a subdomain (click blocked)', browser.clicked.length === 0);
-  check('A45: the bare-entry subdomain run tripped the read-only/host guard', /read-only mode/.test(report.reason));
+  check('A45: the bare-entry subdomain run tripped the host guard', /blocked host/.test(report.reason));
 }
 {
   const browser = new FakeBrowser('http://app.localhost:3000/');

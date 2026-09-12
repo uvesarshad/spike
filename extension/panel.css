@@ -1340,3 +1340,9 @@ body {
 }
 .flow-result-body { flex: 1; min-width: 0; }
 .flow-result-reason { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* ---- A14: whose fault / what to do, under the verdict badge ---------------- */
+.verdict-why { display: flex; flex-direction: column; gap: 4px; }
+.verdict-headline { font-size: 13px; font-weight: 650; line-height: 1.45; color: var(--ink); }
+.verdict-fault { font-size: 11.5px; line-height: 1.45; color: var(--muted); }
+.verdict-next { font-size: 12px; line-height: 1.5; color: var(--ink-2); }

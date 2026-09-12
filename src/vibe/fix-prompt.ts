@@ -9,6 +9,7 @@ import type { Report, StepRecord } from '../report/report.js';
 import { redactTaskText, redactTypedText } from '../report/redact.js';
 import { renderCoverageLine } from '../orchestrator/fan-out.js';
 import type { NetworkEntry } from '../ports/browser-port.js';
+import { plainReasonText } from './reason-text.js';
 
 /** Humanize a single step into "what the robot did", preferring the role+name
  * target over meaningless per-snapshot nodeIds. */
@@ -169,7 +170,12 @@ export function renderPlainReport(report: Report): string {
   if (report.verdict !== 'pass') {
     lines.push('');
     lines.push('**What went wrong:**');
-    lines.push(report.reason);
+    // A14: the driver's own reason strings were written for whoever was
+    // debugging the driver, and several of them pointed at an environment
+    // variable or a config file the reader has no access to. Translate the
+    // known ones into "what happened / whose problem it is / what to do";
+    // anything the table doesn't know still comes through verbatim.
+    lines.push(plainReasonText(report.reason));
     if (report.console_error) {
       lines.push('');
       lines.push(`The page reported this error: ${report.console_error}`);

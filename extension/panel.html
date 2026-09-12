@@ -395,6 +395,13 @@
 
     <section id="resultCard" class="result-card" hidden>
       <div id="verdictBadge" class="verdict-badge"></div>
+      <!-- A14: what happened, whose problem it is, what to do — in the reader's
+           words, instead of the driver's own internal reason string. -->
+      <div id="verdictWhy" class="verdict-why" hidden>
+        <div id="verdictHeadline" class="verdict-headline"></div>
+        <div id="verdictFault" class="verdict-fault"></div>
+        <div id="verdictNext" class="verdict-next"></div>
+      </div>
       <!-- A7: one row per flow when the run came from a pasted document. -->
       <div id="flowResults" class="flow-results" hidden></div>
       <pre id="plainReport" class="plain-report"></pre>
