@@ -2,10 +2,11 @@
  * of A23's discovery ladder. Browser-agnostic by construction: this module
  * never imports engine.ts, driver/loop.ts, or any BrowserPort. A caller
  * injects a `Fetcher` — the same pattern `src/suite/runner.ts` uses for
- * `RunOneFn` — so in production it can be a plain `fetch()` (works on any
- * deployed site, including no-code builds this product explicitly targets)
- * or, later, a real browser navigate+capture-HTML call; tests inject a fake
- * fetcher over canned HTML with no network at all.
+ * `RunOneFn` — so in production it can be a real browser navigate+read-the-DOM
+ * call (`browser-crawl.ts`, the default since A24: it carries the user's
+ * sign-in and sees a page that draws itself with JavaScript) or a plain
+ * `fetch()` (faster, blind to both); tests inject a fake fetcher over canned
+ * HTML with no network at all.
  *
  * Politeness/boundedness (explicit constraint from the task): same-origin
  * only, a depth cap, a total page cap, and a parameterised-URL explosion
@@ -14,12 +15,28 @@
 
 import { normalizeUrlForActionCache } from '../cache/action-cache.js';
 import { pageSignatureFromAx } from '../cache/action-cache.js';
-import { extractInteractiveElements, extractLinks, structuralSignatureFromHtml, type InteractiveElement } from './html.js';
+import { extractInteractiveElements, extractLinks, extractScriptUrls, findDeadLinks, structuralSignatureFromHtml, type InteractiveElement } from './html.js';
+
+/** A request the page made that did not come back cleanly. A24: a bare-`fetch`
+ * crawl can only ever see the document's own status code; a crawl driven
+ * through a real browser also sees every call the page made after it loaded,
+ * which is where a client-rendered app's failures actually live. */
+export interface FailedRequest {
+  url: string;
+  status?: number;
+  errorText?: string;
+}
 
 export interface Fetched {
   url: string;
   status: number;
   html: string;
+  /** Uncaught JavaScript errors the page threw while loading. Only a
+   * browser-driven fetcher can populate this; a plain HTTP fetcher leaves it
+   * absent, and the findings layer simply has less to judge. */
+  pageErrors?: string[];
+  /** Same-origin requests the page made that failed or returned 5xx. */
+  failedRequests?: FailedRequest[];
 }
 
 /** Fetch-or-navigate seam: return `null` for a failed/errored fetch (the
@@ -59,6 +76,16 @@ export interface CrawledPage {
   interactiveElements: InteractiveElement[];
   /** Same-origin links discovered on this page (post-filter). */
   links: string[];
+  /** Uncaught JavaScript errors seen while this page loaded (empty for a
+   * plain-HTTP crawl, which cannot observe them). Optional so a caller
+   * hand-building a page record — the ledger tests do — stays valid. */
+  pageErrors?: string[];
+  /** Requests this page made that failed or returned 5xx (same caveat). */
+  failedRequests?: FailedRequest[];
+  /** Labels of anchors that cannot navigate anywhere — see `findDeadLinks`. */
+  deadLinks?: string[];
+  /** `<script src>` URLs on this page, for the bundle route extractor. */
+  scriptUrls?: string[];
 }
 
 export interface CrawlResult {
@@ -157,6 +184,10 @@ export async function crawlSite(seedUrls: string[], fetcher: Fetcher, opts: Craw
       contentSignature: pageSignatureFromAx(fetched.html),
       interactiveElements: extractInteractiveElements(fetched.html),
       links,
+      pageErrors: fetched.pageErrors ?? [],
+      failedRequests: fetched.failedRequests ?? [],
+      deadLinks: findDeadLinks(fetched.html),
+      scriptUrls: extractScriptUrls(fetched.html, url),
     });
 
     if (depth < maxDepth) {

@@ -57,15 +57,97 @@ export interface AppModelRoute {
   coveredByScripts: string[];
 }
 
+/* --- A24: judgement -------------------------------------------------------
+ *
+ * Mapping used to be purely descriptive: it recorded the HTTP status of every
+ * page it fetched and then never looked at it again, so a map of a site where
+ * half the pages 500 came back indistinguishable from a map of a healthy one,
+ * and the command exited 0 either way. These findings are that missing
+ * judgement — one entry per thing the crawl saw that a person would want to
+ * know about, in plain words, with a severity that decides the exit code. */
+
+export type FindingKind =
+  /** The page itself came back 5xx. */
+  | 'server-error'
+  /** The page itself came back 4xx (usually a stale link, not an outage). */
+  | 'missing-page'
+  /** The page threw an uncaught JavaScript error while loading. */
+  | 'page-error'
+  /** Something the page asked for afterwards failed or came back 5xx. */
+  | 'request-failed'
+  /** An anchor that cannot navigate anywhere (see `findDeadLinks`). */
+  | 'dead-link';
+
+/** `problem` fails the map (exit 1); `warning` is reported and does not. */
+export type FindingSeverity = 'problem' | 'warning';
+
+export interface AppModelFinding {
+  /** The route (normalized URL) this was seen on. */
+  route: string;
+  kind: FindingKind;
+  severity: FindingSeverity;
+  /** One plain-English sentence a non-engineer can act on. */
+  detail: string;
+  status?: number;
+  foundAt: string;
+}
+
 export interface AppModel {
   version: typeof APP_MODEL_VERSION;
   baseUrl?: string;
   generatedAt: string;
   routes: AppModelRoute[];
+  /** What the most recent crawl judged. Replaced wholesale on every crawl —
+   * a finding is a statement about the site as it is NOW, so carrying an old
+   * one forward would report a page that has since been fixed. Absent on a
+   * ledger written before this existed. */
+  findings?: AppModelFinding[];
 }
 
 export function emptyAppModel(baseUrl?: string): AppModel {
-  return { version: APP_MODEL_VERSION, ...(baseUrl && { baseUrl }), generatedAt: new Date().toISOString(), routes: [] };
+  return { version: APP_MODEL_VERSION, ...(baseUrl && { baseUrl }), generatedAt: new Date().toISOString(), routes: [], findings: [] };
+}
+
+/** Judge one crawled page. Severity rules, in one place so the CLI, the panel
+ * and the exit code can never disagree:
+ *   - a 5xx page, a page that threw, or a failed same-origin request the page
+ *     made → `problem`: the page is broken for whoever opens it;
+ *   - a 4xx page or a link that goes nowhere → `warning`: real, worth fixing,
+ *     but routinely present on healthy sites (a stale sitemap entry, an
+ *     anchor used as a styling hook) and not worth failing a build over. */
+export function findingsForPage(page: CrawledPage, now: string = new Date().toISOString()): AppModelFinding[] {
+  const out: AppModelFinding[] = [];
+  const where = page.normalizedUrl;
+  if (page.status >= 500) {
+    out.push({ route: where, kind: 'server-error', severity: 'problem', status: page.status, foundAt: now, detail: `This page came back with a server error (${page.status}).` });
+  } else if (page.status >= 400) {
+    out.push({ route: where, kind: 'missing-page', severity: 'warning', status: page.status, foundAt: now, detail: `This page was not found (${page.status}).` });
+  }
+  for (const err of page.pageErrors ?? []) {
+    out.push({ route: where, kind: 'page-error', severity: 'problem', foundAt: now, detail: `This page hit an error while loading: ${oneLine(err)}` });
+  }
+  for (const req of page.failedRequests ?? []) {
+    const what = req.status ? `came back with a server error (${req.status})` : `failed (${oneLine(req.errorText ?? 'no response')})`;
+    out.push({ route: where, kind: 'request-failed', severity: 'problem', ...(req.status !== undefined && { status: req.status }), foundAt: now, detail: `Something this page asked for ${what}: ${req.url}` });
+  }
+  for (const label of page.deadLinks ?? []) {
+    out.push({ route: where, kind: 'dead-link', severity: 'warning', foundAt: now, detail: `The link "${label}" does not go anywhere.` });
+  }
+  return out;
+}
+
+/** Collapse a multi-line error/stack down to something that fits on one line
+ * of a terminal or a panel row. */
+function oneLine(text: string, max = 160): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** True when the crawl found something that should fail the command (exit 1):
+ * a page that served a server error, that threw while loading, or whose own
+ * requests failed. Warnings never gate. */
+export function hasBlockingFindings(findings: AppModelFinding[] | undefined): boolean {
+  return (findings ?? []).some((f) => f.severity === 'problem');
 }
 
 export function appModelPath(root: string = process.cwd()): string {

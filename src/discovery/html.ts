@@ -237,3 +237,62 @@ export function extractInteractiveElements(html: string): InteractiveElement[] {
   }
   return out;
 }
+
+/** `<script src>` URLs, resolved against `baseUrl` — the input to the
+ * JS-bundle route extractor (`routesFromBundle` in `static-routes.ts`). A
+ * client-rendered app declares its routes inside its bundle and nowhere in
+ * the markup, so this is the only markup-level handle on them. Caller filters
+ * for same-origin (the crawler's own rule lives in one place). */
+export function extractScriptUrls(html: string, baseUrl: string): string[] {
+  // Deliberately NOT via tokenize(): that strips <script> blocks wholesale
+  // (they are not page content and would otherwise pollute the structural
+  // signature), which is exactly the markup this needs to read.
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const re = /<script\b[^>]*\bsrc\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const raw = m[1].replace(/^['"]|['"]$/g, '').trim();
+    if (!raw) continue;
+    let resolved: string;
+    try {
+      resolved = new URL(raw, baseUrl).toString();
+    } catch {
+      continue;
+    }
+    if (seen.has(resolved)) continue;
+    seen.add(resolved);
+    out.push(resolved);
+  }
+  return out;
+}
+
+/** Links that cannot go anywhere: an `<a>` with no `href` attribute at all, or
+ * one whose `href` is empty/whitespace. Deliberately NARROW — `href="#"` and
+ * `href="javascript:void(0)"` are everyday patterns for a script-driven tab or
+ * accordion, so flagging those would cry wolf on most real sites. An anchor
+ * with no href, by contrast, is not focusable, not keyboard-operable and not
+ * navigable: it is either unfinished or a styling-only element that should not
+ * have been an anchor. Returns the visible label (or a positional placeholder)
+ * so a person can find it on the page. */
+export function findDeadLinks(html: string): string[] {
+  const clean = stripNonContentBlocks(html);
+  const tokens = tokenize(html);
+  const out: string[] = [];
+  const seen = new Set<string>();
+  let index = 0;
+  for (const t of tokens) {
+    if (t.closing || t.tag !== 'a') continue;
+    index++;
+    const href = attr(t.attrs, 'href');
+    if (href !== undefined && href.trim()) continue;
+    let innerText = '';
+    const closeIdx = clean.toLowerCase().indexOf('</a', t.index + t.raw.length);
+    if (closeIdx !== -1) innerText = clean.slice(t.index + t.raw.length, closeIdx).replace(/<[^>]+>/g, ' ');
+    const label = (nameForElement(t.attrs, innerText) ?? `link #${index}`).trim();
+    if (seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
+  }
+  return out;
+}

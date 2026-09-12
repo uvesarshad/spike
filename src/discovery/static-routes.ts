@@ -120,3 +120,52 @@ function decodeXmlEntities(text: string): string {
     .replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'");
 }
+
+/** Route paths declared inside a JavaScript bundle (A24).
+ *
+ * A client-rendered app ships its whole route table in JS: `{ path: '/cart' }`
+ * (React Router / Vue Router), `route: "/checkout"` (a hand-rolled table), and
+ * so on. None of it appears in the served markup, so sitemap/robots/Next.js
+ * source extraction plus link-following together yield exactly one route for
+ * such a site. This is the fourth source, run alongside the Next.js file-list
+ * parser rather than instead of it.
+ *
+ * Deliberately a single regex over the bundle text: a bundle is minified,
+ * megabytes long, and not worth parsing. That trades precision for reach, so
+ * the output is filtered hard afterwards — a false route costs a wasted page
+ * visit, and anything that survives the filter at least LOOKS like a path.
+ * Values built at runtime (`path: "/" + slug`) are unreachable by any means
+ * short of executing the bundle, and are simply missed. */
+export function routesFromBundle(js: string): string[] {
+  const routes = new Set<string>();
+  const re = /(?:path|route)\s*[:=]\s*['"](\/[^'"]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(js))) {
+    const candidate = m[1];
+    if (!isPlausibleRoutePath(candidate)) continue;
+    routes.add(normalizeBundleRoute(candidate));
+  }
+  return [...routes].sort();
+}
+
+/** Filters the regex's raw catch down to things that could really be a UI
+ * route. Rejects: whitespace/template-literal fragments, protocol-relative
+ * URLs (`//cdn…`), asset and API paths (a route table and a fetch URL are
+ * both `path: '/…'`), and anything implausibly long. */
+function isPlausibleRoutePath(p: string): boolean {
+  if (p.length > 120) return false;
+  if (/\s|\$\{|\\/.test(p)) return false;
+  if (p.startsWith('//')) return false;
+  if (/^\/(api|_next|static|assets?|dist|node_modules)(\/|$)/i.test(p)) return false;
+  if (/\.(js|mjs|cjs|css|map|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|json|xml|txt)$/i.test(p)) return false;
+  return true;
+}
+
+/** Normalizes a bundle route to the same `:param` shape the rest of the
+ * discovery layer speaks: React Router's `:id` already matches, and its
+ * `*`/`:id?` splat forms collapse onto it too, so a bundle-declared route and
+ * a crawl-discovered one for the same page compare equal. */
+function normalizeBundleRoute(p: string): string {
+  const trimmed = p.length > 1 && p.endsWith('/') ? p.slice(0, -1) : p;
+  return trimmed.replace(/:[^/?]+\??/g, ':param').replace(/\*/g, ':param') || '/';
+}

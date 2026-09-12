@@ -12,9 +12,14 @@
  * there; this module spends no model calls itself. */
 
 import { normalizeUrlForActionCache } from '../cache/action-cache.js';
-import { type AppModel, emptyAppModel, upsertCrawledPage, upsertStaticRoute } from './app-model.js';
+import { type AppModel, emptyAppModel, findingsForPage, upsertCrawledPage, upsertStaticRoute } from './app-model.js';
 import { crawlSite, type CrawledPage, type CrawlOptions, type Fetcher } from './crawler.js';
-import { parseRobotsTxt, parseSitemapXml, routesFromFileList, type RouterKind } from './static-routes.js';
+import { parseRobotsTxt, parseSitemapXml, routesFromBundle, routesFromFileList, type RouterKind } from './static-routes.js';
+
+/** How many JavaScript bundles to read for declared routes. A page pulls in a
+ * handful of scripts; reading every one on every crawled page would download
+ * the same megabyte repeatedly for nothing. */
+const MAX_BUNDLES_READ = 12;
 
 export interface InteractionGatedCandidate {
   /** The route (normalized URL) the candidate control was found on. */
@@ -37,6 +42,13 @@ export interface DiscoverAppOptions {
   appDirFiles?: string[];
   routerKind?: RouterKind;
   crawl?: CrawlOptions;
+  /** A24: reads a JavaScript bundle as text, so the route table a
+   * client-rendered app declares in its own code can be extracted (see
+   * `routesFromBundle`). Kept SEPARATE from `fetcher`, which returns markup
+   * and may be a live browser navigation — asking a browser to navigate to a
+   * .js file would be both wrong and destructive to the crawl. Absent → no
+   * bundle extraction, and the other three route sources stand alone. */
+  bundleFetcher?: (url: string) => Promise<string | null>;
   /** A previously persisted ledger (`loadAppModel()`) to carry coverage
    * history forward. Omitted/`null` starts a fresh ledger. Never mutated —
    * `discoverApp` returns a new object. */
@@ -116,8 +128,51 @@ export async function discoverApp(opts: DiscoverAppOptions): Promise<AppModel> {
     if (!reachedPatterns.has(normalizeRoutePatternForComparison(pattern))) upsertStaticRoute(model, pattern, now);
   }
 
+  // A24: the fourth route source — the app's own JavaScript. Runs alongside
+  // the Next.js file-list parser above, not instead of it; both feed the same
+  // "declared but not reached" static-route path.
+  for (const pattern of await bundleRoutes(crawl.pages, origin, opts.bundleFetcher)) {
+    if (!reachedPatterns.has(normalizeRoutePatternForComparison(pattern))) upsertStaticRoute(model, pattern, now);
+  }
+
+  // A24: judgement. Replaced wholesale rather than appended — see the
+  // `findings` field's own note on why a stale finding must not survive.
+  model.findings = crawl.pages.flatMap((p) => findingsForPage(p, now));
+
   const candidates = crawl.pages.flatMap(findInteractionGatedCandidates);
   if (candidates.length > 0) await opts.exploreInteractionGated?.(candidates);
 
   return model;
+}
+
+/** Same-origin script URLs across the crawled pages, deduplicated and capped,
+ * read as text and scanned for declared route paths. A bundle that cannot be
+ * read is skipped silently: this is an opportunistic extra source, never a
+ * reason to fail a map. */
+async function bundleRoutes(pages: CrawledPage[], origin: string, fetchBundle: DiscoverAppOptions['bundleFetcher']): Promise<string[]> {
+  if (!fetchBundle) return [];
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const page of pages) {
+    for (const src of page.scriptUrls ?? []) {
+      if (seen.has(src)) continue;
+      seen.add(src);
+      try {
+        if (new URL(src).origin !== origin) continue;
+      } catch {
+        continue;
+      }
+      urls.push(src);
+      if (urls.length >= MAX_BUNDLES_READ) break;
+    }
+    if (urls.length >= MAX_BUNDLES_READ) break;
+  }
+
+  const routes = new Set<string>();
+  for (const src of urls) {
+    const js = await fetchBundle(src).catch(() => null);
+    if (!js) continue;
+    for (const r of routesFromBundle(js)) routes.add(r);
+  }
+  return [...routes];
 }

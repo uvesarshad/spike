@@ -27,6 +27,11 @@ export {
   upsertStaticRoute,
   markRouteExercised,
   markElementTouched,
+  findingsForPage,
+  hasBlockingFindings,
+  type AppModelFinding,
+  type FindingKind,
+  type FindingSeverity,
   type AppModel,
   type AppModelRoute,
   type AppModelState,
@@ -45,9 +50,12 @@ export {
   type CrawledPage,
   type Fetcher,
   type Fetched,
+  type FailedRequest,
 } from './crawler.js';
 
-export { parseSitemapXml, parseRobotsTxt, routesFromFileList, type RouterKind } from './static-routes.js';
+export { browserFetcher, type CrawlBrowser, type BrowserCrawlOptions } from './browser-crawl.js';
+
+export { parseSitemapXml, parseRobotsTxt, routesFromFileList, routesFromBundle, type RouterKind } from './static-routes.js';
 
 export {
   structuralSignatureFromAx,
@@ -62,6 +70,8 @@ export {
   extractLinks,
   extractInteractiveElements,
   structuralSignatureFromHtml,
+  extractScriptUrls,
+  findDeadLinks,
   collectHtmlDepthRolePairs,
   htmlToStructuralNode,
   type InteractiveElement,

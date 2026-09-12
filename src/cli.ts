@@ -11,7 +11,7 @@ import os from 'node:os';
 import { loadConfig, type QaConfig } from './config.js';
 import { exitCodeForVerdict, INFRA_ERROR_EXIT_CODE } from './cli-exit-codes.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
-import { allocateIsolatedSession, createPlanningRouter, isQuarantined, qaReplay, qaRun, type QaReplayResult } from './engine.js';
+import { allocateIsolatedSession, createPlanningRouter, injectStorageState, isQuarantined, loadStorageStateFile, openBrowserSession, qaReplay, qaRun, type QaReplayResult } from './engine.js';
 import { decomposeSpec, renderFlowTable, runFlows } from './driver/spec-decompose.js';
 import { headlineScreenshot, slimReport, type Report } from './report/report.js';
 import { findChrome } from './chrome/launch.js';
@@ -22,7 +22,7 @@ import { applyExpectation, resolveSuite, skipsForMissingAuth, SUITE_CONFIG_FILEN
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
 import { isSuiteReporter, writeSuiteReport, SUITE_REPORTERS } from './suite/reporters.js';
 import { DEFAULT_BASELINE_DIR, blessBaseline } from './assertions/differential.js';
-import { coverageReport, diffAppModel, discoverApp, emptyAppModel, loadAppModel, saveAppModel, type Fetched } from './discovery/index.js';
+import { browserFetcher, coverageReport, diffAppModel, discoverApp, emptyAppModel, hasBlockingFindings, loadAppModel, saveAppModel, type AppModel, type AppModelFinding, type Fetched } from './discovery/index.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
 import { installService, uninstallService } from './service/install-service.js';
@@ -332,6 +332,18 @@ const httpFetcher = async (url: string): Promise<Fetched | null> => {
   }
 };
 
+/** A24: reads a static asset (a JavaScript bundle) as text. Separate from
+ * httpFetcher, which deliberately discards non-HTML bodies. */
+const httpTextFetcher = async (url: string): Promise<string | null> => {
+  try {
+    const res = await fetch(url, { redirect: 'follow' });
+    if (!res.ok) return null;
+    return await res.text();
+  } catch {
+    return null;
+  }
+};
+
 function collectAppDirFiles(root: string): { files: string[]; routerKind: 'app' | 'pages' } | undefined {
   for (const [dir, routerKind] of [['app', 'app'], ['src/app', 'app'], ['pages', 'pages'], ['src/pages', 'pages']] as const) {
     const abs = path.resolve(root, dir);
@@ -396,43 +408,145 @@ program
     process.exit(0);
   });
 
+/* A24: mapping now happens in a REAL browser by default.
+ *
+ * A plain HTTP crawl carries no sign-in, so everything behind a login came
+ * back as the login page, and it reads only the served markup, so an app that
+ * draws itself in the browser produced exactly one route and no controls. Both
+ * are the normal shape of the apps this tool exists for. `--no-browser` keeps
+ * the old fast path for a plain server-rendered public site. */
+interface MapCrawlOptions {
+  maxDepth?: number;
+  maxPages?: number;
+  browser: boolean;
+  via?: 'cdp' | 'extension' | 'playwright';
+  storageState?: string;
+  headless?: boolean;
+}
+
+/** Build the model for a site, opening (and closing) a browser when the crawl
+ * is a browsing one. Shared by `spike map` and `spike check`. */
+async function buildSiteMap(url: string, opts: MapCrawlOptions, progress?: (line: string) => void): Promise<AppModel> {
+  const root = process.cwd();
+  const previousModel = loadAppModel(root);
+  const src = collectAppDirFiles(root);
+  const crawl = {
+    ...(opts.maxDepth !== undefined && { maxDepth: opts.maxDepth }),
+    ...(opts.maxPages !== undefined && { maxPages: opts.maxPages }),
+  };
+  const common = {
+    baseUrl: url,
+    ...(src && { appDirFiles: src.files, routerKind: src.routerKind }),
+    previousModel,
+    crawl,
+    // Route tables live inside the app's own JavaScript; those files are plain
+    // static assets, so they are always read over HTTP even when the pages
+    // themselves are visited in the browser.
+    bundleFetcher: httpTextFetcher,
+  };
+
+  if (!opts.browser) {
+    progress?.('Looking at the site over the network (no sign-in, no JavaScript)…');
+    return discoverApp({ ...common, fetcher: httpFetcher });
+  }
+
+  progress?.('Opening the site in Chrome…');
+  const session = await openBrowserSession({
+    ...(opts.via && { via: opts.via }),
+    ...(opts.headless !== undefined && { headless: opts.headless }),
+  });
+  try {
+    if (opts.storageState) {
+      await injectStorageState(session.browser, loadStorageStateFile(opts.storageState));
+      progress?.('Signed in using the saved session.');
+    }
+    progress?.('Walking the site…');
+    return await discoverApp({ ...common, fetcher: browserFetcher(session.browser, { sameOrigin: new URL(url).origin }) });
+  } finally {
+    await session.close().catch(() => {});
+  }
+}
+
+/** The findings block a person reads after a map. Problems first, then
+ * warnings, capped so one broken page does not bury the summary. */
+function renderFindings(findings: AppModelFinding[]): string[] {
+  if (!findings.length) return ['Nothing looked broken on the pages I saw.'];
+  const problems = findings.filter((f) => f.severity === 'problem');
+  const warnings = findings.filter((f) => f.severity === 'warning');
+  const lines: string[] = [];
+  const word = (n: number, one: string) => `${n} ${n === 1 ? one : `${one}s`}`;
+  lines.push(
+    problems.length
+      ? `Found ${word(problems.length, 'problem')}${warnings.length ? ` and ${word(warnings.length, 'thing')} worth a look` : ''}:`
+      : `Found ${word(warnings.length, 'thing')} worth a look:`,
+  );
+  for (const f of [...problems, ...warnings].slice(0, 25)) {
+    lines.push(`  ${f.severity === 'problem' ? '✗' : '·'} ${f.route}`);
+    lines.push(`    ${f.detail}`);
+  }
+  const shown = Math.min(25, findings.length);
+  if (findings.length > shown) lines.push(`  …and ${findings.length - shown} more.`);
+  return lines;
+}
+
 program
   .command('map')
-  .description('discover the app: routes + states + interactive elements, into .spike/app-model.json ($0, no browser)')
-  .argument('<url>', 'seed URL — also fixes the same-origin crawl boundary')
+  .description('walk the site in a real Chrome and report what is there and what is broken, into .spike/app-model.json; exit 1 if any page is broken')
+  .argument('<url>', 'address to start from — also fixes the boundary of the crawl (same site only)')
   .option('--max-depth <n>', 'link-hops to follow', (v) => parseInt(v, 10))
-  .option('--max-pages <n>', 'hard cap on pages fetched', (v) => parseInt(v, 10))
-  .option('--diff', 'compare against the stored model and print what changed', false)
+  .option('--max-pages <n>', 'hard cap on pages visited', (v) => parseInt(v, 10))
+  .option('--storage-state <path>', 'load a saved sign-in (cookies + browser storage) first, so the walk sees the pages a signed-in person sees')
+  .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
+  .option('--no-browser', 'fetch pages over the network instead of opening them in Chrome: faster, but it cannot sign in and cannot see a page that draws itself with JavaScript')
+  .option('--headless', 'run Chrome without a window', false)
+  .option('--diff', 'compare against the stored map and print what changed', false)
   .option('--json', 'machine-readable output', false)
-  .action(async (url: string, opts: { maxDepth?: number; maxPages?: number; diff: boolean; json: boolean }) => {
+  .action(async (url: string, opts: { maxDepth?: number; maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; diff: boolean; json: boolean }) => {
     const root = process.cwd();
     const previousModel = loadAppModel(root);
-    const src = collectAppDirFiles(root);
-    const model = await discoverApp({
-      baseUrl: url,
-      fetcher: httpFetcher,
-      ...(src && { appDirFiles: src.files, routerKind: src.routerKind }),
-      previousModel,
-      crawl: {
-        ...(opts.maxDepth !== undefined && { maxDepth: opts.maxDepth }),
-        ...(opts.maxPages !== undefined && { maxPages: opts.maxPages }),
-      },
-    });
+    const progress = opts.json ? undefined : (l: string) => console.error(l);
+    let model: AppModel;
+    try {
+      model = await buildSiteMap(
+        url,
+        {
+          maxDepth: opts.maxDepth,
+          maxPages: opts.maxPages,
+          browser: opts.browser,
+          via: opts.via,
+          storageState: opts.storageState,
+          headless: opts.headless,
+        },
+        progress,
+      );
+    } catch (e) {
+      console.error(`I could not walk that site: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
     saveAppModel(model, root);
     const cov = coverageReport(model);
+    const findings = model.findings ?? [];
+    const broken = hasBlockingFindings(findings);
+
     if (opts.diff) {
       const d = diffAppModel(previousModel ?? emptyAppModel(url), model);
       if (opts.json) {
-        console.log(JSON.stringify({ coverage: cov, diff: d }, null, 2));
+        console.log(JSON.stringify({ coverage: cov, diff: d, findings }, null, 2));
       } else {
         console.log(`mapped ${cov.routes.total} route(s) — ${d.newRoutes.length} new, ${d.changedRoutes.length} changed, ${d.removedRoutes.length} removed`);
         for (const e of d.prioritized.slice(0, 20)) console.log(`  ${e.kind.padEnd(9)} ${e.route}`);
+        for (const line of renderFindings(findings)) console.log(line);
       }
-      process.exit(0);
+      process.exit(broken ? 1 : 0);
     }
-    if (opts.json) console.log(JSON.stringify({ coverage: cov }, null, 2));
-    else console.log(`mapped ${cov.routes.total} route(s), ${cov.interactiveElements.total} interactive element(s) → .spike/app-model.json`);
-    process.exit(0);
+
+    if (opts.json) {
+      console.log(JSON.stringify({ coverage: cov, findings }, null, 2));
+    } else {
+      console.log(`Mapped ${cov.routes.total} page(s) and ${cov.interactiveElements.total} control(s) → .spike/app-model.json`);
+      for (const line of renderFindings(findings)) console.log(line);
+    }
+    process.exit(broken ? 1 : 0);
   });
 
 program
