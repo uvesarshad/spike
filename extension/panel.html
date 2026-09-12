@@ -364,6 +364,15 @@
       </label>
       <div id="consentNote" class="consent-note" hidden></div>
 
+      <!-- A25: reuse a signed-in session between tests. Shown only while Spike
+           Core (the optional desktop helper) is connected — it is what holds
+           the saved session file on this computer. -->
+      <label id="rememberLoginRow" class="consent-row" for="rememberLogin" hidden>
+        <input id="rememberLogin" class="consent-check" type="checkbox" />
+        <span class="consent-text">Remember my login for tests<br />
+          <small>After a test signs in and passes, later tests on this site start already signed in. Kept on this computer only.</small></span>
+      </label>
+
       <!-- A18: the spend cap sits next to the click-and-type switch, because the
            two together are "how far may this go?" — not buried in a settings
            accordion. Saved the moment it changes (same config-set the Settings

@@ -861,6 +861,10 @@ chrome.runtime.onConnect.addListener((port) => {
             // user just ticked. Omitted by older panels → the helper falls back
             // to its stored setting, as before.
             if (typeof msg.readOnly === 'boolean') runParams.readOnly = msg.readOnly;
+            // A25: "Remember my login for tests" — the helper holds the saved
+            // session on disk; forwarded only when the user ticked the box, so
+            // an older helper simply ignores an absent flag.
+            if (msg.rememberLogin === true) runParams.rememberLogin = true;
             const result = await sendRequest('vibe.run', runParams);
             port.postMessage({ kind: 'accepted', ...(result || {}) });
           } catch (e) {

@@ -112,6 +112,9 @@ const tabHost = $('tabHost');
 const tabWarning = $('tabWarning');
 const stopBtn = $('stopBtn');
 const consentToggle = $('consentToggle');
+// A25: "Remember my login for tests" (desktop-helper only).
+const rememberLoginRow = $('rememberLoginRow');
+const rememberLogin = $('rememberLogin');
 const consentNote = $('consentNote');
 const clipBtn = $('clipBtn');
 const nanoOnboard = $('nanoOnboard');
@@ -580,6 +583,28 @@ function noteHelperSeen() {
   try { chrome.storage.local.set({ [HELPER_SEEN_KEY]: true }); } catch { /* nicety */ }
 }
 
+// A25: "Remember my login for tests" — a per-browser preference (the session
+// itself is held by Spike Core on this computer, never here). Offered only
+// while the helper is connected, because nothing else can keep it.
+const REMEMBER_LOGIN_KEY = 'spikeRememberLogin';
+function loadRememberLogin() {
+  if (!rememberLogin) return;
+  try {
+    chrome.storage.local.get(REMEMBER_LOGIN_KEY, (res) => {
+      void chrome.runtime.lastError;
+      rememberLogin.checked = Boolean(res && res[REMEMBER_LOGIN_KEY]);
+    });
+  } catch { /* a panel with no storage still works, it just forgets */ }
+}
+function refreshRememberLogin() {
+  if (rememberLoginRow) rememberLoginRow.hidden = !bridgeHealthy();
+}
+if (rememberLogin) {
+  rememberLogin.addEventListener('change', () => {
+    try { chrome.storage.local.set({ [REMEMBER_LOGIN_KEY]: rememberLogin.checked }); } catch { /* nicety */ }
+  });
+}
+
 // A20: Chrome puts up its own "Spike started debugging this browser" bar as
 // soon as a test attaches, and closing that bar kills the test. Nothing said
 // so. It is explained under the Run button for the first three tests and then
@@ -658,6 +683,8 @@ function setBridge(msg) {
   requestSavedTests(true);
   // A20: so does the site map card.
   renderSiteMapCard();
+  // A25: only the helper can hold a remembered sign-in.
+  refreshRememberLogin();
   wasBridgeHealthyForSiteMap = healthyNow;
   // A4: with the desktop helper gone, a command-line model can no longer sign
   // in for itself — whether a key is needed can change with this dot.
@@ -2984,6 +3011,9 @@ function buildRunMessage(task) {
     const extras = allowedExtrasFor(host);
     if (extras.length) runMsg.allowHosts = extras;
   }
+  // A25: reuse (and refresh) the sign-in remembered for this site. Only Spike
+  // Core can hold it, so the option isn't even offered without one.
+  if (rememberLogin && rememberLogin.checked && bridgeHealthy()) runMsg.rememberLogin = true;
   return runMsg;
 }
 
@@ -3058,6 +3088,7 @@ function requestInitialState() {
 initTheme();
 loadHelperSeen();
 loadRunCount();
+loadRememberLogin();
 loadActiveTab();
 requestInitialState();
 probeInstallReachable();

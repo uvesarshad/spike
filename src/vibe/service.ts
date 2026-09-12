@@ -59,6 +59,7 @@
  * signal). */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { BridgeServer } from '../bridge/bridge-server.js';
 import { createPlanningRouter, qaReplay, qaRun, type QaReplayOptions, type QaRunOptions } from '../engine.js';
@@ -142,6 +143,19 @@ const PROVIDER_ORDER: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama
 const PLAIN_HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:\d{1,5})?$/;
 function isPlainHostname(host: string): boolean {
   return PLAIN_HOSTNAME_RE.test(host);
+}
+
+/** A25: where a remembered sign-in for one site is kept — `~/.spike/state/
+ * <host>.json`, one file per site, written owner-only by saveStorageStateFile.
+ * The host is sanitised because it becomes a filename (a port's colon is not
+ * legal on Windows, and nothing from a URL should ever steer a path). */
+export function savedLoginPath(host: string): string {
+  const safe = host
+    .toLowerCase()
+    .replace(/[^a-z0-9.-]+/g, '_')
+    .replace(/\.{2,}/g, '.') // no `..` segment survives, belt-and-braces
+    .replace(/^[.-]+/, '');
+  return path.join(os.homedir(), '.spike', 'state', `${safe || 'site'}.json`);
 }
 
 /** A19: `www.shop.com` and `shop.com` are the same site to a user, and a saved
@@ -313,12 +327,16 @@ export class VibeService {
       // Absent (an older panel) → undefined, and the stored setting still wins.
       const rawReadOnly = (params as { readOnly?: unknown }).readOnly;
       const readOnly = typeof rawReadOnly === 'boolean' ? rawReadOnly : undefined;
+      // A25: "Remember my login for tests" — when on, a passing run's signed-in
+      // state is saved for this site and handed to later tests against it, so a
+      // test doesn't have to sign in again every time.
+      const rememberLogin = Boolean((params as { rememberLogin?: unknown }).rememberLogin);
       if (!task || !url) throw new Error('vibe.run requires { task, url }');
       this.busy = true;
       // Fire-and-forget the actual run; the request returns immediately.
       // ctx.clientId binds the whole run (browser calls + UI events) to the
       // Chrome whose panel asked — a second connected Chrome stays untouched.
-      void this.execute(task, url, tabId, allowHost, ctx?.clientId, readOnly, extraHosts);
+      void this.execute(task, url, tabId, allowHost, ctx?.clientId, readOnly, extraHosts, rememberLogin);
       return { accepted: true };
     });
 
@@ -831,6 +849,8 @@ export class VibeService {
     /** A14: extra sites already consented to for this one. Only applied when
      * `allowHost` is present — they widen a consented run, never a look-only one. */
     extraHosts: string[] = [],
+    /** A25: reuse (and refresh) this site's remembered sign-in. */
+    rememberLogin = false,
   ): Promise<void> {
     const controller = new AbortController();
     this.activeRun = controller;
@@ -878,11 +898,34 @@ export class VibeService {
         ...(allowHost && { allowedHosts: [...loadConfig().allowedHosts, allowHost, ...extraHosts] }),
         ...(readOnly !== undefined && { readOnly }),
       };
+      // A25: the remembered sign-in for THIS site. Loading it only when the file
+      // is already there means the first run signs in normally and saves the
+      // result; every later one starts already signed in. The save half is
+      // engine-side and only fires on a PASS, so a half-logged-in failure never
+      // overwrites a good state.
+      let loginStatePath: string | undefined;
+      if (rememberLogin) {
+        try {
+          loginStatePath = savedLoginPath(new URL(url).host);
+        } catch {
+          /* an unparseable url has no site to remember a login for */
+        }
+      }
+      const haveSavedLogin = Boolean(loginStatePath && fs.existsSync(loginStatePath));
+      if (loginStatePath) {
+        progress(
+          haveSavedLogin
+            ? 'Using the sign-in remembered for this site.'
+            : 'If this test signs in and passes, the sign-in will be remembered for this site.',
+        );
+      }
       const runOpts = {
         bridge: this.bridge,
         tabId,
         clientId,
         config,
+        ...(haveSavedLogin && { storageStatePath: loginStatePath }),
+        ...(loginStatePath && { saveStorageStatePath: loginStatePath }),
         trustTargetHost: Boolean(allowHost),
         // A19: a passing panel run becomes a saved test, exactly as a run
         // started from a terminal does. Without this the panel could only ever

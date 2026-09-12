@@ -508,9 +508,25 @@ export function loadStorageStateFile(p: string): StorageState {
   return JSON.parse(fs.readFileSync(p, 'utf8')) as StorageState;
 }
 
+/* A25 (P1): a storage-state file IS a session — its cookies log whoever holds
+ * it straight back in. It was written with the process umask (0644 on a normal
+ * Unix box: every other account on the machine could read it). Owner-only, the
+ * same way the key vault writes (`vault.ts` — `{ mode: 0o600 }` has no POSIX
+ * effect on Windows, where the user profile directory is the protection, but
+ * it costs nothing there and is the difference on macOS/Linux). The mode is
+ * re-applied explicitly because `writeFileSync`'s `mode` is ignored for a file
+ * that already exists — re-saving over yesterday's state must not leave the
+ * old, looser permissions in place. */
 export function saveStorageStateFile(p: string, state: StorageState): void {
-  fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(state, null, 2));
+  const abs = path.resolve(p);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, JSON.stringify(state, null, 2), { mode: 0o600 });
+  try {
+    fs.chmodSync(abs, 0o600);
+  } catch {
+    /* a filesystem without POSIX modes (Windows, some network shares) — the
+     * file is still written; only the permission tightening is a no-op. */
+  }
 }
 
 /* =============================================================================
