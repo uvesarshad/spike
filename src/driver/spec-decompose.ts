@@ -17,35 +17,54 @@
  * That keeps the fast test suite free of Chrome/model/network (test/v78) and
  * keeps `src/driver/` free of an import edge back into `src/engine.ts`.
  *
- * A8 will generalise the fan-out half (routes from the app model, coverage
- * accounting, shared storage state across N runs); the loop here is kept
- * deliberately small so it can be lifted wholesale when that lands.
+ * A8 DID generalise the fan-out half: running the flows, aggregating one
+ * verdict, counting coverage and rendering the table now live in
+ * `src/orchestrator/fan-out.ts`, which also accepts routes from app-model
+ * discovery. This module keeps ONLY the document→flows half and re-exports the
+ * orchestrator's surface, so every caller (CLI, MCP, tests) keeps one import
+ * and the codebase keeps exactly one fan-out loop.
  */
 
 import { z } from 'zod';
-import type { RunVerdict } from '../report/report.js';
+import {
+  MAX_FLOWS,
+  MAX_FLOW_NAME_CHARS,
+  MAX_FLOW_TASK_CHARS,
+  normalizeFlows,
+  type FlowUnit,
+} from '../orchestrator/fan-out.js';
 
-/** Hard cap on flows derived from one document. A document that implies more
- * than this is a suite, not a run — the extra flows are dropped rather than
- * silently multiplying the cost of a single command. */
-export const MAX_FLOWS = 20;
-/** Each flow's task must stay a single instruction the driver can hold in
- * every prompt. Longer strings are truncated, not rejected. */
-export const MAX_FLOW_TASK_CHARS = 300;
-/** Flow labels are for humans reading the result table. */
-export const MAX_FLOW_NAME_CHARS = 80;
+/** The fan-out half, re-exported so A7's callers keep their single import. */
+export {
+  MAX_FLOWS,
+  MAX_FLOW_NAME_CHARS,
+  MAX_FLOW_TASK_CHARS,
+  aggregateVerdict,
+  clampText,
+  coverageFromSteps,
+  flowsFromRoutes,
+  normalizeFlows,
+  renderCoverageLine,
+  renderFlowTable,
+  runFanOut,
+  runFlows,
+  singleRunCoverage,
+  type FanOutContext,
+  type FanOutOptions,
+  type FanOutOutcome,
+  type FlowOutcome,
+  type FlowRunResult,
+  type FlowUnit,
+  type RouteUnit,
+  type RunFlowsOptions,
+  type SpecFlow,
+  type SpecRunOutcome,
+} from '../orchestrator/fan-out.js';
+
 /** Upper bound on how much of the document reaches the model in the one call.
  * A 200-page PDF pasted in full would blow the context window; the head of the
  * document is where the stories live. */
 export const MAX_SPEC_CHARS = 20_000;
-
-/** One testable flow derived from a document (or supplied pre-split by a caller). */
-export interface SpecFlow {
-  /** Short human label for the result table, e.g. "Checkout with a saved card". */
-  name: string;
-  /** The self-contained plain-English instruction handed to a single run. */
-  task: string;
-}
 
 const SpecFlowSchema = z.object({
   name: z.string().min(1),
@@ -87,15 +106,6 @@ export const SPEC_FLOWS_JSON_SCHEMA = {
     },
   },
 } as const;
-
-/** Trim a string to a cap without cutting mid-word where avoidable. */
-function clamp(s: string, max: number): string {
-  const flat = s.replace(/\s+/g, ' ').trim();
-  if (flat.length <= max) return flat;
-  const cut = flat.slice(0, max);
-  const lastSpace = cut.lastIndexOf(' ');
-  return (lastSpace > max * 0.6 ? cut.slice(0, lastSpace) : cut).trimEnd();
-}
 
 export interface SpecPromptContext {
   /** The raw document text (markdown or plain text). */
@@ -151,7 +161,7 @@ export interface DecomposeOptions {
 /** ONE call to the model that plans: document → flows. Throws a plain-English
  * error when no usable list comes back (the caller turns that into a message;
  * there is no half-decomposed state worth keeping). */
-export async function decomposeSpec(spec: string, opts: DecomposeOptions): Promise<SpecFlow[]> {
+export async function decomposeSpec(spec: string, opts: DecomposeOptions): Promise<FlowUnit[]> {
   const text = spec.trim();
   if (!text) throw new Error('That document is empty — there is nothing to test in it.');
 
@@ -166,116 +176,4 @@ export async function decomposeSpec(spec: string, opts: DecomposeOptions): Promi
 
   const cap = Math.max(1, Math.min(opts.maxFlows ?? MAX_FLOWS, MAX_FLOWS));
   return normalizeFlows(parsed.data.flows, cap);
-}
-
-/** Clamp/label/cap a flow list. Shared by the model path and the pre-split
- * caller path (`flows: string[]`) so both obey the same limits. */
-export function normalizeFlows(flows: Array<SpecFlow | string>, maxFlows = MAX_FLOWS): SpecFlow[] {
-  const cap = Math.max(1, Math.min(maxFlows, MAX_FLOWS));
-  return flows
-    .map((f) => (typeof f === 'string' ? { name: f, task: f } : f))
-    .map((f) => ({
-      name: clamp(f.name || f.task, MAX_FLOW_NAME_CHARS),
-      task: clamp(f.task, MAX_FLOW_TASK_CHARS),
-    }))
-    .filter((f) => f.task.length > 0)
-    .slice(0, cap);
-}
-
-/* ---------- running the flows + one verdict ------------------------------- */
-
-/** The per-flow result the caller renders/returns. `evidence_paths` is the
- * slim contract's own field, carried through unchanged. */
-export interface FlowOutcome {
-  name: string;
-  task: string;
-  verdict: RunVerdict;
-  reason: string;
-  evidence_paths: string[];
-}
-
-export interface SpecRunOutcome {
-  /** fail if any flow failed; uncertain if any was uncertain and none failed; else pass. */
-  verdict: RunVerdict;
-  flows: FlowOutcome[];
-}
-
-/** Roll per-flow verdicts into one. Empty list is `uncertain` — nothing was
- * actually checked, which must never read as a pass. */
-export function aggregateVerdict(verdicts: RunVerdict[]): RunVerdict {
-  if (!verdicts.length) return 'uncertain';
-  if (verdicts.includes('fail')) return 'fail';
-  if (verdicts.includes('uncertain')) return 'uncertain';
-  return 'pass';
-}
-
-/** The minimum a flow run has to hand back — satisfied by a full Report. */
-export interface FlowRunResult {
-  verdict: RunVerdict;
-  reason?: string;
-  evidence_paths?: string[];
-}
-
-export interface RunFlowsOptions {
-  /** Runs ONE flow (the caller supplies the real qaRun call, with its shared
-   * login state / step budget / transport already bound). */
-  runFlow: (flow: SpecFlow, index: number) => Promise<FlowRunResult>;
-  /** Progress lines for the CLI; ignored when absent. */
-  onProgress?: (line: string) => void;
-}
-
-/** Run every flow in order, one budgeted run each, and aggregate. A flow that
- * throws is recorded as `uncertain` with the error text rather than aborting
- * the remaining flows — one broken flow must not hide the verdict of the rest. */
-export async function runFlows(flows: SpecFlow[], opts: RunFlowsOptions): Promise<SpecRunOutcome> {
-  const outcomes: FlowOutcome[] = [];
-  for (const [i, flow] of flows.entries()) {
-    opts.onProgress?.(`Flow ${i + 1} of ${flows.length}: ${flow.name}`);
-    try {
-      const r = await opts.runFlow(flow, i);
-      outcomes.push({
-        name: flow.name,
-        task: flow.task,
-        verdict: r.verdict,
-        reason: r.reason ?? '',
-        evidence_paths: r.evidence_paths ?? [],
-      });
-    } catch (e) {
-      outcomes.push({
-        name: flow.name,
-        task: flow.task,
-        verdict: 'uncertain',
-        reason: `I could not finish this flow: ${e instanceof Error ? e.message : String(e)}`,
-        evidence_paths: [],
-      });
-    }
-    opts.onProgress?.(`  → ${outcomes[outcomes.length - 1].verdict}`);
-  }
-  return { verdict: aggregateVerdict(outcomes.map((o) => o.verdict)), flows: outcomes };
-}
-
-const VERDICT_LABEL: Record<RunVerdict, string> = {
-  pass: 'passed',
-  fail: 'FAILED',
-  uncertain: 'not sure',
-};
-
-/** The per-flow verdict table + the one-line overall verdict. Plain words only
- * — this is what a non-engineer reads in the terminal. */
-export function renderFlowTable(outcome: SpecRunOutcome): string {
-  const width = Math.max(0, ...outcome.flows.map((f) => f.name.length));
-  const rows = outcome.flows.map((f, i) => {
-    const head = `${String(i + 1).padStart(2)}. ${f.name.padEnd(width)}  ${VERDICT_LABEL[f.verdict]}`;
-    return f.verdict === 'pass' || !f.reason ? head : `${head}\n      ${clamp(f.reason, 200)}`;
-  });
-  const failed = outcome.flows.filter((f) => f.verdict === 'fail').length;
-  const unsure = outcome.flows.filter((f) => f.verdict === 'uncertain').length;
-  const total = outcome.flows.length;
-  const summary =
-    outcome.verdict === 'pass'
-      ? `All ${total} flow${total === 1 ? '' : 's'} passed.`
-      : outcome.verdict === 'fail'
-        ? `${failed} of ${total} flow${total === 1 ? '' : 's'} failed.`
-        : `${unsure} of ${total} flow${total === 1 ? '' : 's'} could not be checked.`;
-  return `${rows.join('\n')}\n\nOverall: ${outcome.verdict} — ${summary}`;
 }

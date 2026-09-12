@@ -110,6 +110,22 @@ export interface SpendSummary {
   capUsd?: number;
 }
 
+/** A8 (P0): how much of the app this result actually got through. Set on every
+ * non-pass verdict — a single run reports 1 of 1 flow plus the pages it reached
+ * and the controls it operated; a fan-out (src/orchestrator/fan-out.ts) reports
+ * the whole sweep. Without it, "couldn't finish" reads as "none of your app
+ * works" when the truth may be "3 of 5 flows were fine and the budget ran out". */
+export interface RunCoverage {
+  /** Flows actually started. */
+  flowsAttempted: number;
+  /** Flows there were to test. */
+  flowsTotal: number;
+  /** Distinct page addresses reached. */
+  pagesVisited: number;
+  /** Distinct controls (buttons, fields, selects…) actually operated. */
+  controlsExercised: number;
+}
+
 export interface ActionCacheStats {
   enabled: boolean;
   hits: number;
@@ -172,6 +188,10 @@ export interface Report {
   /** A21: set only on a `qaReplay` result that went through `--heal`'s
    * classification step. See `HealReview` for what each tier means. */
   healReview?: HealReview;
+  /** A8 (P0): set on every non-pass verdict — how many flows/pages/controls
+   * this result actually got through. Absent on a pass (everything asked for
+   * was checked, so there is nothing to qualify). */
+  coverage?: RunCoverage;
   /** A30 (A24 Tier 1): the differential comparison against this flow's stored
    * baseline, when one existed. Absent on the first run of a flow (the baseline
    * is created instead) and when differential mode is off. Evidence only — like

@@ -7,6 +7,7 @@
 
 import type { Report, StepRecord } from '../report/report.js';
 import { redactTaskText, redactTypedText } from '../report/redact.js';
+import { renderCoverageLine } from '../orchestrator/fan-out.js';
 import type { NetworkEntry } from '../ports/browser-port.js';
 
 /** Humanize a single step into "what the robot did", preferring the role+name
@@ -176,6 +177,14 @@ export function renderPlainReport(report: Report): string {
       lines.push('');
       lines.push('These requests failed:');
       for (const c of calls) lines.push(`- ${describeCall(c)}`);
+    }
+    // A8 (P0): say how much was actually checked. Without this, a run that
+    // tested four flows fine and ran out of room on the fifth reads exactly
+    // like a run where nothing worked at all.
+    if (report.coverage) {
+      lines.push('');
+      lines.push('**How much I checked:**');
+      lines.push(renderCoverageLine(report.coverage));
     }
   }
 

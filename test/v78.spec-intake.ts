@@ -186,6 +186,7 @@ await check('an empty document is refused before any model call', async () => {
 await check('the result table names every flow, its verdict, and the overall call', () => {
   const table = renderFlowTable({
     verdict: 'fail',
+    coverage: { flowsAttempted: 3, flowsTotal: 3, pagesVisited: 4, controlsExercised: 9 },
     flows: [
       { name: 'Sign in', task: 't1', verdict: 'pass', reason: 'ok', evidence_paths: [] },
       { name: 'Checkout', task: 't2', verdict: 'fail', reason: 'Pressing "Place order" showed an error.', evidence_paths: [] },

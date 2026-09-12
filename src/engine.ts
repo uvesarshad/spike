@@ -45,6 +45,7 @@ import { runDriverLoop, type StepInfo } from './driver/loop.js';
 import { Vault } from './vault/vault.js';
 import type { Report, RunVerdict } from './report/report.js';
 import { recordRunCoverage } from './discovery/record-coverage.js';
+import { singleRunCoverage } from './orchestrator/fan-out.js';
 import { compareToBaseline, loadBaseline, saveBaseline } from './assertions/differential.js';
 import { detectRelationCandidates } from './assertions/metamorphic.js';
 import { diffScripts, loadScript, saveScript, scriptFromReport, scriptsDir, type QaScript } from './recorder/script.js';
@@ -1078,6 +1079,13 @@ async function runFreshAiPass(
         artifacts.saveReport(report); // re-save with the clip path included
         progress(`replay clip: ${gif}`);
       }
+    }
+    // A8 (P0): a non-pass verdict must say how much of the app it got through.
+    // "Couldn't finish" with no coverage statement reads as "nothing works",
+    // when the truth is usually "this much was fine, then the budget ran out".
+    if (report.verdict !== 'pass') {
+      report.coverage = singleRunCoverage(report.steps, url);
+      artifacts.saveReport(report);
     }
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);
     runSpan.addEvent('driver.loop.completed', { verdict: report.verdict, steps: report.steps.length, durationMs: report.durationMs });
