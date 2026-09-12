@@ -7,7 +7,7 @@ import CDP from 'chrome-remote-interface';
 import { ensureChrome, sleep, type LaunchOptions } from '../chrome/launch.js';
 import { attachCapture, type CaptureBuffers } from '../capture/console-network.js';
 import { setLogpointByContent } from '../capture/logpoints.js';
-import { snapshotAxTree, TESTID_ATTRS } from '../capture/axtree.js';
+import { snapshotAxTree, TESTID_ATTRS, type AxChildFrame } from '../capture/axtree.js';
 import { INVARIANT_PROBE_JS } from '../assertions/invariants.js';
 import {
   assertMutationHostAllowed,
@@ -150,6 +150,10 @@ export class CdpBrowser implements BrowserPort {
    * rejected), so a repeated Target.attachedToTarget for the same popup never
    * opens a second client for it. */
   private seenTargets = new Set<string>();
+  /** A23 (P1): frames running in their own process, reported by auto-attach.
+   * Their contents are spliced into every snapshot (see axTree) so a payment
+   * form, sign-in widget or CAPTCHA is not an invisible hole in the page. */
+  private childFrames = new Map<string, AxChildFrame>();
 
   /** A49 (P2): set once `Inspector.targetCrashed` fires on the active tab (a
    * renderer crash — OOM, a native-code bug the page's own JS triggered, GPU
@@ -241,8 +245,24 @@ export class CdpBrowser implements BrowserPort {
     // adoptPageTarget() turns each into an ordinary switchable tab.
     this.client.Target.attachedToTarget((ev: unknown) => {
       const info = (ev as { targetInfo?: { targetId?: string; type?: string; url?: string } }).targetInfo;
-      if (!info?.targetId || info.type !== 'page') return; // iframes/workers are not tabs
+      if (!info?.targetId) return;
+      // A23 (P1): a frame running in its OWN process — a payment form, a
+      // sign-in widget, a chat bubble, a CAPTCHA. It is not a tab, so it is
+      // not adopted as one, but the page stops dead at its border unless its
+      // contents are spliced into each snapshot. Remembered here and handed to
+      // the snapshot below; a frame that has gone away by then is skipped.
+      if (info.type === 'iframe') {
+        this.childFrames.set(info.targetId, { frameId: info.targetId, url: info.url ?? '' });
+        return;
+      }
+      if (info.type !== 'page') return; // workers are not tabs either
       void this.adoptPageTarget(info.targetId, info.url ?? '');
+    });
+    // …and forget one when it goes away, so a stale id can't cost a round trip
+    // on every snapshot for the rest of the run.
+    this.client.Target.detachedFromTarget((ev: unknown) => {
+      const targetId = (ev as { targetId?: string }).targetId;
+      if (targetId) this.childFrames.delete(targetId);
     });
     // waitForDebuggerOnStart MUST stay false — true pauses every new page until
     // we explicitly resume it, which would freeze any popup the page opens.
@@ -303,15 +323,20 @@ export class CdpBrowser implements BrowserPort {
   }
 
   async axTree(opts?: AxTreeOptions): Promise<AxSnapshot> {
-    const { snapshot, nodeMap } = await snapshotAxTree(this.c, opts);
+    const { snapshot, nodeMap } = await snapshotAxTree(this.c, { ...opts, frames: this.frameList() });
     this.nodeMap = nodeMap;
     return snapshot;
+  }
+
+  /** A23 (P1): the child frames to splice into this snapshot. */
+  private frameList(): AxChildFrame[] {
+    return [...this.childFrames.values()];
   }
 
   /** See BrowserPort.peekAxTree — same snapshot, `nodeMap` deliberately left
    * bound to whatever the planner is currently reasoning about. */
   async peekAxTree(): Promise<AxSnapshot> {
-    const { snapshot } = await snapshotAxTree(this.c);
+    const { snapshot } = await snapshotAxTree(this.c, { frames: this.frameList() });
     return snapshot;
   }
 

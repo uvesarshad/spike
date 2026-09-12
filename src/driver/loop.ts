@@ -17,6 +17,7 @@
  * one confirmation visual before accepting; finish:fail → trusted. */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import type { AxNode, AxSnapshot, BrowserPort } from '../ports/browser-port.js';
 import { isHostAllowed } from '../ports/browser-port.js';
 import { firstError } from '../capture/console-network.js';
@@ -1701,7 +1702,14 @@ export async function runDriverLoop(
             }
           }
         } else {
-          const outcome = await executeWithRetry(browser, action, ax.root);
+          // A23 (P1): a file upload asks for a path on the machine running the
+          // test — something no model can know. Any path that isn't really
+          // there is stood in for by a small sample file of the right kind.
+          const dispatched =
+            action.type === 'upload_file'
+              ? { ...action, paths: provisionUploadPaths(action.paths, artifacts.dir) }
+              : action;
+          const outcome = await executeWithRetry(browser, dispatched, ax.root);
           batchDirty = outcome.batchDirty;
           if (!outcome.waited) record.description += ' [dispatched without confirming actionability — wait timed out]';
         }
@@ -2207,6 +2215,84 @@ async function planGoalsOnce(
   const retry = GoalPlanSchema.safeParse(retryRaw);
   if (retry.success) return retry.data;
   throw new Error(`brain returned an invalid goal plan twice: ${retry.error.message.slice(0, 200)}`);
+}
+
+/* ---------- A23 (P1): sample files for uploads ---------- */
+
+/** The kinds of sample file we can produce, and what a real one of each looks
+ * like at its smallest. A file picker is one of the few places the model is
+ * asked for something only the machine running the test knows — a path on
+ * disk — so it invents one, the upload fails, and the flow dies there. Rather
+ * than that, we hand the page a real file of the right kind. */
+const SAMPLE_FILES: Record<string, { name: string; bytes: () => Buffer }> = {
+  png: {
+    name: 'sample.png',
+    // A 1x1 transparent PNG — the smallest thing that is genuinely a PNG, so
+    // an image preview and a server-side type check both accept it.
+    bytes: () =>
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        'base64',
+      ),
+  },
+  pdf: {
+    name: 'sample.pdf',
+    // A minimal one-page PDF: header, catalog, pages, page, trailer.
+    bytes: () =>
+      Buffer.from(
+        '%PDF-1.4\n' +
+          '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n' +
+          '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n' +
+          '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\n' +
+          'trailer<</Root 1 0 R>>\n%%EOF\n',
+        'latin1',
+      ),
+  },
+  csv: {
+    name: 'sample.csv',
+    bytes: () => Buffer.from('name,email,amount\nAda Lovelace,ada@example.test,42\nAlan Turing,alan@example.test,7\n', 'utf8'),
+  },
+  txt: {
+    name: 'sample.txt',
+    bytes: () => Buffer.from('Sample file created for this test run.\n', 'utf8'),
+  },
+};
+
+/** Which sample kind a requested path is asking for. Anything we have no
+ * sample for falls back to plain text, which every file picker accepts. */
+function sampleKindFor(requestedPath: string): keyof typeof SAMPLE_FILES {
+  const ext = path.extname(requestedPath).toLowerCase().replace('.', '');
+  if (ext === 'png' || ext === 'jpg' || ext === 'jpeg' || ext === 'gif' || ext === 'webp') return 'png';
+  if (ext === 'pdf') return 'pdf';
+  if (ext === 'csv' || ext === 'tsv' || ext === 'xls' || ext === 'xlsx') return 'csv';
+  return 'txt';
+}
+
+/** A23 (P1): swap any requested path that isn't really there for a small
+ * sample file of the same kind, written under this run's own folder.
+ *
+ * Exported for test/v93. A path that DOES exist is passed through untouched —
+ * a run that was given real files to upload keeps using them.
+ */
+export function provisionUploadPaths(paths: string[], runDir: string): string[] {
+  return paths.map((requested) => {
+    try {
+      if (requested && fs.existsSync(requested) && fs.statSync(requested).isFile()) return requested;
+    } catch {
+      /* unreadable — treat it as missing and stand in for it below */
+    }
+    const kind = sampleKindFor(requested);
+    const sample = SAMPLE_FILES[kind];
+    const dir = path.join(runDir, 'uploads');
+    const target = path.join(dir, sample.name);
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      if (!fs.existsSync(target)) fs.writeFileSync(target, sample.bytes());
+      return target;
+    } catch {
+      return requested; // couldn't write one — let the upload fail honestly
+    }
+  });
 }
 
 /* ---------- execution ---------- */

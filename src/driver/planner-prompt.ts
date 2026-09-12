@@ -102,7 +102,7 @@ export const ACTION_RULES_AND_VOCABULARY = `- Interact via nodeIds from the tree
   - assert_network — a request did (or did not) happen, with the status you expect: {"type":"assert_network","urlPattern":"/api/order","statusClass":"2xx"}
   - assert_no_console_errors — the page logged no errors, ignoring anything you list as harmless: {"type":"assert_no_console_errors","allow":["favicon"]}
 - Use assert_visual with mode "video" only for transient UI such as toasts/spinners/animations; otherwise use the default screenshot mode. Video judging is an opt-in, costly feature — when it is off the run still gets a screenshot verdict, just not of the animation mid-flight.
-- Use upload_file to set files on a native file input (an <input type="file"> element) — pass real, existing paths.
+- Use upload_file to set files on a native file input (an <input type="file"> element). Pass a real path if you were given one; otherwise just name the kind of file wanted (e.g. "receipt.pdf", "avatar.png", "contacts.csv") and a small sample file of that kind is created and used for you.
 - Use drag_and_drop for mouse-driven drag interactions (sortable lists, sliders, custom drop zones) — press on sourceId, glide to targetId, release. It does NOT fire native HTML5 draggable dragstart/drop events (those need an OS gesture); only use it on UI that reacts to raw mouse events.
 - Use blur to move focus off a field (fires blur/change handlers some forms rely on for validation).
 - Use mouse for a single discrete mouse event ("move"/"down"/"up") at page coordinates x,y — for gestures click()/hover()/dragAndDrop() don't cover.

@@ -118,10 +118,24 @@ export interface AxFocusHint {
   name?: string;
 }
 
+/** A23 (P1): a child frame whose own accessibility tree should be spliced into
+ * this snapshot. `frameId` is what CDP calls the frame (for a frame running in
+ * its own process, the same value as its target id); `url` only supplies the
+ * host shown in the `[frame: …]` marker. */
+export interface AxChildFrame {
+  frameId: string;
+  url: string;
+}
+
 export interface SerializeAxTreeOptions {
   /** Caller-supplied character budget. Defaults to `MAX_CHARS` (6000). */
   maxChars?: number;
   focus?: AxFocusHint;
+  /** A23 (P1): child frames to splice in — see AxChildFrame. Used only by
+   * snapshotAxTree(); serializeAxTree() ignores it (by then the frames are
+   * already part of the tree it is handed). Empty/absent → a snapshot
+   * byte-identical to before. */
+  frames?: AxChildFrame[];
 }
 
 interface AxLineEntry {
@@ -254,30 +268,33 @@ export function serializeAxTree(root: AxNode, opts: SerializeAxTreeOptions = {})
   return truncateFocused(entries, focusEntry, maxChars);
 }
 
-export async function snapshotAxTree(client: CDP.Client, opts: SerializeAxTreeOptions = {}): Promise<AxTreeResult> {
-  const { nodes } = (await client.Accessibility.getFullAXTree({})) as { nodes: RawAxNode[] };
+/** Shared numbering + backend-id bookkeeping for one snapshot. A snapshot may
+ * be assembled from several frames (A23), and the ids the models reference must
+ * stay unique across all of them — so the counter and the map live out here,
+ * one set per snapshot, never one per frame. */
+interface SnapshotState {
+  nodeMap: Map<string, number>;
+  seq: { next: number };
+}
+
+/** Prune one frame's raw accessibility nodes into the compact tree shape.
+ * Extracted from snapshotAxTree so a child frame goes through the exact same
+ * keep/collapse rules as the main page rather than a second, drifting copy. */
+function pruneFrame(
+  nodes: RawAxNode[],
+  testIdByBackendId: Map<number, string>,
+  state: SnapshotState,
+  /** A23: backend ids of iframe elements a child frame will be spliced under.
+   * Those elements are usually name-less and would otherwise collapse away,
+   * taking the splice point with them. */
+  alwaysKeep: Set<number> = new Set(),
+): AxNode | null {
   const byId = new Map(nodes.map((n) => [n.nodeId, n]));
   const root = nodes.find((n) => !n.parentId && !n.ignored) ?? nodes[0];
-  if (!root) throw new Error('empty accessibility tree');
+  if (!root) return null;
 
-  // A8 (P1): ONE bulk DOM fetch per snapshot (not per node, and not an
-  // additional per-step round-trip beyond the snapshot every step already
-  // takes) to pick up data-testid/aliases — see AxNode.testId's doc comment
-  // for why this is what lets replay resolve by testid for free. Best-effort:
-  // a torn-down frame mid-navigation just means no testids are known for this
-  // snapshot, same as today's testid-less behaviour.
-  let testIdByBackendId = new Map<number, string>();
-  try {
-    const { root: domRoot } = (await client.DOM.getDocument({ depth: -1, pierce: true })) as unknown as { root: DomAttrNode };
-    testIdByBackendId = buildTestIdMap(domRoot);
-  } catch {
-    /* no testids available for this snapshot — resolution falls back to role+name */
-  }
-
-  const nodeMap = new Map<string, number>();
-  let seq = 0;
-
-  const keep = (role: string, name: string, parentName: string, testId?: string): boolean => {
+  const keep = (role: string, name: string, parentName: string, testId?: string, backendId?: number): boolean => {
+    if (backendId !== undefined && alwaysKeep.has(backendId)) return true;
     // A8: a node carrying a test attribute is ALWAYS worth keeping, even when
     // it would otherwise collapse (no accessible name, a generic/presentation
     // role) — the canvas/SVG/charting-widget case the A8 finding calls out as
@@ -304,14 +321,14 @@ export async function snapshotAxTree(client: CDP.Client, opts: SerializeAxTreeOp
       ? [] // pathologically deep DOM — stop descending, let MAX_CHARS truncation handle the rest
       : (raw.childIds ?? []).flatMap((cid) => build(byId.get(cid), name || parentName, depth + 1));
 
-    if (!keep(role, name, parentName, testId)) return children; // collapse: promote children
+    if (!keep(role, name, parentName, testId, raw.backendDOMNodeId)) return children; // collapse: promote children
 
     const states = (raw.properties ?? [])
       .filter((p) => STATE_PROPS.has(p.name) && p.value?.value !== false && p.value?.value !== 'false')
       .map((p) => (p.value?.value === true || p.value?.value === undefined ? p.name : `${p.name}=${p.value.value}`));
 
-    const id = `n${seq++}`;
-    if (raw.backendDOMNodeId !== undefined) nodeMap.set(id, raw.backendDOMNodeId);
+    const id = `n${state.seq.next++}`;
+    if (raw.backendDOMNodeId !== undefined) state.nodeMap.set(id, raw.backendDOMNodeId);
     const node: AxNode = {
       id,
       role,
@@ -325,8 +342,101 @@ export async function snapshotAxTree(client: CDP.Client, opts: SerializeAxTreeOp
   };
 
   const roots = build(root, '');
-  const rootNode: AxNode = roots.length === 1 ? roots[0] : { id: `n${seq++}`, role: 'RootWebArea', children: roots };
+  if (!roots.length) return null;
+  if (roots.length === 1) return roots[0];
+  return { id: `n${state.seq.next++}`, role: 'RootWebArea', children: roots };
+}
+
+/** Host shown in a `[frame: …]` marker. A frame whose URL is opaque (about:blank,
+ * a blob/data URL, or missing) is labelled by that instead of by nothing, so the
+ * marker never reads as an empty pair of brackets. */
+function frameLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.host || parsed.protocol.replace(':', '');
+  } catch {
+    return url ? url.slice(0, 40) : 'unknown';
+  }
+}
+
+/** Find the already-pruned node that came from a given DOM element. */
+function findByBackendId(root: AxNode, backendId: number, nodeMap: Map<string, number>): AxNode | null {
+  let wantedId: string | null = null;
+  for (const [id, backend] of nodeMap) {
+    if (backend === backendId) {
+      wantedId = id;
+      break;
+    }
+  }
+  if (!wantedId) return null;
+  const walk = (node: AxNode): AxNode | null => {
+    if (node.id === wantedId) return node;
+    for (const child of node.children ?? []) {
+      const hit = walk(child);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return walk(root);
+}
+
+export async function snapshotAxTree(client: CDP.Client, opts: SerializeAxTreeOptions = {}): Promise<AxTreeResult> {
+  const { nodes } = (await client.Accessibility.getFullAXTree({})) as { nodes: RawAxNode[] };
+
+  // A8 (P1): ONE bulk DOM fetch per snapshot (not per node, and not an
+  // additional per-step round-trip beyond the snapshot every step already
+  // takes) to pick up data-testid/aliases — see AxNode.testId's doc comment
+  // for why this is what lets replay resolve by testid for free. Best-effort:
+  // a torn-down frame mid-navigation just means no testids are known for this
+  // snapshot, same as today's testid-less behaviour.
+  let testIdByBackendId = new Map<number, string>();
+  try {
+    const { root: domRoot } = (await client.DOM.getDocument({ depth: -1, pierce: true })) as unknown as { root: DomAttrNode };
+    testIdByBackendId = buildTestIdMap(domRoot);
+  } catch {
+    /* no testids available for this snapshot — resolution falls back to role+name */
+  }
+
+  const state: SnapshotState = { nodeMap: new Map(), seq: { next: 0 } };
+
+  // A23 (P1): which <iframe> element each child frame hangs off. Payment forms,
+  // sign-in widgets, chat bubbles and CAPTCHA all live in a frame of their own;
+  // without this the page just stops at the frame's border and the whole flow
+  // behind it is invisible. Best-effort per frame: one that has gone away by
+  // the time we ask is simply skipped.
+  const owners: { backendId: number; frame: AxChildFrame }[] = [];
+  for (const frame of opts.frames ?? []) {
+    try {
+      const { backendNodeId } = (await client.DOM.getFrameOwner({ frameId: frame.frameId })) as { backendNodeId?: number };
+      if (typeof backendNodeId === 'number') owners.push({ backendId: backendNodeId, frame });
+    } catch {
+      /* frame gone, or this connection can't see it — skip it */
+    }
+  }
+
+  const rootNode = pruneFrame(nodes, testIdByBackendId, state, new Set(owners.map((o) => o.backendId)));
+  if (!rootNode) throw new Error('empty accessibility tree');
+
+  for (const { backendId, frame } of owners) {
+    let childNodes: RawAxNode[];
+    try {
+      ({ nodes: childNodes } = (await client.Accessibility.getFullAXTree({ frameId: frame.frameId })) as { nodes: RawAxNode[] });
+    } catch {
+      continue; // the frame runs somewhere this connection can't reach — leave the page as it was
+    }
+    const childRoot = pruneFrame(childNodes, new Map(), state);
+    if (!childRoot) continue;
+    const marker: AxNode = {
+      id: `n${state.seq.next++}`,
+      role: 'frame',
+      name: `[frame: ${frameLabel(frame.url)}]`,
+      children: [childRoot],
+    };
+    const host = findByBackendId(rootNode, backendId, state.nodeMap);
+    if (host) host.children = [...(host.children ?? []), marker];
+    else rootNode.children = [...(rootNode.children ?? []), marker]; // the <iframe> itself collapsed away — keep the content
+  }
 
   const { text, truncated } = serializeAxTree(rootNode, opts);
-  return { snapshot: { root: rootNode, text, truncated }, nodeMap };
+  return { snapshot: { root: rootNode, text, truncated }, nodeMap: state.nodeMap };
 }
