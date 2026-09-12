@@ -313,6 +313,29 @@ export async function runPortContract(
     const png = await browser.screenshot();
     check('screenshot returns PNG', png.length > 1000 && png.subarray(1, 4).toString() === 'PNG');
 
+    // A17 (P1): the deterministic page checks. Optional on the interface, so a
+    // transport that genuinely cannot look at the DOM is allowed to skip it —
+    // but every transport that DOES implement it must return the probe's own
+    // object shape, not a string, a promise handle, or undefined.
+    if (browser.probeInvariants) {
+      let probe: unknown;
+      let threw = false;
+      try {
+        probe = await browser.probeInvariants();
+      } catch {
+        threw = true;
+      }
+      check('probeInvariants() does not throw on a healthy page', !threw);
+      check('probeInvariants() returns an object', !!probe && typeof probe === 'object' && !Array.isArray(probe));
+      const p = (probe ?? {}) as Record<string, unknown>;
+      check(
+        'probeInvariants() reports the DOM-level findings (rendered tokens, broken images, duplicate ids)',
+        Array.isArray(p.renderedUndefined) && Array.isArray(p.brokenImages) && Array.isArray(p.duplicateIds),
+      );
+    } else {
+      check('probeInvariants() is absent — this transport cannot look at the DOM (allowed)', true);
+    }
+
     const drained = browser.drainConsole();
     check(
       'drains are per-step (post-drain buffer only has new entries)',

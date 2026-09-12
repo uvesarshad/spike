@@ -17,6 +17,7 @@ import { sleep } from '../chrome/launch.js';
 import { attachCapture, type CaptureBuffers } from '../capture/console-network.js';
 import { setLogpointByContent } from '../capture/logpoints.js';
 import { snapshotAxTree } from '../capture/axtree.js';
+import { INVARIANT_PROBE_JS } from '../assertions/invariants.js';
 import { BridgeServer, DEFAULT_BRIDGE_PORT } from '../bridge/bridge-server.js';
 import { createCdpShim, type CdpShim } from '../bridge/cdp-shim.js';
 import {
@@ -598,6 +599,26 @@ export class ExtensionBrowser implements BrowserPort {
   async screenshot(): Promise<Buffer> {
     const { data } = await this.c.Page.captureScreenshot({ format: 'png' });
     return Buffer.from(data, 'base64');
+  }
+
+  /** A17 (P1): the deterministic page checks, over this transport. Same single
+   * compile-time probe the direct-connection port uses runs — never caller-supplied code (see
+   * BrowserPort.probeInvariants) — just dispatched through the browser's own
+   * debugging channel instead of a direct connection. Without this, testing
+   * from inside the browser lost every DOM-level check (rendered undefined/NaN,
+   * broken images, duplicate ids, an empty main region) and fell back to
+   * console/network evidence alone.
+   *
+   * The probe wraps itself in try/catch in-page, so a hostile or half-loaded
+   * document yields a junk-but-harmless value rather than throwing; the parser
+   * is fully defensive about whatever comes back. */
+  async probeInvariants(): Promise<unknown> {
+    const { result } = await this.c.Runtime.evaluate({
+      expression: INVARIANT_PROBE_JS,
+      returnByValue: true,
+      awaitPromise: false,
+    });
+    return result?.value;
   }
 
   async setLogpoint(spec: LogpointSpec): Promise<void> {
