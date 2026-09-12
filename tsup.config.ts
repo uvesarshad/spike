@@ -28,5 +28,9 @@ export default defineConfig({
   // esbuild tries to BUNDLE it and chokes on playwright-core's own internal
   // dynamic requires (chromium-bidi). Bundling it would also defeat the
   // point of making it optional/lazy in the first place.
-  external: ['playwright-core'],
+  // A9 (P0): imapflow is the same story — an optionalDependency behind a lazy
+  // dynamic import (src/email/imap.ts, reached only when an inbox is
+  // configured), so esbuild must leave it alone rather than try to bundle a
+  // package that is legitimately absent on most installs.
+  external: ['playwright-core', 'imapflow'],
 });

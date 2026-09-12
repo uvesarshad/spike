@@ -43,6 +43,7 @@ import { defaultModelFor, type PlannerMode, type ProviderId } from './vibe/setti
 import { ArtifactStore } from './report/artifacts.js';
 import { runDriverLoop, type StepInfo } from './driver/loop.js';
 import { Vault } from './vault/vault.js';
+import { FakeLocalEmailProvider, type EmailProvider } from './email/index.js';
 import type { Report, RunVerdict } from './report/report.js';
 import { recordRunCoverage } from './discovery/record-coverage.js';
 import { singleRunCoverage } from './orchestrator/fan-out.js';
@@ -678,6 +679,50 @@ async function pollNanoAvailable(
  * router simply won't find among plan-step candidates yet → it falls through to
  * the next available per-step adapter (Nano plan-step is a later phase).
  */
+/* A9 (P0) — the inbox for this run.
+ *
+ * Signup, password-reset and magic-link flows all finish in an email, and
+ * nothing ever built a provider here: `wait_for_email` failed on every real
+ * run, even for a user who had configured one. Returning undefined is a first-
+ * class outcome, not a failure — the driver then removes the wait-for-email
+ * verb from what the model is offered at all, rather than advertising
+ * something this run cannot do.
+ *
+ * The IMAP password NEVER comes from config: the vault (name 'imap') first,
+ * SPIKE_IMAP_PASS as the fallback — the same order every other credential in
+ * this file uses, so it stays out of config files, reports and logs.
+ *
+ * Loaded with a dynamic import so the optional `imapflow` package is only
+ * resolved by a run that actually reads email.
+ */
+async function buildEmailProvider(
+  cfg: QaConfig,
+  vault: Vault,
+  progress: (msg: string) => void,
+): Promise<EmailProvider | undefined> {
+  if (cfg.emailProvider === 'fake-local') return new FakeLocalEmailProvider();
+  if (cfg.emailProvider !== 'imap') return undefined;
+  const pass = vault.get('imap') ?? process.env.SPIKE_IMAP_PASS;
+  if (!cfg.imapHost || !cfg.imapUser || !pass) {
+    progress('email checks are off: the mailbox needs a server, an account and a password before it can be read');
+    return undefined;
+  }
+  try {
+    const { ImapEmailProvider } = await import('./email/imap.js');
+    return new ImapEmailProvider({
+      host: cfg.imapHost,
+      user: cfg.imapUser,
+      pass,
+      ...(cfg.imapMailbox && { mailbox: cfg.imapMailbox }),
+    });
+  } catch (e) {
+    // a missing optional package must never take the whole run down — the run
+    // simply proceeds without the ability to read email
+    progress(`email checks are off: ${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
+  }
+}
+
 function buildLadder(cfg: QaConfig, vault: Vault): { adapters: ModelAdapter[]; navigatorName?: string; plannerName?: string } {
   const nav = cfg.navigator;
   const brain = cfg.planner;
@@ -991,6 +1036,7 @@ async function runFreshAiPass(
   // Extending this same close-on-throw block through all of session-local
   // init closes that window without touching the driver's own try/finally.
   let vault: Vault;
+  let emailProvider: EmailProvider | undefined;
   let adapters: ModelAdapter[];
   let navigatorName: string | undefined;
   let plannerName: string | undefined;
@@ -1006,6 +1052,8 @@ async function runFreshAiPass(
     }
 
     vault = new Vault();
+    // A9 (P0): the inbox, if the user configured one (see buildEmailProvider).
+    emailProvider = await buildEmailProvider(cfg, vault, progress);
     adapters = [];
     if (nano && (await pollNanoAvailable(nano, progress)) === 'available') {
       progress('rung 0: Gemini Nano available — warming up');
@@ -1075,6 +1123,12 @@ async function runFreshAiPass(
         readOnly,
         spendCapUsd: cfg.spendCapUsd,
         strictOracles: cfg.strictOracles,
+        // A9 (P0): the inbox. Nothing ever built one before, so wait_for_email
+        // failed on every real run even with a provider configured. Absent
+        // (the default) also strips the verb from the navigator's prompt and
+        // schema, so the model is never offered it.
+        ...(emailProvider && { emailProvider }),
+        ...(cfg.runEmailDomain && { runEmailDomain: cfg.runEmailDomain }),
       }),
     );
     if (clip) {

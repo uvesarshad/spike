@@ -239,6 +239,23 @@ What each add-on unlocks:
 | `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
 | `spike dashboard` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats |
 
+## Email verification and one-time codes
+
+Signup, password-reset and magic-link flows end in an email. Point Spike at a real mailbox and it will read the message and pull the code out itself; leave it unset and the agent is simply never told it can wait for email, so it won't plan a step that can't work.
+
+Set these and the mailbox is live (the password is read from the vault first — `spike secret set imap <app-password>` — with the env var as a fallback):
+
+| Variable | What it is |
+|---|---|
+| `SPIKE_EMAIL_PROVIDER` | `none` (default), `fake-local` (in-memory, for the dogfood fixture and tests), or `imap` |
+| `SPIKE_IMAP_HOST` | IMAP server, e.g. `imap.gmail.com` (port 993, TLS) |
+| `SPIKE_IMAP_USER` | The account, usually the full address |
+| `SPIKE_IMAP_PASS` | App password — prefer the vault (`spike secret set imap …`) |
+| `SPIKE_IMAP_MAILBOX` | Folder to watch, default `INBOX` |
+| `SPIKE_RUN_EMAIL_DOMAIN` | Domain for the throwaway `{{run.email}}` address a signup uses. Default `example.test` goes nowhere on purpose — point it at a catch-all domain that lands in the mailbox above and signups complete end to end |
+
+Reading mail needs one extra package: `npm install imapflow`. It is optional, so installs that never test a signup flow don't pay for it. The mailbox is only ever read — nothing is flagged, moved or deleted.
+
 ## Project structure
 
 ```

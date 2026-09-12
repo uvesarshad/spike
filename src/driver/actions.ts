@@ -238,6 +238,44 @@ export const PLAN_JSON_SCHEMA = {
   },
 } as const;
 
+/** A9 (P0): the response schema for THIS run.
+ *
+ * `wait_for_email` is only real when an inbox is wired up, so with none
+ * configured the verb is dropped from the action-type enum — a schema-enforced
+ * model then cannot emit it at all, rather than being told about a verb that
+ * always fails. Mirrors planner-prompt.ts's actionRulesAndVocabulary(), which
+ * removes the same verb from the prose: the prompt and the schema must never
+ * disagree about what exists.
+ *
+ * Returns the shared constant untouched in the enabled case — no clone, no
+ * drift. In the disabled case the copy is shallow apart from the one enum it
+ * rewrites, and the email-only property descriptions are left in place: they
+ * describe fields no remaining verb uses, which costs a few tokens and cannot
+ * reintroduce the verb. */
+export function planJsonSchema(opts: { emailEnabled: boolean }): typeof PLAN_JSON_SCHEMA {
+  if (opts.emailEnabled) return PLAN_JSON_SCHEMA;
+  const items = PLAN_JSON_SCHEMA.properties.actions.items;
+  return {
+    ...PLAN_JSON_SCHEMA,
+    properties: {
+      ...PLAN_JSON_SCHEMA.properties,
+      actions: {
+        ...PLAN_JSON_SCHEMA.properties.actions,
+        items: {
+          ...items,
+          properties: {
+            ...items.properties,
+            type: {
+              ...items.properties.type,
+              enum: items.properties.type.enum.filter((t) => t !== 'wait_for_email'),
+            },
+          },
+        },
+      },
+    },
+  } as unknown as typeof PLAN_JSON_SCHEMA;
+}
+
 /** BRAIN output: the sub-goal checklist (initial plan or a re-plan on escalation).
  * On escalation the brain may return revised remaining `goals`, a `hint` for the
  * navigator, or a final `verdict` (with `reason`) when the task is done/impossible. */

@@ -137,6 +137,25 @@ Action types:
 - {"type":"wait_for_email","matching":string,"extractOtpTo":string,"timeoutMs":number} // all optional; poll the configured inbox for a verification email
 - {"type":"finish","verdict":"pass"|"fail","reason":string}`;
 
+/** A9 (P0): the vocabulary the navigator is ACTUALLY allowed to use this run.
+ *
+ * `wait_for_email` only works when an inbox is wired up. Advertising it
+ * regardless meant the model planned it on every signup/password-reset flow,
+ * burned a step on a guaranteed failure, and then had to recover from its own
+ * dead end. Both the rule line and the action-type line are dropped when no
+ * inbox is configured — matched by content rather than by index so a later
+ * edit to either line cannot silently re-expose the verb.
+ *
+ * Kept in sync with actions.ts's planJsonSchema(), which strips the same verb
+ * from the response schema: the prompt and the schema must never disagree
+ * about what exists. */
+export function actionRulesAndVocabulary(opts: { emailEnabled: boolean }): string {
+  if (opts.emailEnabled) return ACTION_RULES_AND_VOCABULARY;
+  return ACTION_RULES_AND_VOCABULARY.split('\n')
+    .filter((line) => !line.includes('wait_for_email'))
+    .join('\n');
+}
+
 /* ------------------------------------------------------------------------- *
  * Planner/navigator split. The BRAIN (buildGoalPlannerPrompt) makes/repairs an
  * ordered sub-goal checklist; it never drives the page. The NAVIGATOR
@@ -231,6 +250,10 @@ export interface NavigatorContext {
   hint?: string;
   /** A1 (P0): look-only mode is on for this run — clicks/typing are refused. */
   readOnly?: boolean;
+  /** A9 (P0): an inbox is wired up for this run, so the wait-for-email verb is
+   * real. Absent/false strips it from the vocabulary entirely — see
+   * actionRulesAndVocabulary. */
+  emailEnabled?: boolean;
 }
 
 /** The NAVIGATOR prompt. Same action vocabulary + batching rules as the original
@@ -259,7 +282,7 @@ ${ctx.axText}
 ${historyLines ? `ACTIONS SO FAR (with any errors/console/network evidence they caused):\n${historyLines}` : 'No actions taken yet.'}
 
 Work on the CURRENT GOAL. Decide the next 1-3 actions. Rules:
-${ACTION_RULES_AND_VOCABULARY}
+${actionRulesAndVocabulary({ emailEnabled: ctx.emailEnabled === true })}
 
 Respond with ONLY JSON, ONE of:
 - {"thought":"<one short sentence>","actions":[{...}, ...]}

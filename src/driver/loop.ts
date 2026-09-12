@@ -32,7 +32,7 @@ import {
   ExtractResultSchema,
   GOAL_PLAN_JSON_SCHEMA,
   GoalPlanSchema,
-  PLAN_JSON_SCHEMA,
+  planJsonSchema,
   PlanResultSchema,
   type Action,
   type GoalPlan,
@@ -269,8 +269,15 @@ export interface LoopOptions {
    * dogfood app, or a fresh FakeLocalEmailProvider in tests). Same
    * caller-injects-the-instance shape as `vault`. Omitted (the common case
    * today — QaConfig.emailProvider defaults to 'none') → `wait_for_email`
-   * fails cleanly instead of hanging or silently no-op'ing. */
+   * fails cleanly instead of hanging or silently no-op'ing — and A9 (P0) also
+   * strips the verb from the navigator's prompt AND its response schema in
+   * that case, so the model is never told about something this run can't do. */
   emailProvider?: EmailProvider;
+  /** A9 (P0): domain for the throwaway {{run.email}} address the driver offers
+   * for signup flows. Defaults to the undeliverable 'example.test'; point it at
+   * a catch-all domain that lands in the configured inbox and signups can
+   * actually be completed. */
+  runEmailDomain?: string;
   /** Cooperative cancellation — checked before each planner call and each
    * action; aborting ends the run 'uncertain' with reason 'cancelled by user'. */
   signal?: AbortSignal;
@@ -584,7 +591,10 @@ export async function runDriverLoop(
   // A1 (P0): default true — see LoopOptions.strictOracles's doc comment.
   const strictOracles = opts.strictOracles ?? true;
   const assertionTrace: AssertionTraceEntry[] = [];
-  const runData = createRunDataState();
+  const runData = createRunDataState(opts.runEmailDomain ? { emailDomain: opts.runEmailDomain } : {});
+  // A9 (P0): a run only has the wait-for-email verb when an inbox is actually
+  // wired up — see LoopOptions.emailProvider.
+  const emailEnabled = Boolean(opts.emailProvider);
   const actionCache = opts.actionCache;
   const actionCacheStats = { enabled: Boolean(actionCache), hits: 0, misses: 0, stale: 0, stored: 0 };
 
@@ -1100,8 +1110,10 @@ export async function runDriverLoop(
           maxSteps,
           hint,
           readOnly, // A1 (P0): tell the navigator clicks/typing are refused this run
+          emailEnabled, // A9 (P0): only offer the wait-for-email verb if an inbox is wired
         }),
         step: stepIndex,
+        emailEnabled,
       });
     } catch (e) {
       // invalid navigator JSON twice (or adapter failure) → ask the brain
@@ -2087,16 +2099,19 @@ function computeSpendSummary(r: Report, capUsd: number | undefined): SpendSummar
  * response — the loop turns that into a brain escalation. */
 async function navigateOnce(
   router: ModelRouter,
-  { prompt, step }: { prompt: string; step: number },
+  { prompt, step, emailEnabled }: { prompt: string; step: number; emailEnabled: boolean },
 ): Promise<PlanResult> {
-  const raw = await withTimeout(router.planJson(prompt, PLAN_JSON_SCHEMA, step), LLM_CALL_TIMEOUT_MS, 'navigator planJson');
+  // A9 (P0): the schema must offer exactly what the prompt offers — with no
+  // inbox wired, wait_for_email exists in neither.
+  const schema = planJsonSchema({ emailEnabled });
+  const raw = await withTimeout(router.planJson(prompt, schema, step), LLM_CALL_TIMEOUT_MS, 'navigator planJson');
   const parsed = PlanResultSchema.safeParse(raw);
   if (parsed.success) return parsed.data;
   // one retry with the validation error attached
   const retryRaw = await withTimeout(
     router.planJson(
       `${prompt}\n\nYour previous response was invalid: ${parsed.error.message.slice(0, 300)}\nRespond again with ONLY valid JSON.`,
-      PLAN_JSON_SCHEMA,
+      schema,
       step,
     ),
     LLM_CALL_TIMEOUT_MS,

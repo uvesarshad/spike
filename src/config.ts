@@ -204,14 +204,31 @@ export interface QaConfig {
    * pass. Set false to restore the pre-A1 evidence-only behavior. */
   strictOracles: boolean;
   /** Email/OTP module wiring: which EmailProvider (src/email/) the driver's
-   * `wait_for_email` action polls. 'none' (default) — the action fails
-   * cleanly rather than silently no-op'ing. 'fake-local' is the only
-   * concrete provider today (dogfood/tests — see fixture/server.ts's
-   * exported fixtureEmailProvider); a real IMAP/Gmail provider is a future
-   * addition, not built here. NOTE: this field selects the provider KIND —
-   * the caller that builds LoopOptions still injects the actual EmailProvider
-   * instance (LoopOptions.emailProvider), same indirection as `vault`. */
-  emailProvider: 'none' | 'fake-local';
+   * `wait_for_email` action polls. 'none' (default) — the action is not
+   * offered at all: A9 (P0) strips the verb from the navigator's prompt AND
+   * from its JSON schema when no provider is wired, so the model is never
+   * told it can do something this run cannot. 'fake-local' is the in-memory
+   * double (dogfood/tests — see fixture/server.ts's exported
+   * fixtureEmailProvider); 'imap' is the real inbox (src/email/imap.ts) and
+   * needs imapHost/imapUser plus a password from the vault (name 'imap') or
+   * SPIKE_IMAP_PASS. NOTE: this field selects the provider KIND — the caller
+   * that builds LoopOptions still injects the actual EmailProvider instance
+   * (LoopOptions.emailProvider), same indirection as `vault`. */
+  emailProvider: 'none' | 'fake-local' | 'imap';
+  /** IMAP server for emailProvider:'imap' (SPIKE_IMAP_HOST). Port 993 with
+   * implicit TLS — not configurable, because every provider worth supporting
+   * offers it and a plaintext fallback would be a downgrade waiting to be
+   * used by accident. */
+  imapHost?: string;
+  /** IMAP account (SPIKE_IMAP_USER) — usually the full email address. */
+  imapUser?: string;
+  /** Mailbox/folder to poll (SPIKE_IMAP_MAILBOX), default INBOX. */
+  imapMailbox?: string;
+  /** A9 (P0): domain for the throwaway address the driver offers as
+   * {{run.email}} (SPIKE_RUN_EMAIL_DOMAIN). Default 'example.test' is
+   * deliberately undeliverable — set this to a catch-all domain that lands in
+   * the IMAP mailbox above and signup flows can actually be completed. */
+  runEmailDomain?: string;
 }
 
 /** A36 (P1): `NODE_OPTIONS=--use-system-ca` makes the Google CLI child trust the
@@ -400,7 +417,15 @@ function fromEnv(): Partial<QaConfig> {
   if (Object.keys(navigator).length) out.navigator = navigator as PlannerSelection;
   if (e.SPIKE_DEBUG_MODE === 'prompt' || e.SPIKE_DEBUG_MODE === 'auto') out.debugMode = e.SPIKE_DEBUG_MODE;
   if (e.SPIKE_DEBUG_AGENT && DEBUG_AGENTS.includes(e.SPIKE_DEBUG_AGENT as DebugAgent)) out.debugAgent = e.SPIKE_DEBUG_AGENT as DebugAgent;
-  if (e.SPIKE_EMAIL_PROVIDER === 'none' || e.SPIKE_EMAIL_PROVIDER === 'fake-local') out.emailProvider = e.SPIKE_EMAIL_PROVIDER;
+  if (e.SPIKE_EMAIL_PROVIDER === 'none' || e.SPIKE_EMAIL_PROVIDER === 'fake-local' || e.SPIKE_EMAIL_PROVIDER === 'imap') out.emailProvider = e.SPIKE_EMAIL_PROVIDER;
+  // A9 (P0): the IMAP inbox. The PASSWORD is deliberately absent here — it is
+  // read from the vault (name 'imap') with a SPIKE_IMAP_PASS fallback at the
+  // point of use, so it never enters QaConfig and therefore never reaches a
+  // config dump, a report or a log line.
+  if (e.SPIKE_IMAP_HOST) out.imapHost = e.SPIKE_IMAP_HOST;
+  if (e.SPIKE_IMAP_USER) out.imapUser = e.SPIKE_IMAP_USER;
+  if (e.SPIKE_IMAP_MAILBOX) out.imapMailbox = e.SPIKE_IMAP_MAILBOX;
+  if (e.SPIKE_RUN_EMAIL_DOMAIN) out.runEmailDomain = e.SPIKE_RUN_EMAIL_DOMAIN;
   return out;
 }
 
