@@ -454,6 +454,9 @@ function fromSettings(): Partial<QaConfig> {
     if (typeof raw.readOnly === 'boolean') out.readOnly = raw.readOnly;
     if (typeof raw.spendCapUsd === 'number') out.spendCapUsd = raw.spendCapUsd;
     if (typeof raw.strictOracles === 'boolean') out.strictOracles = raw.strictOracles;
+    // A11: the project folder auto-fix edits. Same "only when the user actually
+    // saved it" rule — there is no default to fall back to (see QaSettings).
+    if (typeof raw.fixAgentCwd === 'string' && raw.fixAgentCwd.trim()) out.fixAgentCwd = raw.fixAgentCwd.trim();
     return out;
   } catch {
     return {};

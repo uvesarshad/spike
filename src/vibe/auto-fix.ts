@@ -254,7 +254,20 @@ export interface DispatchOptions {
   settingsStore?: SettingsStore;
   promptFn?: (question: string) => Promise<boolean>;
   interactive?: boolean;
+  /** A11 (P0): the folder to fall back on when no project folder is configured.
+   * Supplied ONLY by the command line, where the working directory the user
+   * typed the command in IS an explicit choice. The panel path deliberately
+   * passes nothing: the desktop helper starts at login from an arbitrary
+   * directory, so falling back to it would let a coding agent edit the wrong
+   * repo. With neither, dispatchFix refuses instead of guessing. */
+  defaultCwd?: string;
 }
+
+/** A11: what the user is told when no project folder is configured. Plain, and
+ * it names the one place they can fix it. */
+export const NO_PROJECT_FOLDER_MESSAGE =
+  "Spike doesn't know which project folder to fix. Open Settings and set your project folder — " +
+  'the folder on this computer that holds the code for the site you are testing.';
 
 /**
  * Hand the fix prompt for `report` to a coding agent headlessly and wait for it
@@ -279,8 +292,15 @@ export async function dispatchFix(report: Report, opts: DispatchOptions = {}): P
   const cfg = loadConfig(opts.config ?? {});
   const onProgress = opts.onProgress ?? (() => {});
 
+  // A11 (P0): never guess the project folder. process.cwd() used to be the
+  // silent fallback, which for a helper started at login is whatever directory
+  // it happened to inherit — a coding agent pointed there edits the wrong repo
+  // (or nothing at all). Refuse and say what to do instead.
+  const projectDir = cfg.fixAgentCwd ?? opts.defaultCwd;
+  if (!projectDir) throw new Error(NO_PROJECT_FOLDER_MESSAGE);
+
   await ensureAutoFixConfirmed({
-    cwd: cfg.fixAgentCwd ?? process.cwd(),
+    cwd: projectDir,
     confirmed: opts.confirmed,
     yesAutoFix: opts.yesAutoFix,
     settingsStore: opts.settingsStore,
@@ -323,7 +343,7 @@ export async function dispatchFix(report: Report, opts: DispatchOptions = {}): P
   }
 
   const delivery = deliveryFor(bin);
-  const cwd = cfg.fixAgentCwd ?? process.cwd();
+  const cwd = projectDir;
 
   // Build the real argv: substitute the PROMPT_TOKEN arg (exact equality, never
   // substring — a multi-line prompt must not land in a shell-parsed argv).
@@ -452,6 +472,8 @@ export interface RunWithAutoFixOptions {
   settingsStore?: SettingsStore;
   promptFn?: (question: string) => Promise<boolean>;
   interactive?: boolean;
+  /** A11: command-line fallback project folder — see DispatchOptions.defaultCwd. */
+  defaultCwd?: string;
 }
 
 export interface AutoFixAttempt {
@@ -507,6 +529,7 @@ export async function runWithAutoFix(
       const res = await dispatchFix(report, {
         config: opts.config,
         onProgress,
+        defaultCwd: opts.defaultCwd,
         confirmed: opts.confirmed,
         yesAutoFix: opts.yesAutoFix,
         settingsStore: opts.settingsStore,

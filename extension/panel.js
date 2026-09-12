@@ -147,6 +147,10 @@ const setNavKeyToggle = $('setNavKeyToggle');
 const setNavNanoNote = $('setNavNanoNote');
 const setNavNanoDownload = $('setNavNanoDownload');
 const setDebugAgentRow = $('setDebugAgentRow');
+const setProjectFolderRow = $('setProjectFolderRow');
+const setProjectFolder = $('setProjectFolder');
+const setAutoFixRow = $('setAutoFixRow');
+const noFixAgentNote = $('noFixAgentNote');
 const setDebugAgent = $('setDebugAgent');
 const setAutoFix = $('setAutoFix');
 const setVideoAssert = $('setVideoAssert');
@@ -1125,6 +1129,12 @@ function renderResult(params) {
     // prompt AND the user opted into auto-fix in Settings (else paste-a-prompt).
     resetFixUi();
     autoFixBtn.hidden = (verdict === 'pass') || debugMode !== 'auto';
+    // A11: no coding agent on this computer → no button at all, just the reason.
+    if (!autoFixBtn.hidden && fixAgentAvailable() === false) {
+      autoFixBtn.hidden = true;
+      noFixAgentNote.hidden = false;
+      noFixAgentNote.textContent = NO_FIX_AGENT_MESSAGE;
+    }
   } else {
     fixSection.hidden = true;
   }
@@ -1252,8 +1262,23 @@ function onClipError(message) {
 }
 
 // ---- auto-fix --------------------------------------------------------------
+/* A11: auto-fix only exists if a coding agent is installed on this computer.
+ * Spike Core tells us whether it found one; when it says no we hide the button
+ * and the toggle outright rather than offering something that can only fail. */
+const NO_FIX_AGENT_MESSAGE =
+  'Auto-fix needs a coding agent installed on this computer (Claude Code, Codex or Gemini CLI). ' +
+  'You can still copy the fix prompt.';
+
+/** Tri-state: true / false / null when Spike Core hasn't told us (no helper
+ * connected, or an older one) — in which case nothing changes. */
+function fixAgentAvailable() {
+  if (!currentConfig || typeof currentConfig.fixAgentAvailable !== 'boolean') return null;
+  return currentConfig.fixAgentAvailable;
+}
 function resetFixUi() {
   fixing = false;
+  noFixAgentNote.hidden = true;
+  noFixAgentNote.textContent = '';
   autoFixBtn.hidden = false;
   autoFixBtn.disabled = false;
   autoFixBtn.innerHTML = qaIcon('sparkles') + '<span>Auto-fix with my coding agent</span>';
@@ -1497,6 +1522,9 @@ function refreshSettingsVisibility() {
   refreshAutoFixGate();
   // agent select only when auto-fix is on
   setDebugAgentRow.hidden = selectedDebugMode() !== 'auto';
+  // A11: the project folder only means anything while Spike Core (optional
+  // desktop helper) is connected — it is the only thing that edits files.
+  if (setProjectFolderRow) setProjectFolderRow.hidden = !bridgeHealthy();
   refreshAccordionSummaries();
 }
 
@@ -1511,6 +1539,19 @@ function refreshAutoFixGate() {
   const wantAuto = setAutoFix.checked;
   const healthy = bridgeHealthy();
   const outdated = bridgeConnected && bridgeCompatible === false;
+  // A11: Spike Core is connected and found no coding agent → auto-fix is not an
+  // option at all. Hide the toggle (forcing paste-a-prompt) and say why.
+  if (healthy && fixAgentAvailable() === false) {
+    setAutoFix.checked = false;
+    if (setAutoFixRow) setAutoFixRow.hidden = true;
+    setAutoFixNote.hidden = false;
+    setAutoFixNoteText.textContent = NO_FIX_AGENT_MESSAGE;
+    setDebugAgentRow.hidden = true;
+    if (setProjectFolderRow) setProjectFolderRow.hidden = true;
+    if (connectApp) connectApp.hidden = true;
+    return;
+  }
+  if (setAutoFixRow) setAutoFixRow.hidden = false;
   if (wantAuto && !healthy) {
     // the user turned it on without a healthy daemon — bounce it back off + explain
     setAutoFix.checked = false;
@@ -1644,6 +1685,9 @@ function renderSettings(cfg) {
 
   // debug agent
   if (cfg.debugAgent) setDebugAgent.value = cfg.debugAgent;
+
+  // A11: the project folder auto-fix edits (blank = not chosen yet).
+  if (setProjectFolder) setProjectFolder.value = cfg.fixAgentCwd || '';
 
   refreshSettingsVisibility();
 
@@ -1992,6 +2036,7 @@ settingsSave.addEventListener('click', () => {
     },
     debugMode: selectedDebugMode(),
     debugAgent: setDebugAgent.value,
+    fixAgentCwd: setProjectFolder ? setProjectFolder.value.trim() : '',
     videoAssertions: Boolean(setVideoAssert && setVideoAssert.checked),
     spendCapUsd:
       setSpendCap && setSpendCap.value.trim() !== '' && Number(setSpendCap.value) > 0

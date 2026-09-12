@@ -216,7 +216,7 @@
             <span id="accDebugSummary" class="settings-acc-summary"></span>
           </button>
           <div id="accDebugBody" class="settings-acc-body" hidden>
-            <label class="settings-toggle-row" for="setAutoFix">
+            <label id="setAutoFixRow" class="settings-toggle-row" for="setAutoFix">
               <span class="settings-toggle-copy">
                 <span class="settings-toggle-label">Auto-fix with my coding agent</span>
                 <span class="settings-toggle-sub">Off: show me a prompt to paste. On: hand the fix to a coding agent (needs Spike Core).</span>
@@ -275,6 +275,18 @@
                   <button id="connectCopy" class="connect-copy" type="button">Copy</button>
                 </div>
                 <button id="connectNpmToggle" class="connect-alt" type="button">or install without a remote script (npm)</button>
+              </div>
+            </div>
+
+            <!-- A11: shown only while Spike Core (optional desktop helper) is
+                 connected — it is the only thing that can edit files. -->
+            <div id="setProjectFolderRow" class="settings-agent-row" hidden>
+              <label class="settings-field-label" for="setProjectFolder">Project folder</label>
+              <input id="setProjectFolder" class="settings-input" type="text" spellcheck="false" autocomplete="off"
+                placeholder="/path/to/your/project" />
+              <div class="settings-note">
+                <span class="ico" data-icon="info"></span>
+                <span>The folder on this computer holding the code for the site you're testing. Auto-fix edits files here — nowhere else.</span>
               </div>
             </div>
 
@@ -369,6 +381,7 @@
         <button id="autoFixBtn" class="autofix-btn" type="button">
           <span class="ico" data-icon="sparkles"></span><span>Auto-fix with my coding agent</span>
         </button>
+        <div id="noFixAgentNote" class="fix-note" hidden></div>
         <div id="fixStatus" class="fix-status" hidden></div>
         <div id="fixNote" class="fix-note" hidden></div>
         <div class="fix-head">

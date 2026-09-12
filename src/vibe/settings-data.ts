@@ -57,6 +57,14 @@ export interface QaSettings {
    * 'uncertain' and reason "spend cap reached". Non-secret, so it lives in the
    * store. Mirrors config.spendCapUsd / SPIKE_SPEND_CAP_USD; env still wins. */
   spendCapUsd?: number;
+  /** A11 (P0): the project folder on this machine that auto-fix edits — the
+   * checkout holding the code for the site being tested. There is deliberately
+   * NO default: the desktop helper usually starts at login from an arbitrary
+   * working directory, so falling back to it would point a coding agent at
+   * whatever folder happened to be current and let it edit the wrong repo.
+   * Unset → dispatchFix refuses and the panel asks for it. Mirrors
+   * config.fixAgentCwd; env still wins. */
+  fixAgentCwd?: string;
   /** A1 (P0) headline "deterministic verdicts" feature: when true, a Tier-0
    * invariant violation, a failed assert_* step, or a metamorphic-relation
    * violation forces the final verdict to 'fail' regardless of what the model

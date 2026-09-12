@@ -865,6 +865,12 @@ chrome.runtime.onConnect.addListener((port) => {
               port.postMessage({ kind: 'fix-confirm', projectDir: (result && result.projectDir) || '' });
               break;
             }
+            // A11: no project folder chosen yet — surface it as a plain failure
+            // so the panel's usual error banner points at Settings.
+            if (result && result.needsProjectFolder) {
+              port.postMessage({ kind: 'fix-done', ok: false, message: result.message || 'Set your project folder in Settings first.' });
+              break;
+            }
             // no panel message on accept; the daemon's fix-progress/fix-done drive UI
           } catch (e) {
             // includes 'unknown method vibe.fix' from an old daemon

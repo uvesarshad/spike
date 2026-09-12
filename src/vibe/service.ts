@@ -9,7 +9,8 @@
  * Reverse-RPC methods registered here:
  *   vibe.run    {task, url} → {accepted:true}      (then async vibe.progress/done/error events)
  *   vibe.status {}          → {busy:boolean}
- *   vibe.fix    {confirmed?} → {accepted:true} | {needsConfirmation:true, projectDir}
+ *   vibe.fix    {confirmed?} → {accepted:true} | {needsProjectFolder:true, message}
+ *                             | {needsConfirmation:true, projectDir}
  *                             (A11: a bridge caller has no terminal, so an
  *                             unconfirmed first fix for a project is ANSWERED
  *                             with the question rather than prompting; then
@@ -47,7 +48,7 @@ import { qaRun, type QaRunOptions } from '../engine.js';
 import { loadConfig } from '../config.js';
 import { slimReport, type Report } from '../report/report.js';
 import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
-import { dispatchFix, isAutoFixAcceptedFor } from './auto-fix.js';
+import { dispatchFix, isAutoFixAcceptedFor, detectFixAgent, NO_PROJECT_FOLDER_MESSAGE } from './auto-fix.js';
 import { loadAppModel, coverageReport, type AppModel } from '../discovery/index.js';
 import {
   SettingsStore,
@@ -190,9 +191,11 @@ export class VibeService {
     this.lastFailedReport = report;
   }
 
-  /** The project directory an auto-fix would edit. */
-  private fixProjectDir(): string {
-    return loadConfig({}).fixAgentCwd ?? process.cwd();
+  /** The project directory an auto-fix would edit, or undefined when the user
+   * hasn't chosen one. A11: deliberately NO process.cwd() fallback — the
+   * desktop helper starts at login from an arbitrary directory. */
+  private fixProjectDir(): string | undefined {
+    return loadConfig({}).fixAgentCwd;
   }
 
   start(): void {
@@ -270,6 +273,12 @@ export class VibeService {
       // request with confirmed:true. Acceptance is then remembered per project
       // directory by ensureAutoFixConfirmed, so this asks at most once.
       const projectDir = this.fixProjectDir();
+      // A11 (P0): with no project folder chosen there is nothing safe to edit —
+      // say so plainly rather than pointing a coding agent at whatever folder
+      // this helper happened to start in.
+      if (!projectDir) {
+        return { needsProjectFolder: true, message: NO_PROJECT_FOLDER_MESSAGE };
+      }
       if (!confirmed && !isAutoFixAcceptedFor(projectDir)) {
         return { needsConfirmation: true, projectDir };
       }
@@ -351,6 +360,10 @@ export class VibeService {
     this.bridge.onRequest('vibe.config.get', async () => {
       const settings = new SettingsStore().read();
       const vault = new Vault();
+      // A11: probe PATH for claude/codex/gemini (cached process-wide by
+      // detectFixAgent) so the panel can decide client-side whether to offer
+      // auto-fix at all.
+      const fixAgentAvailable = Boolean(await detectFixAgent());
       const providers = PROVIDER_ORDER.map((id) => {
         const vaultName = VAULT_KEY_FOR[id];
         const needsKey = Boolean(vaultName);
@@ -386,6 +399,12 @@ export class VibeService {
         spendCapUsd: settings.spendCapUsd,
         // A1 headline feature: deterministic verdicts, safe-by-default true.
         strictOracles: settings.strictOracles ?? true,
+        // A11: the project folder auto-fix edits (empty = not chosen yet), and
+        // whether a coding agent capable of applying a fix is actually
+        // installed on this machine — the panel hides auto-fix outright when it
+        // isn't, rather than offering a button that can only fail.
+        fixAgentCwd: settings.fixAgentCwd ?? '',
+        fixAgentAvailable,
         // A5: whether a test login has been saved. Presence only — the values
         // stay on this machine and never cross this connection.
         testLogin: {
@@ -437,6 +456,14 @@ export class VibeService {
       }
       // A1: dry-run toggle — same plain boolean coercion as readOnly/videoAssertions.
       if (p.strictOracles !== undefined) patch.strictOracles = Boolean(p.strictOracles);
+      // A11: the project folder auto-fix edits. Stored verbatim (trimmed) — it
+      // is a path on the user's own machine, never interpolated into a shell
+      // command (dispatchFix passes it to spawn as `cwd`, not as an argument).
+      // Blank clears it, which puts auto-fix back into "ask me first".
+      if (p.fixAgentCwd !== undefined) {
+        const dir = String(p.fixAgentCwd).trim();
+        patch.fixAgentCwd = dir || undefined;
+      }
       return new SettingsStore().write(patch);
     });
 

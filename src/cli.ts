@@ -150,6 +150,10 @@ program
             config: qaRunOpts.config,
             onProgress,
             qaRunOpts,
+            // A11: on the command line the directory the user typed the command
+            // in IS the explicit choice of project, so it stands in for an
+            // unset project folder. The panel gets no such fallback.
+            defaultCwd: process.cwd(),
             yesAutoFix: opts.yesAutoFix,
           })).finalReport
         : await qaRun(t, opts.url, qaRunOpts);
@@ -682,7 +686,9 @@ program
       return;
     }
     if (opts.apply) {
-      const result = await dispatchFix(report, { onProgress: (l) => console.log(l), yesAutoFix: opts.yesAutoFix });
+      // A11: see the --fix path above — the command line's own working
+      // directory is the explicit project choice when none is configured.
+      const result = await dispatchFix(report, { onProgress: (l) => console.log(l), defaultCwd: process.cwd(), yesAutoFix: opts.yesAutoFix });
       console.log(result.ok ? `fix applied by ${result.agent} — re-run the test to verify` : `fix agent failed`);
       process.exit(result.ok ? 0 : 1);
     }
