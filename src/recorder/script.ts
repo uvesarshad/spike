@@ -15,6 +15,7 @@ import path from 'node:path';
 import type { Report, StepRecord, StepTarget } from '../report/report.js';
 import type { ScriptRunnerStep } from '../driver/script-runner/schema.js';
 import { validateQaScript } from './schema.js';
+import { redactTaskText } from '../report/redact.js';
 
 /** A script-step locator: role+name plus optional `nth` / `qaId` disambiguators.
  *
@@ -173,6 +174,12 @@ export function scriptFromReport(report: Report): QaScript {
     );
   };
 
+  // A5 (P0): a recorded script is a FILE people commit and share, so the task
+  // it carries must never hold a credential the user typed into the task box.
+  // The redaction is display-only — {{secret:NAME}} placeholders (the form that
+  // actually makes a login replayable) are stepped over untouched.
+  const task = redactTaskText(report.task);
+
   const steps: ScriptStep[] = [];
   for (const s of report.steps) {
     if (!s.ok) continue; // a passed run can contain a recovered miss — don't replay it
@@ -259,15 +266,15 @@ export function scriptFromReport(report: Report): QaScript {
         // the pass-confirmation visual is part of the recorded contract
         steps.push({
           type: 'assert_visual',
-          expectation: `The task "${report.task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
+          expectation: `The task "${task}" should have completed successfully. Does the page show a sensible end state for it (no error banners, no blank page)?`,
         });
         break;
     }
   }
   return {
     version: 1,
-    name: taskSlug(report.task),
-    task: report.task,
+    name: taskSlug(task),
+    task,
     url: report.url,
     sourceRunId: report.runId,
     createdAt: new Date().toISOString(),

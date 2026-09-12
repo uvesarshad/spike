@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Report } from './report.js';
+import { redactTaskText } from './redact.js';
 
 /** One line in audit.log. Values are already REDACTED by the caller: target
  * carries placeholders (e.g. {{secret:NAME}}), never resolved secret values. */
@@ -37,9 +38,14 @@ export class ArtifactStore {
     return p;
   }
 
+  /** A5 (P0): the task is the one string a person writes by hand, so it is the
+   * one place a credential can still arrive in the clear ("log in with
+   * me@x.com / hunter2"). The live prompts keep the original — the model needs
+   * it to log in — but the copy that lands on disk does not. */
   async saveReport(report: Report): Promise<string> {
     const p = path.join(this.dir, 'report.json');
-    await fs.promises.writeFile(p, JSON.stringify(report, null, 2));
+    const safe: Report = { ...report, task: redactTaskText(report.task) };
+    await fs.promises.writeFile(p, JSON.stringify(safe, null, 2));
     return p;
   }
 

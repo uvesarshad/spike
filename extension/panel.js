@@ -295,6 +295,37 @@ let lastClipPath = null;
 const HISTORY_KEY = 'qaHistory';
 const HISTORY_CAP = 10;
 
+/* Run history is kept on this machine, but it is still a file that outlives the
+ * run and gets read back on screen — so a password someone typed straight into
+ * the task box ("log in with me@x.com / hunter2") must not be what we keep. The
+ * live run still gets the original text; only the stored copy is trimmed.
+ * A {{secret:NAME}} reference is stepped over: it holds no value, and it is the
+ * form we want people using. Mirrors src/report/redact.ts. */
+const SECRET_PLACEHOLDER_RE = /\{\{secret:[a-zA-Z0-9_-]+\}\}/g;
+const TASK_SECRET_PATTERNS = [
+  /\b\S+@\S+\s*\/\s*\S+/g,
+  /\b(?:password|passcode|passwd|pwd|pin|otp|token)\s*[:=]\s*\S+/gi,
+];
+function redactTaskSegment(segment) {
+  let out = segment;
+  for (const re of TASK_SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    out = out.replace(re, '[redacted]');
+  }
+  return out;
+}
+function redactTaskText(task) {
+  if (!task) return task;
+  let out = '';
+  let last = 0;
+  SECRET_PLACEHOLDER_RE.lastIndex = 0;
+  for (let m = SECRET_PLACEHOLDER_RE.exec(task); m; m = SECRET_PLACEHOLDER_RE.exec(task)) {
+    out += redactTaskSegment(task.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + redactTaskSegment(task.slice(last));
+}
+
 // the active tab we will test (refreshed on activation/update)
 let activeTab = null; // { id, url, title, favIconUrl }
 
@@ -1863,7 +1894,7 @@ async function saveHistory(result) {
   if (!result) return;
   const entry = {
     ts: Date.now(),
-    task: String(result.task || '').slice(0, 80),
+    task: redactTaskText(String(result.task || '')).slice(0, 80),
     verdict: result.verdict,
     reason: String(result.reason || '').slice(0, 120),
   };

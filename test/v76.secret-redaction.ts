@@ -25,7 +25,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { runDriverLoop } from '../src/driver/loop.js';
 import { ArtifactStore } from '../src/report/artifacts.js';
-import { isSecretTarget, redactSecretText, redactTypedText } from '../src/report/redact.js';
+import { isSecretTarget, redactSecretText, redactTaskText, redactTypedText } from '../src/report/redact.js';
 import type { Report, StepRecord } from '../src/report/report.js';
 import { renderPlainReport, buildFixPrompt, humanizeStep } from '../src/vibe/fix-prompt.js';
 import type { AxNode, AxSnapshot, BrowserPort, ConsoleEntry, NetworkEntry } from '../src/ports/browser-port.js';
@@ -222,6 +222,62 @@ await check('the plain report hides a plaintext password from a hand-built repor
     steps: [step],
   } as unknown as Report;
   assert.ok(!renderPlainReport(handBuilt).includes(PLAINTEXT_PASSWORD), 'plain report leaked');
+});
+
+/* ---- the task string a person typed by hand ------------------------------ */
+
+await check('a credential pasted into the task is stripped where it is stored', () => {
+  assert.equal(
+    redactTaskText('log in with shopper@example.com / hunter2 and check the dashboard'),
+    'log in with [redacted] and check the dashboard',
+  );
+  assert.equal(redactTaskText('sign in, password: hunter2, then check out'), 'sign in, [redacted] then check out');
+  assert.equal(redactTaskText('use pin=4821 at the kiosk'), 'use [redacted] at the kiosk');
+});
+
+await check('an ordinary task survives untouched', () => {
+  const plainTask = 'add an item to the cart and complete checkout';
+  assert.equal(redactTaskText(plainTask), plainTask);
+  assert.equal(redactTaskText('email shopper@example.com a receipt'), 'email shopper@example.com a receipt');
+});
+
+await check('a {{secret:NAME}} task stays intact and replayable', () => {
+  const vaulted = 'Use {{secret:TEST_USER}} / {{secret:TEST_PASSWORD}} to log in';
+  assert.equal(redactTaskText(vaulted), vaulted);
+});
+
+await check('a run stored on disk carries the redacted task, not the typed one', async () => {
+  const store = new ArtifactStore(path.join(root, 'stored'));
+  const credentialed: Report = {
+    verdict: 'pass',
+    task: `log in with shopper@example.com / ${PLAINTEXT_PASSWORD}`,
+    reason: 'signed in',
+    steps: [],
+    url: 'http://localhost/login',
+  } as unknown as Report;
+  const written = await store.saveReport(credentialed);
+  const onDisk = fs.readFileSync(written, 'utf8');
+  assert.ok(!onDisk.includes(PLAINTEXT_PASSWORD), 'report.json carried the password');
+  assert.ok(onDisk.includes('[redacted]'), 'expected the credential to read as [redacted]');
+  assert.equal(
+    credentialed.task,
+    `log in with shopper@example.com / ${PLAINTEXT_PASSWORD}`,
+    'the in-memory task the model works from must not be altered',
+  );
+});
+
+await check('the plain report and fix prompt hide a credentialed task', () => {
+  const credentialed: Report = {
+    verdict: 'fail',
+    task: `log in with shopper@example.com / ${PLAINTEXT_PASSWORD}`,
+    reason: 'the sign-in button did nothing',
+    steps: [],
+    console_error: null,
+    failing_step: null,
+    evidence_paths: [],
+  } as unknown as Report;
+  assert.ok(!renderPlainReport(credentialed).includes(PLAINTEXT_PASSWORD), 'plain report leaked the task');
+  assert.ok(!buildFixPrompt(credentialed).includes(PLAINTEXT_PASSWORD), 'fix prompt leaked the task');
 });
 
 fs.rmSync(root, { recursive: true, force: true });

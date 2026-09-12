@@ -6,7 +6,7 @@
  * yields the same prose (testable, no token spend, no flake). */
 
 import type { Report, StepRecord } from '../report/report.js';
-import { redactTypedText } from '../report/redact.js';
+import { redactTaskText, redactTypedText } from '../report/redact.js';
 import type { NetworkEntry } from '../ports/browser-port.js';
 
 /** Humanize a single step into "what the robot did", preferring the role+name
@@ -142,7 +142,10 @@ export function renderPlainReport(report: Report): string {
         : '🤔 Couldn’t finish';
   lines.push(`## ${headline}`);
   lines.push('');
-  lines.push(`I tested: ${report.task}`);
+  // A5 (P0): the task is shown on screen AND copied into the prompt people
+  // paste into a third-party coding tool, so a credential someone typed into
+  // the task box must not travel with it.
+  lines.push(`I tested: ${redactTaskText(report.task)}`);
   lines.push('');
 
   const did = actionSteps(report);
@@ -334,7 +337,7 @@ export function buildFixPrompt(report: Report): string {
 
   // Expected
   lines.push('**Expected**');
-  lines.push(expectedFromTask(report.task));
+  lines.push(expectedFromTask(redactTaskText(report.task)));
   lines.push('');
 
   // Evidence

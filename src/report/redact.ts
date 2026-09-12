@@ -73,3 +73,47 @@ export function redactTypedText(
 ): string {
   return isSecretTarget(target) ? redactSecretText(text) : text;
 }
+
+/* ---- the task string ------------------------------------------------------
+ * A task is free text a person wrote, so the field-level rule above cannot
+ * help: "log in with me@x.com / hunter2" is just a sentence, not a form field.
+ * These two shapes cover what people actually type.
+ *
+ * The LIVE prompt still gets the ORIGINAL task — the model needs the credential
+ * to be able to log in at all. Only what is written to disk, baked into a
+ * generated test, or kept in run history goes through here. */
+
+/** What a redacted stretch of a task reads as. */
+export const TASK_REDACTED = '[redacted]';
+
+const TASK_SECRET_PATTERNS: RegExp[] = [
+  // "user@example.com / hunter2" — an address and a password separated by a slash
+  /\b\S+@\S+\s*\/\s*\S+/g,
+  // "password: hunter2", "passcode=1234", and the common short spellings
+  /\b(?:password|passcode|passwd|pwd|pin|otp|token)\s*[:=]\s*\S+/gi,
+];
+
+function redactTaskSegment(segment: string): string {
+  let out = segment;
+  for (const re of TASK_SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    out = out.replace(re, TASK_REDACTED);
+  }
+  return out;
+}
+
+/** Strip credential-shaped stretches out of a task before it is persisted
+ * (report.json, a generated test, the panel's run history). {{secret:NAME}}
+ * placeholders are stepped over untouched — they are the form we WANT people to
+ * use, and a task that names one must stay replayable. */
+export function redactTaskText(task: string): string {
+  if (!task) return task;
+  let out = '';
+  let last = 0;
+  SECRET_PLACEHOLDER_RE.lastIndex = 0;
+  for (let m = SECRET_PLACEHOLDER_RE.exec(task); m; m = SECRET_PLACEHOLDER_RE.exec(task)) {
+    out += redactTaskSegment(task.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + redactTaskSegment(task.slice(last));
+}
