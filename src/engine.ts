@@ -13,7 +13,7 @@
 
 import type { ChildProcess } from 'node:child_process';
 import type CDP from 'chrome-remote-interface';
-import { loadConfig, readOnlyWasConfigured, type EmulationConfig, type QaConfig, type RouteRule } from './config.js';
+import { loadConfig, readOnlyWasConfigured, resolveStepBudgets, type EmulationConfig, type QaConfig, type RouteRule } from './config.js';
 import { CdpBrowser } from './ports/cdp-browser.js';
 import { ExtensionBrowser } from './ports/extension-browser.js';
 // A52 (P2): playwright-core is a large optional dependency (`--via
@@ -61,6 +61,11 @@ import path from 'node:path';
 
 export interface QaRunOptions {
   maxSteps?: number;
+  /** A8 (P0): how many steps ONE sub-goal may take before the run re-plans
+   * rather than grinding. Absent → cfg.perGoalMaxSteps (SPIKE_PER_GOAL_MAX_STEPS
+   * / the `perGoalMaxSteps` config key, default 12). Always clamped to the run's
+   * own budget — see resolveStepBudgets. */
+  perGoalMaxSteps?: number;
   /** Record a passed run to generated-tests/ (default true). */
   record?: boolean;
   /** Phase 14 pre-run replay matcher: when true (default) and a confident
@@ -1059,7 +1064,7 @@ async function runFreshAiPass(
     const driverTracer = getDefaultTracer();
     const report: QaRunResult = await driverTracer.trace('qa.run.driver_loop', { runId: artifacts.runId, task, url }, () =>
       runDriverLoop(browser, router, artifacts, task, url, {
-        maxSteps: opts.maxSteps ?? cfg.maxSteps,
+        ...resolveStepBudgets(cfg, { maxSteps: opts.maxSteps, perGoalMaxSteps: opts.perGoalMaxSteps }),
         onStep: opts.onStep,
         allowedHosts,
         vault,

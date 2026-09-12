@@ -23,7 +23,7 @@ Both are deprecation shims: delete `src/env-compat.ts` (plus its three side-effe
 
 spike.config.json keys mirror QaConfig camelCase fields:
 
-via, bridgePort, bridgeHost, extensionDir, cdpPort, runnerPort, fixturePort, chromeProfile, googleCliBin, googleCliModel, geminiApiKey, googleCliEnv, artifactsDir, actionCache, actionCacheDir, maxSteps, fixAgentBin, fixAgentArgs, fixAgentCwd, allowedHosts, recordClip, assertionPolicy, videoAssertions, readOnly, spendCapUsd, preferFreePlanner, planner, navigator, debugMode, debugAgent.
+via, bridgePort, bridgeHost, extensionDir, cdpPort, runnerPort, fixturePort, chromeProfile, googleCliBin, googleCliModel, geminiApiKey, googleCliEnv, artifactsDir, actionCache, actionCacheDir, maxSteps, perGoalMaxSteps, fixAgentBin, fixAgentArgs, fixAgentCwd, allowedHosts, recordClip, assertionPolicy, videoAssertions, readOnly, spendCapUsd, preferFreePlanner, planner, navigator, debugMode, debugAgent.
 
 planner is the Brain selection: `{ "provider": "...", "mode": "...", "model": "..." }`. It leads the `plan-goals` ladder for initial planning and re-plans. navigator is the Navigator selection with the same shape. It leads the `plan-step` ladder for per-step actions.
 
@@ -127,8 +127,11 @@ Consumed by: src/router/model-router.ts.
 
 ## Driver Loop
 
-SPIKE_MAX_STEPS - Integer. Global driver-loop step budget passed as cfg.maxSteps. Default: 12.
-Consumed by: src/driver/loop.ts.
+SPIKE_MAX_STEPS - Integer. Global driver-loop step budget for a whole run, passed as cfg.maxSteps. Default: 40.
+Consumed by: src/config.ts (fromEnv) -> engine.ts resolveStepBudgets -> src/driver/loop.ts.
+
+SPIKE_PER_GOAL_MAX_STEPS - Integer. Steps ONE sub-goal may consume before the loop re-plans instead of grinding, passed as cfg.perGoalMaxSteps (config key: perGoalMaxSteps). Default: 12. Always clamped to the run budget, so the effective value is min(maxSteps, perGoalMaxSteps) - the same value the old hardcoded behaviour produced at the defaults.
+Consumed by: src/config.ts (fromEnv) -> engine.ts resolveStepBudgets -> src/driver/loop.ts.
 
 SPIKE_ALLOWED_HOSTS - Comma-separated strings. Hosts the driver may mutate (click/type). Default: 'localhost,127.0.0.1'.
 Consumed by: src/driver/loop.ts.

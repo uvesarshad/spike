@@ -136,8 +136,14 @@ export interface QaConfig {
    * `SPIKE_ACTION_CACHE=0` to disable. */
   actionCache: boolean;
   actionCacheDir: string;
-  /** Default driver-loop step budget. */
+  /** Default driver-loop step budget for a whole run. */
   maxSteps: number;
+  /** A8 (P0): how many steps ONE sub-goal may consume before the run stops and
+   * re-plans instead of grinding. Previously hardcoded at 12 with no surface at
+   * all, which made a slow-but-progressing goal indistinguishable from a stuck
+   * one on any app bigger than the fixture. Never exceeds `maxSteps` — see
+   * resolveStepBudgets, which is the single place the two are reconciled. */
+  perGoalMaxSteps: number;
   /** Auto-fix: coding-agent CLI that receives the fix prompt headlessly
    * (e.g. bin 'claude', args ['-p','{prompt}','--permission-mode','acceptEdits']).
    * Unset bin → auto-detect claude/codex on PATH. '{prompt}' is substituted. */
@@ -245,6 +251,7 @@ const DEFAULTS: QaConfig = {
   actionCache: true,
   actionCacheDir: path.resolve('.spike-action-cache'),
   maxSteps: 40,
+  perGoalMaxSteps: 12,
   allowedHosts: ['localhost', '127.0.0.1'],
   // opt-in (SPIKE_RECORD_CLIP=1): GIF capture works over raw CDP (test/v14) but
   // chrome.debugger does NOT expose Page.startScreencast (extension mode), and
@@ -358,6 +365,7 @@ function fromEnv(): Partial<QaConfig> {
   if (e.SPIKE_ACTION_CACHE) out.actionCache = e.SPIKE_ACTION_CACHE !== '0' && e.SPIKE_ACTION_CACHE !== 'false';
   if (e.SPIKE_ACTION_CACHE_DIR) out.actionCacheDir = e.SPIKE_ACTION_CACHE_DIR;
   if (e.SPIKE_MAX_STEPS) out.maxSteps = Number(e.SPIKE_MAX_STEPS);
+  if (e.SPIKE_PER_GOAL_MAX_STEPS) out.perGoalMaxSteps = Number(e.SPIKE_PER_GOAL_MAX_STEPS);
   if (e.SPIKE_FIX_AGENT_BIN) out.fixAgentBin = e.SPIKE_FIX_AGENT_BIN;
   if (e.SPIKE_FIX_AGENT_ARGS) {
     try { out.fixAgentArgs = JSON.parse(e.SPIKE_FIX_AGENT_ARGS); } catch { /* ignore malformed */ }
@@ -476,6 +484,26 @@ export function readOnlyWasConfigured(overrides: Partial<QaConfig> = {}, cwd = p
   // no longer anybody's explicit instruction to the CLI. It still feeds
   // loadConfig()'s resolved value for callers that don't name a target.
   return false;
+}
+
+/** A8 (P0): the ONE place the run budget and the per-sub-goal budget are
+ * reconciled, so every caller (CLI, MCP, the panel) gets the same answer.
+ *
+ * Both are configurable now — `maxSteps` / SPIKE_MAX_STEPS for the whole run,
+ * `perGoalMaxSteps` / SPIKE_PER_GOAL_MAX_STEPS for one sub-goal — and a per-run
+ * option beats the config. The per-goal budget is clamped to the run budget:
+ * a sub-goal allowance larger than the run it lives in is meaningless, and the
+ * old hardcoded behaviour (min(maxSteps, 12)) is exactly what this produces at
+ * the defaults, so nothing changes for anyone who configures neither. */
+export function resolveStepBudgets(
+  cfg: Pick<QaConfig, 'maxSteps' | 'perGoalMaxSteps'>,
+  opts: { maxSteps?: number; perGoalMaxSteps?: number } = {},
+): { maxSteps: number; perGoalMaxSteps: number } {
+  const positive = (n: number | undefined, fallback: number): number =>
+    typeof n === 'number' && Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+  const maxSteps = positive(opts.maxSteps, positive(cfg.maxSteps, DEFAULTS.maxSteps));
+  const perGoal = positive(opts.perGoalMaxSteps, positive(cfg.perGoalMaxSteps, DEFAULTS.perGoalMaxSteps));
+  return { maxSteps, perGoalMaxSteps: Math.min(maxSteps, perGoal) };
 }
 
 export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd()): QaConfig {

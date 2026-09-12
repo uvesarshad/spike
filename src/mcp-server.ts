@@ -57,7 +57,17 @@ export async function startMcpServer(): Promise<void> {
             'model call, and each flow is then tested as its own run against the same url.',
         ),
       url: z.string().url().describe('page to start on'),
-      maxSteps: z.number().int().min(1).max(30).optional().describe('driver step budget (default 12)'),
+      maxSteps: z
+        .number()
+        .int()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe(
+          'how many actions the test may take before it gives up (default 40, max 200). ' +
+            'One realistic flow costs 5-10 actions, so raise this for a long or multi-page journey ' +
+            '— or split the work across `flows`, which gives each flow its own budget.',
+        ),
       readOnly: z
         .boolean()
         .optional()
