@@ -115,7 +115,11 @@
                 </div>
                 <button id="setNavKeySave" class="settings-btn-secondary" type="button">Save key</button>
               </div>
-              <span id="setNavKeyStatus" class="settings-key-status"></span>
+              <div class="settings-key-foot">
+                <span id="setNavKeyStatus" class="settings-key-status"></span>
+                <!-- A32: forget a stored key without leaving the panel. -->
+                <button id="setNavKeyRemove" class="settings-key-remove" type="button" hidden>Remove key</button>
+              </div>
             </div>
           </div>
         </div>
@@ -176,7 +180,11 @@
                   </div>
                   <button id="setKeySave" class="settings-btn-secondary" type="button">Save key</button>
                 </div>
-                <span id="setKeyStatus" class="settings-key-status"></span>
+                <div class="settings-key-foot">
+                  <span id="setKeyStatus" class="settings-key-status"></span>
+                  <!-- A32: forget a stored key without leaving the panel. -->
+                  <button id="setKeyRemove" class="settings-key-remove" type="button" hidden>Remove key</button>
+                </div>
               </div>
             </div>
           </div>

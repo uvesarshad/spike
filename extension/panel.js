@@ -186,6 +186,7 @@ const setKeyRow = $('setKeyRow');
 const setKey = $('setKey');
 const setKeySave = $('setKeySave');
 const setKeyStatus = $('setKeyStatus');
+const setKeyRemove = $('setKeyRemove');
 const setKeyToggle = $('setKeyToggle');
 // Navigator card (the cheap per-step model — cfg.navigator; the only card with Nano)
 const setNavProvider = $('setNavProvider');
@@ -195,6 +196,7 @@ const setNavKeyRow = $('setNavKeyRow');
 const setNavKey = $('setNavKey');
 const setNavKeySave = $('setNavKeySave');
 const setNavKeyStatus = $('setNavKeyStatus');
+const setNavKeyRemove = $('setNavKeyRemove');
 const setNavKeyToggle = $('setNavKeyToggle');
 const setNavNanoNote = $('setNavNanoNote');
 const setNavNanoDownload = $('setNavNanoDownload');
@@ -294,14 +296,14 @@ const ACCORDIONS = [
 const brainCardRefs = {
   role: 'brain',
   provider: setProvider, modeRow: setModeRow, modeName: 'setMode',
-  model: setModel, keyRow: setKeyRow, key: setKey, keyStatus: setKeyStatus,
+  model: setModel, keyRow: setKeyRow, key: setKey, keyStatus: setKeyStatus, keyRemove: setKeyRemove,
   nanoNote: null, nanoDownload: null,
   savedStamp: null, saving: false,
 };
 const navCardRefs = {
   role: 'navigator',
   provider: setNavProvider, modeRow: setNavModeRow, modeName: 'setNavMode',
-  model: setNavModel, keyRow: setNavKeyRow, key: setNavKey, keyStatus: setNavKeyStatus,
+  model: setNavModel, keyRow: setNavKeyRow, key: setNavKey, keyStatus: setNavKeyStatus, keyRemove: setNavKeyRemove,
   nanoNote: setNavNanoNote, nanoDownload: setNavNanoDownload,
   savedStamp: null, saving: false,
 };
@@ -2158,6 +2160,8 @@ function refreshCardVisibility(refs) {
     refs.keyStatus.classList.remove('err');
     refs.keyStatus.textContent = (info && info.hasKey) ? 'saved ✓' : '';
   }
+  // A32: "Remove key" only exists once there is a stored key to remove.
+  setKeyRemoveVisible(refs, showKey && !!(info && info.hasKey));
 
   // Gemini Nano: on-device note + one-time download prompt (navigator card only).
   if (refs.nanoNote || refs.nanoDownload) {
@@ -2552,10 +2556,12 @@ function onKeySaved(msg) {
     refs.saving = false;
     if (msg.ok) {
       refs.keyStatus.classList.remove('err');
-      refs.keyStatus.textContent = msg.cleared ? '' : 'saved ✓';
+      refs.keyStatus.textContent = msg.cleared ? 'key removed' : 'saved ✓';
       // keep the key in the field (persistent) — the user can reveal it with the
       // eye toggle to confirm; clear it only when the key was removed.
       if (msg.cleared) { refs.key.value = ''; refs.savedStamp = null; }
+      // A32: there is nothing left to remove once it is gone.
+      setKeyRemoveVisible(refs, !msg.cleared && !refs.keyRow.hidden);
     } else {
       // let the next attempt through instead of treating it as already stored
       refs.savedStamp = null;
@@ -2570,6 +2576,50 @@ function onKeySaved(msg) {
   // a key that just landed clears the "add a key" prompt on the main screen
   refreshKeyGate();
 }
+
+/* ---- A32: forgetting a stored key ------------------------------------------
+ * Saving a key had a button and removing one had nothing — the only way out
+ * was to overwrite it with a different key, or go to the command line. The
+ * link appears under a card only once that provider actually has a stored key,
+ * and asks once before it goes: the key may be the only copy the user has.
+ */
+
+/** Show or hide one card's "Remove key" link, always in its resting state. */
+function setKeyRemoveVisible(refs, show) {
+  if (!refs || !refs.keyRemove) return;
+  refs.keyRemove.hidden = !show;
+  if (!show) resetKeyRemove(refs.keyRemove);
+}
+
+function resetKeyRemove(btn) {
+  if (!btn) return;
+  if (btn._confirmTimer) { clearTimeout(btn._confirmTimer); btn._confirmTimer = null; }
+  btn.classList.remove('confirming');
+  btn.textContent = 'Remove key';
+}
+
+/** First click asks, second click (within 6s) removes. */
+function wireKeyRemove(refs) {
+  if (!refs || !refs.keyRemove) return;
+  refs.keyRemove.addEventListener('click', () => {
+    const btn = refs.keyRemove;
+    if (!btn.classList.contains('confirming')) {
+      btn.classList.add('confirming');
+      btn.textContent = 'Remove it?';
+      btn._confirmTimer = setTimeout(() => resetKeyRemove(btn), 6000);
+      return;
+    }
+    resetKeyRemove(btn);
+    const provider = refs.provider.value;
+    refs.savedStamp = null;
+    refs.saving = true;
+    refs.keyStatus.classList.remove('err');
+    refs.keyStatus.textContent = 'removing…';
+    postToSW({ kind: 'clear-key', provider });
+  });
+}
+wireKeyRemove(brainCardRefs);
+wireKeyRemove(navCardRefs);
 
 // show / hide the API key (one eye toggle per card)
 function wireKeyToggle(toggle, input) {
