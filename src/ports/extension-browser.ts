@@ -525,7 +525,14 @@ export class ExtensionBrowser implements BrowserPort {
    * chrome.tabs.create/update/remove need a dedicated bridge RPC (ext.openTab
    * etc.) the service worker doesn't expose yet — chrome.debugger has no tab
    * lifecycle surface. Throw a clear error instead of a silent no-op so the
-   * driver loop can fail the step/escalate rather than hang. */
+   * driver loop can fail the step/escalate rather than hang.
+   *
+   * A9 (P0) FOLLOW-UP — popup adoption: BrowserPort.takeNewTabs is likewise
+   * not implemented here, which is what makes the driver refuse a popup
+   * sign-in click with a plain explanation instead of clicking into a window
+   * this transport can never see (src/driver/sso-popup.ts). Same remaining
+   * work as the lite transport: chrome.tabs.onCreated in extension/sw.js
+   * (openerTabId === the attached tab) plus the tab RPCs above. */
   async openTab(_url: string): Promise<string> {
     throw new Error('openTab() is not supported in the extension transport yet (needs a chrome.tabs bridge RPC)');
   }

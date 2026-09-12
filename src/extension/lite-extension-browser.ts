@@ -295,7 +295,19 @@ export class LiteExtensionBrowser implements BrowserPort {
   /** Tab primitives are NOT implemented for the lite extension transport: the
    * SW deps injected here (LiteBrowserDeps) don't expose chrome.tabs
    * create/update/remove, only the single tab this instance is attached to.
-   * Throw a clear error instead of a silent no-op. */
+   * Throw a clear error instead of a silent no-op.
+   *
+   * A9 (P0) FOLLOW-UP — popup adoption: because this transport cannot take
+   * over a tab it did not attach to, BrowserPort.takeNewTabs is deliberately
+   * NOT implemented here, and that absence is what makes the driver refuse a
+   * "Sign in with Google/…" click up front with a plain explanation (see
+   * src/driver/sso-popup.ts) instead of clicking into an invisible window. The
+   * CDP transport adopts popups for real (CdpBrowser.adoptPageTarget). Doing
+   * the same here needs chrome.tabs.onCreated in extension/sw.js (matching
+   * openerTabId against the attached tab), a debugger attach to the new tab,
+   * and the tab primitives above — still open. It matters less here than it
+   * looks: this transport runs on the tab the user already has open, so the
+   * advice the guard gives ("log in on this tab first") is the normal flow. */
   async openTab(_url: string): Promise<string> {
     throw new Error('openTab() is not supported in the lite extension transport (single-tab attach only)');
   }

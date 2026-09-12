@@ -296,6 +296,14 @@ export function raceTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Pr
   return Promise.race([promise, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms))]);
 }
 
+/** A9 (P0): one tab the page opened by itself (a popup or a `target="_blank"`
+ * link) that the transport has adopted as a switchable tab — see
+ * BrowserPort.takeNewTabs. `id` is usable with switchTab()/closeTab(). */
+export interface NewTabInfo {
+  id: string;
+  url: string;
+}
+
 export interface BrowserPort {
   launch(): Promise<void>;
   navigate(url: string): Promise<void>;
@@ -353,6 +361,20 @@ export interface BrowserPort {
   /** Close a tab previously opened with openTab(). Throws if `id` is the
    * currently active tab — switchTab() away first. */
   closeTab(id: string): Promise<void>;
+  /** A9 (P0): drain tabs the PAGE opened on its own — a `window.open` popup or
+   * a `target="_blank"` link, the shape every "Sign in with Google/GitHub"
+   * button takes. The transport adopts them as ordinary switchable tabs, so
+   * the returned ids are usable with switchTab()/closeTab() exactly like an
+   * openTab() id. Each tab is reported EXACTLY ONCE (the queue is drained),
+   * so the driver can mention it in the step history without repeating itself.
+   *
+   * OPTIONAL ON PURPOSE — its presence is the capability probe. A transport
+   * that cannot see targets it did not open (the in-browser extension ports,
+   * which attach to one tab only) leaves it undefined, and the driver then
+   * refuses a popup-sign-in click up front with a plain explanation instead of
+   * clicking into a window it can never reach. Implement it only when the
+   * transport can really adopt such a tab. */
+  takeNewTabs?(): Promise<NewTabInfo[]>;
   screenshot(): Promise<Buffer>;
   setLogpoint(spec: LogpointSpec): Promise<void>;
   /** Everything captured since the previous drain — per-step evidence correlation. */

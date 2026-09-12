@@ -39,6 +39,7 @@ import {
   type PlanResult,
 } from './actions.js';
 import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
+import { detectSsoPopupClick } from './sso-popup.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
 import { checkDrainInvariants, checkProbeInvariants, type InvariantViolation } from '../assertions/invariants.js';
 import { evaluateAssertion, type AssertionSpec } from '../assertions/dom-assertions.js';
@@ -1208,6 +1209,9 @@ export async function runDriverLoop(
     // ---- execute the batch, one StepRecord + drain per action ----
     let aborted = false;
     let readOnlyBlock: string | null = null; // set when a mutation hits a non-allowed host
+    // A9 (P0): set when a click would have opened a third-party sign-in popup
+    // this transport cannot follow — see src/driver/sso-popup.ts.
+    let ssoPopupBlock: string | null = null;
     let finishReplan = false; // brain overruled a premature finish:pass → keep going
     for (let a = 0; a < actions.length && stepIndex < maxSteps; a++) {
       const action = actions[a];
@@ -1318,6 +1322,23 @@ export async function runDriverLoop(
         }
       }
       steps.push(record);
+
+      // A9 (P0): a "Sign in with Google/Microsoft/GitHub/Apple" button opens a
+      // popup window. Transports that can adopt that popup as a tab
+      // (BrowserPort.takeNewTabs) just click it and switch over; a transport
+      // that cannot would click into a window it can never see, so stop here
+      // and tell the user the one thing that works instead. Recorded as a
+      // FAILED step (it did not happen) and ends the goal/run with the plain
+      // reason — never a silent no-op, never a fabricated pass.
+      const ssoReason = detectSsoPopupClick(action.type, record.target?.name, typeof browser.takeNewTabs === 'function');
+      if (ssoReason) {
+        record.ok = false;
+        record.error = ssoReason;
+        record.description = `${record.description} — ${ssoReason}`;
+        onStep({ index: i, kind: stepKind(action), text: ssoReason, ok: false });
+        ssoPopupBlock = ssoReason;
+        break;
+      }
 
       // A2 (P0): read the page's counters RIGHT BEFORE an add/remove click, so
       // the count-delta relation below can be checked around the one action it
@@ -1649,6 +1670,23 @@ export async function runDriverLoop(
       if (!skippedReadOnly) await captureFailureShot(browser, artifacts, record);
       if (record.ok && record.target) lastTouchedTarget = { role: record.target.role, ...(record.target.name && { name: record.target.name }) };
 
+      // A9 (P0): the page may have opened a tab of its own (a sign-in popup, a
+      // target="_blank" link). The transport has already adopted it as a
+      // switchable tab; the navigator only learns it exists if we say so, so
+      // append the id to THIS step's description — that is the same history
+      // text an open_tab id arrives in, and switch_tab takes it verbatim.
+      // The rest of the batch is discarded: the tree it was planned against no
+      // longer describes what the user is looking at.
+      if (browser.takeNewTabs && record.ok && !skippedReadOnly) {
+        const opened = await browser.takeNewTabs().catch(() => [] as Awaited<ReturnType<NonNullable<typeof browser.takeNewTabs>>>);
+        if (opened.length) {
+          record.description += opened
+            .map((t) => ` → the page opened a new tab (id: ${t.id})${t.url ? ` at ${t.url}` : ''} — switch_tab to it to work there`)
+            .join('');
+          batchDirty = true;
+        }
+      }
+
       if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
         try {
           const cacheAfter = await captureActionEffectState(browser);
@@ -1772,6 +1810,15 @@ export async function runDriverLoop(
       reason =
         `read-only mode: ${readOnlyBlock} is not in allowedHosts — ` +
         'add it via SPIKE_ALLOWED_HOSTS or spike.config.json to allow interaction';
+      break;
+    }
+    // A9 (P0): the popup sign-in wall. Not a bug in the app under test, so the
+    // verdict is 'uncertain', and the reason is already the plain sentence the
+    // user needs — it flows verbatim into the report and the plain-English
+    // summary with no translation layer in between.
+    if (ssoPopupBlock) {
+      verdict = 'uncertain';
+      reason = ssoPopupBlock;
       break;
     }
 

@@ -20,6 +20,7 @@ import {
   type ConsoleEntry,
   type LogpointSpec,
   type NetworkEntry,
+  type NewTabInfo,
   type WaitForActionableOptions,
   type WaitForIdleOptions,
 } from './browser-port.js';
@@ -131,6 +132,15 @@ export class CdpBrowser implements BrowserPort {
    * openTab() created", the numeric convention recorded scripts replay with
    * (see recorder/script.ts's tabIndexFor / recorder/replay.ts). */
   private openOrder: string[] = [];
+  /** A9 (P0): tabs the PAGE opened by itself (window.open / target="_blank"),
+   * adopted by adoptPageTarget() and not yet handed to the driver. Drained by
+   * takeNewTabs() exactly once each — see that method and BrowserPort's
+   * doc comment. */
+  private newTabs: NewTabInfo[] = [];
+  /** A9 (P0): target ids adoptPageTarget() has already seen (adopted OR
+   * rejected), so a repeated Target.attachedToTarget for the same popup never
+   * opens a second client for it. */
+  private seenTargets = new Set<string>();
 
   /** A49 (P2): set once `Inspector.targetCrashed` fires on the active tab (a
    * renderer crash — OOM, a native-code bug the page's own JS triggered, GPU
@@ -213,6 +223,27 @@ export class CdpBrowser implements BrowserPort {
     // "session closed" error — see the `crashed` field's doc comment.
     this.client.Inspector.targetCrashed(() => {
       this.crashed = 'Chrome tab crashed (Inspector.targetCrashed) — the page is gone; aborting this run';
+    });
+    // A9 (P0): see the popup targets and then take them over. Without this the
+    // port only ever knows about tabs IT opened, so a "Sign in with Google"
+    // button — which is a plain window.open — created a page the driver could
+    // never look at, click in, or switch to: every app behind an SSO login was
+    // a dead end. Auto-attach reports those targets as they are created;
+    // adoptPageTarget() turns each into an ordinary switchable tab.
+    this.client.Target.attachedToTarget((ev: unknown) => {
+      const info = (ev as { targetInfo?: { targetId?: string; type?: string; url?: string } }).targetInfo;
+      if (!info?.targetId || info.type !== 'page') return; // iframes/workers are not tabs
+      void this.adoptPageTarget(info.targetId, info.url ?? '');
+    });
+    // waitForDebuggerOnStart MUST stay false — true pauses every new page until
+    // we explicitly resume it, which would freeze any popup the page opens.
+    // flatten:true is the modern (non-deprecated) session model; we still open
+    // a SEPARATE connection per adopted tab below, because the rest of this
+    // class is built on one chrome-remote-interface client per tab.
+    await this.client.Target.setAutoAttach({ autoAttach: true, waitForDebuggerOnStart: false, flatten: true }).catch(() => {
+      /* best-effort: an older/edge Chrome without page-session auto-attach
+       * just means popups stay invisible — the driver falls back to telling
+       * the user to sign in on the tab first (see driver/sso-popup.ts). */
     });
     // capture must attach before the first navigation so nothing is missed
     this.capture = await attachCapture(this.client);
@@ -559,6 +590,69 @@ export class CdpBrowser implements BrowserPort {
     return id;
   }
 
+  /** A9 (P0): adopt a page target this port did not open — a popup or a
+   * `target="_blank"` tab — so switchTab() can reach it like any openTab() tab.
+   * Attaches its own client + capture/idle ONCE, exactly as openTab() does (see
+   * the otherTabs doc comment for why re-attaching on switch would leak
+   * duplicate listeners).
+   *
+   * Deliberately NOT pushed onto `openOrder`: that list defines the numeric
+   * replay convention ("the Nth tab openTab() created"), and a popup the page
+   * happened to open is not an openTab() call — inserting it would silently
+   * renumber every recorded switch_tab. Adopted tabs are referenced by their
+   * literal id, which switchTab() already accepts.
+   *
+   * Idempotent: every id is considered once, so a duplicate
+   * Target.attachedToTarget (or a list sweep that sees the same popup again)
+   * can never open a second client for the same tab. */
+  private async adoptPageTarget(id: string, url: string): Promise<void> {
+    if (!this.client) return; // not launched yet (or already closed)
+    if (id === this.tabId || id === this.mainTabId) return;
+    if (this.otherTabs.has(id) || this.seenTargets.has(id)) return;
+    this.seenTargets.add(id);
+    try {
+      const client = await CDP({ port: this.opts.port, target: id });
+      await Promise.all([
+        client.Page.enable(),
+        client.Runtime.enable(),
+        client.Debugger.enable(),
+        client.DOM.enable(),
+        client.Accessibility.enable(),
+      ]);
+      const capture = await attachCapture(client);
+      const idle = createNetworkIdleTracker(client);
+      this.otherTabs.set(id, { client, capture, idle });
+      this.newTabs.push({ id, url });
+    } catch {
+      // the popup closed itself before we got there, or the target refuses a
+      // second client — forget it so a later sweep may retry.
+      this.seenTargets.delete(id);
+    }
+  }
+
+  /** A9 (P0): see BrowserPort.takeNewTabs. Sweeps the browser's target list as
+   * well as draining what Target.attachedToTarget already adopted — auto-attach
+   * on a page session covers the related-target cases, and the sweep catches
+   * anything it doesn't (an older Chrome, or a tab opened from a frame), using
+   * the same local HTTP endpoint openTab() already talks to. */
+  async takeNewTabs(): Promise<NewTabInfo[]> {
+    if (this.client) {
+      try {
+        const targets = (await CDP.List({ port: this.opts.port })) as Array<{ id?: string; targetId?: string; type?: string; url?: string }>;
+        for (const t of targets) {
+          if (t.type !== 'page') continue;
+          const id = t.id ?? t.targetId;
+          if (id) await this.adoptPageTarget(id, t.url ?? '');
+        }
+      } catch {
+        /* best-effort discovery — auto-attach is the primary path */
+      }
+    }
+    const drained = this.newTabs;
+    this.newTabs = [];
+    return drained;
+  }
+
   /** idOrIndex accepts either the literal id openTab() returned (what the live
    * navigator references — see history text) OR the numeric replay convention
    * a recorded script uses: 0 = the tab launch() started with, N (>=1) = the
@@ -848,6 +942,8 @@ export class CdpBrowser implements BrowserPort {
     this.tabId = null;
     this.mainTabId = null;
     this.openOrder = [];
+    this.newTabs = [];
+    this.seenTargets.clear();
     this.capture = null;
     this.idle = null;
     this.nodeMap.clear();
