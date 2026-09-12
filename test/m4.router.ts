@@ -130,14 +130,21 @@ const png = Buffer.from('fakepng');
 
   try {
     // a fresh machine (no settings.json at all) resolves the DAEMON's own
-    // defaults (claude:cli brain, nano navigator) — not the shared lite
-    // DEFAULT_SETTINGS.planner (claude:api), which would silently drift.
+    // defaults (claude:cli brain, and — since A13 — the cheap tier of that same
+    // provider for the model that clicks, NOT the on-device model) rather than
+    // the shared lite DEFAULT_SETTINGS.planner (claude:api), which would drift.
     const fresh = loadConfig();
     check(
       'no settings.json → daemon default brain is claude:cli (not lite claude:api)',
       fresh.planner.provider === 'claude' && fresh.planner.mode === 'cli',
     );
-    check('no settings.json → navigator defaults to nano', fresh.navigator.provider === 'nano');
+    // A13: defaulting this to the on-device model meant that on any machine
+    // failing its 22GB gate the pin was dropped and the BRAIN model drove every
+    // step — the cost lever gone, silently. It now derives from the brain pin.
+    check(
+      "no settings.json → the model that clicks is the brain provider's cheap tier, not on-device",
+      fresh.navigator.provider === 'claude' && fresh.navigator.mode === 'cli' && fresh.navigator.model === 'claude-haiku-4-5',
+    );
 
     // a settings.json still pinned to the dead gemini:cli free tier (and
     // missing `navigator`, pre-split) migrates to the daemon defaults and the
@@ -149,10 +156,13 @@ const png = Buffer.from('fakepng');
     );
     const migrated = loadConfig();
     check('dead gemini:cli planner migrates to claude:cli', migrated.planner.provider === 'claude' && migrated.planner.mode === 'cli');
-    check('missing navigator migrates to nano', migrated.navigator.provider === 'nano' && migrated.navigator.mode === 'ondevice');
+    check(
+      "missing navigator migrates to the fixed brain's cheap tier (A13), never to on-device",
+      migrated.navigator.provider === 'claude' && migrated.navigator.mode === 'cli',
+    );
     const onDisk = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as { planner?: { provider?: string; mode?: string }; navigator?: { provider?: string } };
     check('migration is rewritten to disk (planner)', onDisk.planner?.provider === 'claude' && onDisk.planner?.mode === 'cli');
-    check('migration is rewritten to disk (navigator)', onDisk.navigator?.provider === 'nano');
+    check('migration is rewritten to disk (navigator)', onDisk.navigator?.provider === 'claude');
 
     // env still overrides the (migrated) settings-store value.
     process.env.SPIKE_PLANNER_PROVIDER = 'glm';

@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   SettingsStore,
   isDeadPlannerSelection,
+  navigatorDefaultForBrain,
   type DebugAgent,
   type DebugMode,
   type PlannerSelection,
@@ -260,6 +261,10 @@ export function defaultGoogleCliEnv(): Record<string, string> {
   return { NODE_OPTIONS: '--use-system-ca' };
 }
 
+/** The daemon's BRAIN pin, named so DEFAULTS.navigator can be derived from it
+ * (A13) instead of the two drifting apart. */
+const DAEMON_BRAIN_DEFAULT: PlannerSelection = { provider: 'claude', mode: 'cli' };
+
 const DEFAULTS: QaConfig = {
   via: 'cdp',
   bridgePort: 9410,
@@ -299,17 +304,21 @@ const DEFAULTS: QaConfig = {
   // BRAIN default: claude CLI — the daemon HAS cli rungs and the former gemini:cli
   // free tier is dead (see settings.ts). (This intentionally differs from
   // DEFAULT_SETTINGS.planner, which is api because lite/BYOK has no cli rungs.)
-  planner: { provider: 'claude', mode: 'cli' },
-  // NAVIGATOR default: Nano, on-device, $0 — explicitly its OWN value (A27), no
-  // longer a shared reference to DEFAULT_SETTINGS.navigator. The daemon drives a
-  // real CDP-controlled Chrome it owns, so it CAN confirm Nano is actually live
-  // before a run starts (unlike lite/BYOK's browser-extension bundle, which has
-  // no synchronous on-device probe at config-build time and silently fell through
-  // to an accidental cloud adapter — see settings-data.ts's DEFAULT_SETTINGS.navigator
-  // and lite-engine.ts's resolveNavigatorName). Keeping Nano as the daemon's default
-  // preserves its $0 zero-config navigator; lite/BYOK's default is now a cheap cloud
-  // model instead. (Same daemon-vs-lite split as the BRAIN default above.)
-  navigator: { provider: 'nano', mode: 'ondevice' },
+  planner: { ...DAEMON_BRAIN_DEFAULT },
+  // NAVIGATOR default (A13): the cheap/fast tier of whatever provider the brain
+  // uses — claude:cli here, so claude:cli + claude-haiku-4-5.
+  //
+  // It used to be the on-device model, on the reasoning that the daemon owns a
+  // real Chrome and so CAN host it. It can — when the machine has the ~22 GB and
+  // the model downloaded. When it doesn't, the pin is silently skipped and the
+  // user's expensive planning model drives EVERY step instead, which is the one
+  // outcome this default exists to prevent: the per-step role is the entire cost
+  // lever. Deriving from the brain provider also guarantees the credentials are
+  // already there. The on-device model remains fully selectable as an explicit
+  // opt-in (and is still the unconditional rung-0 $0 visual adapter); it is just
+  // no longer what an unconfigured install silently gets. Keep in sync with
+  // SettingsStore's daemonNavigatorMigration (src/vibe/settings.ts).
+  navigator: navigatorDefaultForBrain(DAEMON_BRAIN_DEFAULT, DAEMON_BRAIN_DEFAULT),
   debugMode: 'prompt',
   debugAgent: 'auto',
   // A1: deterministic oracles gate the verdict by default — see QaConfig.strictOracles.

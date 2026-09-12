@@ -11,7 +11,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_SETTINGS, defaultModelFor, isDeadPlannerSelection, isSafeModelId } from './settings-data.js';
+import {
+  DEFAULT_SETTINGS,
+  defaultModelFor,
+  isDeadPlannerSelection,
+  isSafeModelId,
+  navigatorDefaultForBrain,
+} from './settings-data.js';
 import { migrateLegacyPath } from '../env-compat.js';
 import type {
   ProviderId,
@@ -23,7 +29,7 @@ import type {
   QaSettings,
 } from './settings-data.js';
 
-export { DEFAULT_SETTINGS, defaultModelFor, isDeadPlannerSelection, isSafeModelId };
+export { DEFAULT_SETTINGS, defaultModelFor, isDeadPlannerSelection, isSafeModelId, navigatorDefaultForBrain };
 export type { ProviderId, PlannerMode, ModelRole, DebugMode, DebugAgent, PlannerSelection, QaSettings };
 
 function defaultSettingsPath(): string {
@@ -40,18 +46,22 @@ function defaultSettingsPath(): string {
  * src/config.ts's own DEFAULTS.planner; keep the two in sync. */
 const DAEMON_PLANNER_MIGRATION: PlannerSelection = { provider: 'claude', mode: 'cli', model: '' };
 
-/** Daemon-only migration target for a MISSING navigator pin — the exact
- * navigator counterpart of DAEMON_PLANNER_MIGRATION above, and for the same
- * reason. A27 changed DEFAULT_SETTINGS.navigator to claude:api because LITE
- * mode is BYOK-only (one API key: a small model drives, a big model judges) and
- * has no on-device probe it can trust. This store, though, is also what the
- * DAEMON reads, and the daemon owns a real CDP Chrome where Nano genuinely
- * lives — which is why src/config.ts's DEFAULTS.navigator was decoupled back to
- * nano in the same change. Borrowing DEFAULT_SETTINGS.navigator here silently
- * migrated daemon configs onto claude:api, contradicting both that decoupling
- * and CLAUDE.md's documented "missing navigator → nano:ondevice". Keep this in
- * sync with src/config.ts's DEFAULTS.navigator, exactly as the planner pair is. */
-const DAEMON_NAVIGATOR_MIGRATION: PlannerSelection = { provider: 'nano', mode: 'ondevice', model: '' };
+/** A13: migration target for a MISSING pin for the model that clicks.
+ *
+ * This used to be the on-device model, unconditionally. That is only free on a
+ * machine that can actually host it; everywhere else the ladder fell straight
+ * through to the user's expensive planning model for EVERY step, silently, with
+ * the panel still showing the on-device pin. The cost lever the whole product
+ * rests on evaporated without a word.
+ *
+ * So the default is now derived from whatever model the user has configured for
+ * planning: the same provider's cheap/fast tier, which by definition needs no
+ * credentials they don't already have. The on-device model stays fully
+ * available — it is just an explicit choice now, not something a config with a
+ * missing field gets handed. Keep in sync with src/config.ts's DEFAULTS.navigator. */
+function daemonNavigatorMigration(planner: PlannerSelection | undefined): PlannerSelection {
+  return navigatorDefaultForBrain(planner ?? DAEMON_PLANNER_MIGRATION, DAEMON_PLANNER_MIGRATION);
+}
 
 export class SettingsStore {
   private readonly file: string;
@@ -77,7 +87,8 @@ export class SettingsStore {
    * Also runs the Phase 13 config-drift migration: a persisted `planner` pinned
    * to the dead Gemini CLI free tier, or a persisted config with no `navigator`
    * key at all (pre-split), is rewritten to the current daemon defaults
-   * (brain → claude:cli, navigator → nano) right here, once, so every other
+   * (brain → claude:cli, and the model that clicks → that brain provider's
+   * cheap tier, A13) right here, once, so every other
    * reader (this file, `spike config` CLI, the panel) sees the fixed values
    * without re-deriving the migration themselves. */
   readRaw(): Partial<QaSettings> {
@@ -109,10 +120,14 @@ export class SettingsStore {
       return parsed;
     }
 
+    // Resolve the brain pin FIRST — a missing navigator now derives from it, so
+    // a config that is migrating both at once must derive from the fixed brain,
+    // not the dead one it arrived with.
+    const planner = deadPlanner ? { ...DAEMON_PLANNER_MIGRATION } : parsed.planner;
     const migrated: Partial<QaSettings> = {
       ...parsed,
-      planner: deadPlanner ? { ...DAEMON_PLANNER_MIGRATION } : parsed.planner,
-      navigator: missingNavigator ? { ...DAEMON_NAVIGATOR_MIGRATION } : parsed.navigator,
+      planner,
+      navigator: missingNavigator ? daemonNavigatorMigration(planner) : parsed.navigator,
     };
     try {
       fs.mkdirSync(path.dirname(this.file), { recursive: true });

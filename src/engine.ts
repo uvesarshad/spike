@@ -828,6 +828,24 @@ export function createPlanningRouter(config: Partial<QaConfig> = {}): ModelRoute
   });
 }
 
+/** A13: the one-line warning for a pinned model that clicks which isn't
+ * actually driving, or null when the pin is in effect (or unknowable).
+ *
+ * Pure so the wording and the trigger can be tested without a browser or a
+ * model. `pinned` is the adapter name the user's choice resolved to; `actual`
+ * is whatever really leads the per-step ladder (ModelRouter.resolveLead). */
+export function navigatorFallbackWarning(
+  pinned: string | undefined,
+  actual: string | undefined,
+): string | null {
+  if (!pinned || !actual || pinned === actual) return null;
+  return (
+    `WARNING: the model that clicks is set to "${pinned}", but it can't run here — ` +
+    `every step of this run will use "${actual}" instead, which you pay for. ` +
+    'Pick a different one in Settings if that is not what you want.'
+  );
+}
+
 /** The host of `url` plus its www./bare-domain sibling (apex↔www redirects are
  * common — e.g. a bare domain → its www. subdomain — and the guard's
  * subdomain check only covers one direction). '' / unparseable url → []. */
@@ -1088,6 +1106,15 @@ async function runFreshAiPass(
       navigatorAdapter: navigatorName,
       plannerAdapter: plannerName,
     });
+
+    // A13: the pin for the model that clicks is not a guarantee. An adapter
+    // that reports itself unavailable (no key, a command-line tool that isn't
+    // installed, on-device AI on a machine that can't host it) is dropped from
+    // the ladder and something else drives EVERY step — which, if the pin was
+    // the free on-device model, means a model the user pays for, per step,
+    // silently. Say it out loud, once, before the run starts.
+    const warning = navigatorFallbackWarning(navigatorName, await router.resolveLead('plan-step').catch(() => undefined));
+    if (warning) progress(warning);
 
     artifacts = new ArtifactStore(cfg.artifactsDir);
     actionCache = cfg.actionCache ? new FileActionCache(cfg.actionCacheDir) : undefined;

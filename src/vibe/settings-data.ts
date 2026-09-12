@@ -161,6 +161,33 @@ export function defaultModelFor(provider: ProviderId, mode: PlannerMode, role?: 
   return table[`${provider}:${mode}`] ?? '';
 }
 
+/** A13: the default pin for the model that CLICKS, derived from the pin for the
+ * model that PLANS — the cheap/fast tier of the same provider on the same
+ * transport (a `claude:api` planner gives a `claude:api` / claude-haiku-4-5
+ * navigator; a `claude:cli` planner gives `claude:cli` / claude-haiku-4-5).
+ *
+ * Why derive it rather than hard-code one: the per-step role is called on EVERY
+ * step, so it is the whole cost lever, and anyone who has configured a provider
+ * for planning already has the credentials for that provider's cheap tier. A
+ * fixed default from a different provider would need a second key nobody set up
+ * and would silently fall through to the expensive planning model instead.
+ *
+ * The on-device model is never chosen automatically here. It is genuinely free
+ * and still fully selectable, but it only works on a machine that can host it,
+ * and when it can't the ladder falls straight through to a model the user pays
+ * for on every single step — which is exactly the surprise this default exists
+ * to avoid. `fallback` covers a planner pin that cannot itself imply a
+ * navigator (the on-device model plans nothing, so it never lands here). */
+export function navigatorDefaultForBrain(
+  brain: PlannerSelection,
+  fallback: PlannerSelection,
+): PlannerSelection {
+  const usable = brain.provider !== 'nano' && (brain.mode === 'api' || brain.mode === 'cli');
+  const src = usable ? brain : fallback;
+  const mode: PlannerMode = src.mode === 'cli' ? 'cli' : 'api';
+  return { provider: src.provider, mode, model: defaultModelFor(src.provider, mode, 'navigator') };
+}
+
 /** True for a PlannerSelection pinned to a known-dead provider/mode. Today that's
  * only the Gemini CLI free tier (Gemini Code Assist for individuals), which
  * ended 2026-06-18 and now hard-fails auth (see google-cli.ts's IneligibleTier
