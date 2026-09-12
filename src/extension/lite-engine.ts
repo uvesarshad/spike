@@ -70,6 +70,14 @@ export interface LiteRunOptions {
   /** A1 (P0) headline feature: deterministic verdicts — forwarded to
    * LoopOptions. Mirrors readOnly's forwarding shape; product default true. */
   strictOracles?: boolean;
+  /** A5: the test-login values the user saved in the panel, by name
+   * (TEST_USER / TEST_PASSWORD). Extension-only mode has no encrypted store on
+   * disk, so these come from the browser's own storage — but the rule is the
+   * same as the desktop helper's: the value is swapped in only at the instant
+   * it is typed into the page, and the {{secret:NAME}} reference is what every
+   * saved run, recorded test and model prompt sees. Absent/empty → a task that
+   * references a login fails its step, as before. */
+  secrets?: Record<string, string>;
   /** chrome.debugger transport + lifecycle, injected by the SW. */
   browserDeps: LiteBrowserDeps;
   /** Nano (rung 0) callbacks; omit to skip the on-device visual rung. */
@@ -163,7 +171,11 @@ function resolveNavigatorName(keys: LiteKeys, navigator: PlannerSelection, plann
 /** Build the panel's vibe.config.get payload from chrome.storage values. Same
  * shape the daemon's service.ts returns, so panel.js renderSettings is unchanged
  * (plus a `mode:'lite'` marker). Key VALUES never appear — only presence. */
-export function buildLiteConfig(keys: LiteKeys, settings: QaSettings): Record<string, unknown> {
+export function buildLiteConfig(
+  keys: LiteKeys,
+  settings: QaSettings,
+  secrets: Record<string, string> = {},
+): Record<string, unknown> {
   const k = keys as Record<string, string | undefined>;
   const providers = PROVIDER_ORDER.map((id) => {
     const vaultName = VAULT_KEY_FOR[id];
@@ -198,6 +210,8 @@ export function buildLiteConfig(keys: LiteKeys, settings: QaSettings): Record<st
     spendCapUsd: settings.spendCapUsd,
     // A1 headline feature — same shape as the daemon's vibe.config.get.
     strictOracles: settings.strictOracles ?? true,
+    // A5: whether a test login has been saved — presence only, never values.
+    testLogin: { user: Boolean(secrets.TEST_USER), password: Boolean(secrets.TEST_PASSWORD) },
     providers,
     mode: 'lite',
   };
@@ -243,7 +257,10 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       spendCapUsd: opts.spendCapUsd,
       // A1 (P0) — see LiteRunOptions.strictOracles above.
       strictOracles: opts.strictOracles,
-      // no vault in lite mode — a {{secret:NAME}} placeholder fails its step.
+      // A5 — the panel's saved test login, if any. Same contract as the desktop
+      // helper's encrypted store: read-only, looked up by name, resolved at the
+      // moment of typing and never written anywhere.
+      ...(opts.secrets && { vault: { get: (name: string) => opts.secrets?.[name] || undefined } }),
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1000)}s)`);
 

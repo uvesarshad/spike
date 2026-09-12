@@ -6365,6 +6365,61 @@ function describeAction(a) {
   }
 }
 
+// src/report/redact.ts
+init_buffer_shim();
+var REDACTED2 = "\u2022\u2022\u2022";
+var SECRET_TARGET_RE = /password|passcode|pin|otp|token|secret|card|cvv|cvc/i;
+var SECRET_PLACEHOLDER_RE3 = /\{\{secret:[a-zA-Z0-9_-]+\}\}/g;
+function isSecretTarget(target) {
+  if (!target) return false;
+  return SECRET_TARGET_RE.test(`${target.role ?? ""} ${target.name ?? ""} ${target.testId ?? ""}`);
+}
+function redactSecretText(text) {
+  if (!text) return text;
+  SECRET_PLACEHOLDER_RE3.lastIndex = 0;
+  const placeholders = text.match(SECRET_PLACEHOLDER_RE3);
+  if (!placeholders) return REDACTED2;
+  let out = "";
+  let last = 0;
+  SECRET_PLACEHOLDER_RE3.lastIndex = 0;
+  for (let m = SECRET_PLACEHOLDER_RE3.exec(text); m; m = SECRET_PLACEHOLDER_RE3.exec(text)) {
+    if (text.slice(last, m.index).trim()) out += REDACTED2;
+    out += m[0];
+    last = m.index + m[0].length;
+  }
+  if (text.slice(last).trim()) out += REDACTED2;
+  return out;
+}
+function redactTypedText(text, target) {
+  return isSecretTarget(target) ? redactSecretText(text) : text;
+}
+var TASK_REDACTED = "[redacted]";
+var TASK_SECRET_PATTERNS = [
+  // "user@example.com / hunter2" — an address and a password separated by a slash
+  /\b\S+@\S+\s*\/\s*\S+/g,
+  // "password: hunter2", "passcode=1234", and the common short spellings
+  /\b(?:password|passcode|passwd|pwd|pin|otp|token)\s*[:=]\s*\S+/gi
+];
+function redactTaskSegment(segment) {
+  let out = segment;
+  for (const re of TASK_SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    out = out.replace(re, TASK_REDACTED);
+  }
+  return out;
+}
+function redactTaskText(task) {
+  if (!task) return task;
+  let out = "";
+  let last = 0;
+  SECRET_PLACEHOLDER_RE3.lastIndex = 0;
+  for (let m = SECRET_PLACEHOLDER_RE3.exec(task); m; m = SECRET_PLACEHOLDER_RE3.exec(task)) {
+    out += redactTaskSegment(task.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + redactTaskSegment(task.slice(last));
+}
+
 // src/driver/actions.ts
 init_buffer_shim();
 
@@ -11592,28 +11647,62 @@ function nodeText2(n) {
 }
 var CART_RE = /\bcart\b/i;
 var DIGIT_RE = /\d/;
+var ADD_ITEM_RES = [
+  /\badd\b[^]{0,32}?\b(cart|bag|basket)\b/i,
+  /\badd (an? )?item\b/i,
+  /\badd to (cart|bag|basket)\b/i
+];
+var REMOVE_ITEM_RES = [
+  /\bremove\b[^]{0,32}?\b(cart|bag|basket|item)\b/i,
+  /\bremove (an? )?item\b/i,
+  /\bdelete (an? )?item\b/i
+];
 var SORT_RE = /\bsort\b/i;
 var SORT_STATE_RE = /sort/i;
 var FILTER_RE = /\bfilter\b/i;
 var PAGINATION_NEXT_RE = /^(next|older|more results?)\b/i;
 var PAGINATION_LABEL_RE = /\bpagination\b|\bpage \d+\s+of\s+\d+\b/i;
 var FILTER_ROLES = /* @__PURE__ */ new Set(["checkbox", "combobox", "button", "radio", "menuitemcheckbox"]);
-function detectRelationCandidates(ax) {
+function historyStepText(s) {
+  return (s.target?.name ?? "").trim() || (s.description ?? "").trim();
+}
+function countDeltaDirection(step) {
+  if (!step.ok || step.action?.type !== "click") return null;
+  const text = historyStepText(step);
+  if (!text) return null;
+  if (ADD_ITEM_RES.some((re) => re.test(text))) return "add";
+  if (REMOVE_ITEM_RES.some((re) => re.test(text))) return "remove";
+  return null;
+}
+var MAX_COUNT_DELTA_PROPOSALS = 3;
+function countDeltaProposals(history, patterns, relation, phrasing) {
+  const out = [];
+  for (const step of history) {
+    if (out.length >= MAX_COUNT_DELTA_PROPOSALS) break;
+    if (!step.ok || step.action?.type !== "click") continue;
+    const text = historyStepText(step);
+    if (!text || !patterns.some((re) => re.test(text))) continue;
+    const before = step.countsBefore;
+    const after = step.countsAfter;
+    if (typeof before?.cart !== "number" || typeof after?.cart !== "number") continue;
+    out.push({
+      relation,
+      reason: `The run clicked "${text}", which ${phrasing} the cart, while a cart badge was on the page.`,
+      params: { countKey: "cart" },
+      before: { counts: before },
+      after: { counts: after }
+    });
+  }
+  return out;
+}
+function detectRelationCandidates(ax, history = []) {
   const proposals = [];
   const nodes = collectAxNodes(ax);
   if (nodes.length === 0) return proposals;
   const cartNode = nodes.find((n) => CART_RE.test(nodeText2(n)) && DIGIT_RE.test(nodeText2(n)));
   if (cartNode) {
-    proposals.push({
-      relation: addItemIncrementsCount,
-      reason: `Found a cart-labelled node with a numeric badge: ${cartNode.role} "${cartNode.name ?? cartNode.value ?? ""}".`,
-      params: { countKey: "cart" }
-    });
-    proposals.push({
-      relation: removeItemDecrementsCount,
-      reason: "Same cart-badge node also implies the inverse relation on removal.",
-      params: { countKey: "cart" }
-    });
+    proposals.push(...countDeltaProposals(history, ADD_ITEM_RES, addItemIncrementsCount, "adds an item to"));
+    proposals.push(...countDeltaProposals(history, REMOVE_ITEM_RES, removeItemDecrementsCount, "removes an item from"));
   }
   const sortNode = nodes.find((n) => {
     if (n.role !== "columnheader" && n.role !== "button") return false;
@@ -12037,7 +12126,10 @@ function resolveSecrets2(text, vault) {
     const value = vault?.get(name);
     if (value === void 0) {
       throw new SecretNotFoundError(
-        `secret "${name}" not found \u2014 add it with: spike secret set ${name}`
+        // A5: two audiences read this — someone in the side panel (who has a
+        // "Test login (optional)" card and no terminal) and someone at a
+        // command line. Name both, lead with the one that needs no terminal.
+        `secret "${name}" not found \u2014 save it under Settings \u2192 Test login, or from a terminal: spike secret set ${name}`
       );
     }
     return value;
@@ -12290,6 +12382,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
     let firstSnapshotAx = null;
     let lastTouchedTarget;
     let done = false;
+    let lastExecutedSig = null;
     let goals = [];
     let currentGoal = 0;
     let hint;
@@ -12450,6 +12543,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         ok: record.ok
       });
       onStep({ index: i, kind: stepKind(action), text: humanizeAction(action), ok: record.ok });
+      if (outcome !== "continue") done = true;
       return outcome;
     };
     brainAvailable = await router.hasCapability("plan-goals");
@@ -12519,7 +12613,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       recentTreeTexts.push(ax.text);
       if (recentTreeTexts.length > 3) recentTreeTexts.shift();
       const batchUrl = await browser.url();
-      if (actionCache && stepIndex < maxSteps) {
+      if (actionCache && !done && stepIndex < maxSteps) {
         const cachedRecords = actionCache.findForContext({ url: batchUrl, goal: goals[currentGoal], page: ax });
         if (cachedRecords.length === 0) actionCacheStats.misses++;
         let acceptedCacheHit = false;
@@ -12538,6 +12632,11 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
               actionCacheStats.stale++;
               continue;
             }
+          }
+          const replaySig = { page: pageSignatureFromAx(ax), action: JSON.stringify(cached2.value) };
+          if (lastExecutedSig && lastExecutedSig.page === replaySig.page && lastExecutedSig.action === replaySig.action) {
+            actionCacheStats.misses++;
+            continue;
           }
           const i = stepIndex++;
           stepsInGoal++;
@@ -12569,6 +12668,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
               actionCacheStats.hits++;
               actionCache.markHit(cached2);
               acceptedCacheHit = true;
+              lastExecutedSig = replaySig;
             }
           } catch (e) {
             record.ok = false;
@@ -12720,6 +12820,13 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
               }
             }
           }
+          if (record.action.type === "type" && isSecretTarget({ ...record.target, testId: t?.testId })) {
+            const hidden = redactSecretText(record.action.text);
+            if (hidden !== record.action.text) {
+              record.action = { ...record.action, text: hidden };
+              record.description = describeAction(record.action);
+            }
+          }
         } else if (action.type === "drag_and_drop") {
           const srcFound = findNodeRanked(ax.root, action.sourceId);
           const dstFound = findNodeRanked(ax.root, action.targetId);
@@ -12743,6 +12850,11 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
           }
         }
         steps.push(record);
+        const isCountDeltaStep = countDeltaDirection(record) !== null;
+        if (isCountDeltaStep) {
+          const pre = await (browser.peekAxTree?.() ?? browser.axTree()).catch(() => null);
+          if (pre) record.countsBefore = axToObservation(pre).counts;
+        }
         const cacheBefore = actionCache && a === actions.length - 1 && action.type !== "finish" && action.type !== "assert_visual" && action.type !== "wait" && // wait_for_email's "effect" is external mailbox state, not something a
         // replayed cache hit can reproduce — never cache it (mirrors wait/
         // assert_visual/finish above; see actionIntentForKey/toCachedActionValue
@@ -12964,6 +13076,13 @@ ${m.html ?? ""}`.toLowerCase().includes(matching)) ?? null : messages[messages.l
         record.console = browser.drainConsole();
         record.network = browser.drainNetwork();
         await collectInvariants(browser, record);
+        if (record.countsBefore) {
+          if (record.ok && !skippedReadOnly) {
+            const post = await (browser.peekAxTree?.() ?? browser.axTree()).catch(() => null);
+            if (post) record.countsAfter = axToObservation(post).counts;
+          }
+          if (!record.countsAfter) delete record.countsBefore;
+        }
         if (!skippedReadOnly) await captureFailureShot(browser, artifacts, record);
         if (record.ok && record.target) lastTouchedTarget = { role: record.target.role, ...record.target.name && { name: record.target.name } };
         if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
@@ -12981,6 +13100,7 @@ ${m.html ?? ""}`.toLowerCase().includes(matching)) ?? null : messages[messages.l
               const value = toCachedActionValue(action, record.target);
               actionCache.put(key, value, { sourceRunId: artifacts.runId, sourceStepIndex: record.index });
               actionCacheStats.stored++;
+              lastExecutedSig = { page: pageSignatureFromAx(ax), action: JSON.stringify(value) };
             }
           } catch (e) {
             if (!(e instanceof ActionCacheRejectedError)) {
@@ -13040,12 +13160,14 @@ ${m.html ?? ""}`.toLowerCase().includes(matching)) ?? null : messages[messages.l
       }
     }
     if (firstSnapshotAx && lastSnapshotAx && steps.length) {
-      const candidates = detectRelationCandidates(lastSnapshotAx);
+      const candidates = detectRelationCandidates(lastSnapshotAx, steps);
       if (candidates.length) {
-        const before = axToObservation(firstSnapshotAx);
-        const after = axToObservation(lastSnapshotAx, url);
+        const runStart = axToObservation(firstSnapshotAx);
+        const runEnd = axToObservation(lastSnapshotAx, url);
         const relationEvidence = [];
         for (const c of candidates) {
+          const before = c.before ?? runStart;
+          const after = c.after ?? runEnd;
           const violation = checkRelation(c.relation, before, after, c.params);
           if (!violation) continue;
           const gates = c.relation.confidence === "reliable" && !violation.insufficientData;
@@ -14791,7 +14913,7 @@ function humanizeStep(step) {
     case "click":
       return `clicked ${targetPhrase ?? "an element"}`;
     case "type":
-      return `typed ${JSON.stringify(a.text)} into ${targetPhrase ?? "a field"}`;
+      return `typed ${JSON.stringify(redactTypedText(a.text, t))} into ${targetPhrase ?? "a field"}`;
     case "hover":
       return `hovered over ${targetPhrase ?? "an element"}`;
     case "press_key":
@@ -14861,22 +14983,36 @@ function describeCall(n) {
   if (n.failed) return `${where} failed${n.errorText ? ` (${n.errorText})` : ""}`;
   return where;
 }
+function collapseRepeats(steps) {
+  const out = [];
+  for (const s of steps) {
+    const text = humanizeStep(s);
+    const prev = out[out.length - 1];
+    if (prev && prev.text === text && prev.ok === s.ok) {
+      prev.count++;
+      continue;
+    }
+    out.push({ text, ok: s.ok, count: 1, position: out.length + 1 });
+  }
+  return out;
+}
 function renderPlainReport(report) {
   const lines = [];
   const headline = report.verdict === "pass" ? "\u2705 Everything worked" : report.verdict === "fail" ? "\u274C Found the problem" : "\u{1F914} Couldn\u2019t finish";
   lines.push(`## ${headline}`);
   lines.push("");
-  lines.push(`I tested: ${report.task}`);
+  lines.push(`I tested: ${redactTaskText(report.task)}`);
   lines.push("");
   const did = actionSteps(report);
   lines.push("**What I did:**");
   if (did.length === 0) {
     lines.push("1. (no steps were taken)");
   } else {
-    did.forEach((s, i) => {
-      const mark = s.ok ? "" : " \u2014 this is where it broke";
-      lines.push(`${i + 1}. ${humanizeStep(s)}${mark}`);
-    });
+    for (const g of collapseRepeats(did)) {
+      const mark = g.ok ? "" : " \u2014 this is where it broke";
+      const times = g.count > 1 ? ` (\xD7${g.count})` : "";
+      lines.push(`${g.position}. ${g.text}${times}${mark}`);
+    }
   }
   if (report.verdict !== "pass") {
     lines.push("");
@@ -14992,7 +15128,7 @@ function buildFixPrompt(report) {
   }
   lines.push("");
   lines.push("**Expected**");
-  lines.push(expectedFromTask(report.task));
+  lines.push(expectedFromTask(redactTaskText(report.task)));
   lines.push("");
   lines.push("**Evidence**");
   if (failRec) {
@@ -15043,7 +15179,7 @@ function resolveNavigatorName(keys, navigator, planner) {
   const idx = ladder.findIndex((l) => Boolean(l.key));
   return idx >= 0 ? adapters[idx].name : "nano";
 }
-function buildLiteConfig(keys, settings) {
+function buildLiteConfig(keys, settings, secrets = {}) {
   const k = keys;
   const providers = PROVIDER_ORDER.map((id) => {
     const vaultName = VAULT_KEY_FOR[id];
@@ -15078,6 +15214,8 @@ function buildLiteConfig(keys, settings) {
     spendCapUsd: settings.spendCapUsd,
     // A1 headline feature — same shape as the daemon's vibe.config.get.
     strictOracles: settings.strictOracles ?? true,
+    // A5: whether a test login has been saved — presence only, never values.
+    testLogin: { user: Boolean(secrets.TEST_USER), password: Boolean(secrets.TEST_PASSWORD) },
     providers,
     mode: "lite"
   };
@@ -15116,8 +15254,11 @@ async function runLite(opts) {
       readOnly: opts.readOnly,
       spendCapUsd: opts.spendCapUsd,
       // A1 (P0) — see LiteRunOptions.strictOracles above.
-      strictOracles: opts.strictOracles
-      // no vault in lite mode — a {{secret:NAME}} placeholder fails its step.
+      strictOracles: opts.strictOracles,
+      // A5 — the panel's saved test login, if any. Same contract as the desktop
+      // helper's encrypted store: read-only, looked up by name, resolved at the
+      // moment of typing and never written anywhere.
+      ...opts.secrets && { vault: { get: (name) => opts.secrets?.[name] || void 0 } }
     });
     progress(`verdict: ${report.verdict} (${report.steps.length} steps, ${Math.round(report.durationMs / 1e3)}s)`);
     const done = {

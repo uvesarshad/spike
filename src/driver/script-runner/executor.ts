@@ -6,7 +6,7 @@
  * report/record. Steps run sequentially under a wall-time budget. */
 
 import type { AxNode, BrowserPort } from '../../ports/browser-port.js';
-import type { Vault } from '../../vault/vault.js';
+import type { SecretsSource } from '../loop.js';
 import { recordExtraction, resolveRunPlaceholders, type RunDataState } from '../../run-data/index.js';
 import { SCRIPT_MAX_WALL_MS, type ScriptRunnerStep } from './schema.js';
 
@@ -14,7 +14,7 @@ const SECRET_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
 
 /** Mirrors loop.ts's resolveSecrets: {{secret:NAME}} resolved AT EXECUTE TIME
  * ONLY. Throws when the vault doesn't hold the named secret. */
-function resolveSecrets(text: string, vault: Vault | undefined): string {
+function resolveSecrets(text: string, vault: SecretsSource | undefined): string {
   if (!SECRET_RE.test(text)) return text;
   SECRET_RE.lastIndex = 0;
   return text.replace(SECRET_RE, (_m, name: string) => {
@@ -45,7 +45,7 @@ export async function runScriptSteps(
   browser: BrowserPort,
   steps: ScriptRunnerStep[],
   runData: RunDataState,
-  vault: Vault | undefined,
+  vault: SecretsSource | undefined,
   opts: ScriptExecutionOptions = {},
 ): Promise<ScriptExecutionResult> {
   const maxWallMs = opts.maxWallMs ?? SCRIPT_MAX_WALL_MS;
@@ -65,7 +65,7 @@ export async function runScriptSteps(
   return { ok: true, executedSteps };
 }
 
-async function runOneStep(browser: BrowserPort, step: ScriptRunnerStep, runData: RunDataState, vault: Vault | undefined): Promise<void> {
+async function runOneStep(browser: BrowserPort, step: ScriptRunnerStep, runData: RunDataState, vault: SecretsSource | undefined): Promise<void> {
   switch (step.type) {
     case 'navigate':
       return browser.navigate(step.url);

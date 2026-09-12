@@ -39,7 +39,6 @@ import {
   type PlanResult,
 } from './actions.js';
 import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
-import type { Vault } from '../vault/vault.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
 import { checkDrainInvariants, checkProbeInvariants, type InvariantViolation } from '../assertions/invariants.js';
 import { evaluateAssertion, type AssertionSpec } from '../assertions/dom-assertions.js';
@@ -59,6 +58,14 @@ import {
 } from '../cache/action-cache.js';
 import { getDefaultTracer } from '../telemetry/env.js';
 import { startClipRecorder, type CdpClientLike } from '../clip/screencast.js';
+
+/** The only thing the loop needs from a secrets store: look one up by name.
+ * The desktop helper hands it the encrypted vault; the extension-only mode
+ * hands it the test-login values the user saved in the panel. Keeping this a
+ * one-method shape is what lets the browser build stay free of Node code. */
+export interface SecretsSource {
+  get(name: string): string | undefined;
+}
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -126,14 +133,17 @@ class SecretNotFoundError extends Error {}
 /** Resolve any {{secret:NAME}} occurrences in `text` via the vault. Throws
  * SecretNotFoundError (with the qa-cli hint) when a referenced secret is missing.
  * Returns the original string unchanged when there are no placeholders. */
-function resolveSecrets(text: string, vault: Vault | undefined): string {
+function resolveSecrets(text: string, vault: SecretsSource | undefined): string {
   if (!SECRET_RE.test(text)) return text;
   SECRET_RE.lastIndex = 0;
   return text.replace(SECRET_RE, (_m, name: string) => {
     const value = vault?.get(name);
     if (value === undefined) {
       throw new SecretNotFoundError(
-        `secret "${name}" not found — add it with: spike secret set ${name}`,
+        // A5: two audiences read this — someone in the side panel (who has a
+        // "Test login (optional)" card and no terminal) and someone at a
+        // command line. Name both, lead with the one that needs no terminal.
+        `secret "${name}" not found — save it under Settings → Test login, or from a terminal: spike secret set ${name}`,
       );
     }
     return value;
@@ -252,7 +262,7 @@ export interface LoopOptions {
   allowedHosts?: string[];
   /** Secrets store for {{secret:NAME}} resolution at execute time. Optional:
    * without it, a {{secret:…}} placeholder fails the step (secret not found). */
-  vault?: Vault;
+  vault?: SecretsSource;
   /** Email/OTP module wiring: the EmailProvider instance a `wait_for_email`
    * action polls (e.g. fixture/server.ts's fixtureEmailProvider for the
    * dogfood app, or a fresh FakeLocalEmailProvider in tests). Same
@@ -2219,7 +2229,7 @@ async function executeCacheAction(
   action: Action,
   planTree: AxNode,
   runData: ReturnType<typeof createRunDataState>,
-  vault: Vault | undefined,
+  vault: SecretsSource | undefined,
 ): Promise<void> {
   if (action.type === 'type') {
     const resolvedRun = resolveRunPlaceholders(action.text, runData).text;

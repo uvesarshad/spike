@@ -162,6 +162,37 @@
           </div>
         </div>
 
+        <!-- Test login accordion -->
+        <div class="settings-acc" data-acc="login">
+          <button id="accLoginHead" class="settings-acc-head" type="button" aria-expanded="false" aria-controls="accLoginBody">
+            <span class="settings-acc-caret" data-icon="chevron"></span>
+            <span class="settings-acc-title">Test login (optional)</span>
+            <span id="accLoginSummary" class="settings-acc-summary"></span>
+          </button>
+          <div id="accLoginBody" class="settings-acc-body" hidden>
+            <div class="settings-note">
+              <span class="ico" data-icon="info"></span>
+              <span>Save a throwaway test account here instead of typing it into the box on the main screen. It stays on this computer, is filled in only at the moment it is typed into the page, and never appears in a saved result, a saved test, or a prompt you copy. Use a test account, never your real one.</span>
+            </div>
+
+            <label class="settings-field-label" for="setTestUser">Username or email</label>
+            <input id="setTestUser" class="settings-input" type="text" placeholder="test@example.com" autocomplete="off" />
+
+            <label class="settings-field-label" for="setTestPassword">Password</label>
+            <div class="settings-key-line">
+              <div class="settings-key-input-wrap">
+                <input id="setTestPassword" class="settings-input" type="password" placeholder="Password" autocomplete="off" />
+                <button id="setTestPasswordToggle" class="settings-key-toggle" type="button" title="Show / hide password" aria-label="Show or hide the password">
+                  <span class="ico" data-icon="eye"></span>
+                </button>
+              </div>
+              <button id="setTestLoginSave" class="settings-btn-secondary" type="button">Save</button>
+            </div>
+            <span id="setTestLoginStatus" class="settings-key-status"></span>
+            <button id="setTestLoginClear" class="connect-alt" type="button" hidden>Forget this login</button>
+          </div>
+        </div>
+
         <!-- Debugging accordion -->
         <div class="settings-acc" data-acc="debug">
           <button id="accDebugHead" class="settings-acc-head" type="button" aria-expanded="false" aria-controls="accDebugBody">

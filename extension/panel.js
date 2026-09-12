@@ -141,6 +141,12 @@ const setAutoFix = $('setAutoFix');
 const setVideoAssert = $('setVideoAssert');
 const setSpendCap = $('setSpendCap');
 const setStrictOracles = $('setStrictOracles');
+const setTestUser = $('setTestUser');
+const setTestPassword = $('setTestPassword');
+const setTestPasswordToggle = $('setTestPasswordToggle');
+const setTestLoginSave = $('setTestLoginSave');
+const setTestLoginStatus = $('setTestLoginStatus');
+const setTestLoginClear = $('setTestLoginClear');
 const setAutoFixNote = $('setAutoFixNote');
 const setAutoFixNoteText = $('setAutoFixNoteText');
 const connectApp = $('connectApp');
@@ -209,6 +215,7 @@ function probeInstallReachable() {
 const ACCORDIONS = [
   { head: $('accNavHead'), body: $('accNavBody'), summary: $('accNavSummary') },
   { head: $('accBrainHead'), body: $('accBrainBody'), summary: $('accBrainSummary') },
+  { head: $('accLoginHead'), body: $('accLoginBody'), summary: $('accLoginSummary') },
   { head: $('accDebugHead'), body: $('accDebugBody'), summary: $('accDebugSummary') },
 ];
 
@@ -452,6 +459,9 @@ function onPortMessage(msg) {
       break;
     case 'key-saved':
       onKeySaved(msg);
+      break;
+    case 'secret-saved':
+      onTestLoginSaved(msg);
       break;
     default:
       break;
@@ -1557,6 +1567,9 @@ function renderSettings(cfg) {
   // A1: deterministic verdicts default ON when unset
   if (setStrictOracles) setStrictOracles.checked = cfg.strictOracles !== false;
 
+  // A5: an optional saved test login — presence only, never a stored value.
+  renderTestLogin(cfg);
+
   // debug agent
   if (cfg.debugAgent) setDebugAgent.value = cfg.debugAgent;
 
@@ -1568,6 +1581,89 @@ function renderSettings(cfg) {
     focusKeyEntry();
   }
 }
+
+// ---- test login (A5) -------------------------------------------------------
+//
+// A saved test login is the alternative to typing a password into the task box,
+// which used to land verbatim in saved results, saved tests and prompts people
+// copy elsewhere. Nothing here ever holds the value: the panel sends it once to
+// be stored on this machine, and from then on a run only ever refers to it by
+// name. The value is filled in at the instant it is typed into the page.
+
+const TEST_USER_REF = '{{secret:TEST_USER}}';
+const TEST_PASSWORD_REF = '{{secret:TEST_PASSWORD}}';
+
+/** Both halves of a test login saved? */
+function hasSavedLogin() {
+  const saved = currentConfig && currentConfig.testLogin;
+  return Boolean(saved && saved.user && saved.password);
+}
+
+/** Tell the agent it has a login to use, by reference — never by value. Left
+ * alone when nothing is saved, when the task is empty, or when the task already
+ * refers to the saved login. */
+function withSavedLogin(task) {
+  if (!task || !hasSavedLogin()) return task;
+  if (task.includes(TEST_USER_REF) || task.includes(TEST_PASSWORD_REF)) return task;
+  return `${task}\n\nUse ${TEST_USER_REF} / ${TEST_PASSWORD_REF} to log in.`;
+}
+
+/** Reflect what is saved, without ever showing a stored value. */
+function renderTestLogin(cfg) {
+  if (!setTestLoginStatus) return;
+  const saved = (cfg && cfg.testLogin) || {};
+  const both = Boolean(saved.user && saved.password);
+  setTestLoginStatus.classList.remove('err');
+  setTestLoginStatus.textContent = both
+    ? 'Saved on this computer — runs will use it to log in.'
+    : saved.user || saved.password
+      ? 'Half saved — fill in both fields and save again.'
+      : '';
+  if (setTestLoginClear) setTestLoginClear.hidden = !(saved.user || saved.password);
+  const summary = ACCORDIONS[2] && ACCORDIONS[2].summary;
+  if (summary) summary.textContent = both ? 'saved' : 'not set';
+}
+
+function saveTestLogin() {
+  if (!setTestUser || !setTestPassword) return;
+  const user = setTestUser.value.trim();
+  const password = setTestPassword.value;
+  if (!user || !password) {
+    setTestLoginStatus.classList.add('err');
+    setTestLoginStatus.textContent = 'Fill in both fields first.';
+    return;
+  }
+  setTestLoginStatus.classList.remove('err');
+  setTestLoginStatus.textContent = 'saving…';
+  postToSW({ kind: 'set-secret', name: 'TEST_USER', value: user });
+  postToSW({ kind: 'set-secret', name: 'TEST_PASSWORD', value: password });
+  // the value is on its way to storage; stop holding it in the form
+  setTestPassword.value = '';
+}
+
+function clearTestLogin() {
+  setTestLoginStatus.classList.remove('err');
+  setTestLoginStatus.textContent = 'forgetting…';
+  setTestUser.value = '';
+  setTestPassword.value = '';
+  postToSW({ kind: 'clear-secret', name: 'TEST_USER' });
+  postToSW({ kind: 'clear-secret', name: 'TEST_PASSWORD' });
+}
+
+/** Reply to a set/clear. Re-reads the settings so the saved state comes from
+ * storage rather than from what the form happened to hold. */
+function onTestLoginSaved(msg) {
+  if (!setTestLoginStatus) return;
+  if (msg && msg.ok === false) {
+    setTestLoginStatus.classList.add('err');
+    setTestLoginStatus.textContent = msg.message ? ('could not save: ' + msg.message) : 'could not save the test login';
+    return;
+  }
+  postToSW({ kind: 'config-get' });
+}
+
+if (setTestLoginSave) setTestLoginSave.addEventListener('click', saveTestLogin);
+if (setTestLoginClear) setTestLoginClear.addEventListener('click', clearTestLogin);
 
 // ---- saving the key (A4) ---------------------------------------------------
 //
@@ -1666,6 +1762,7 @@ function wireKeyToggle(toggle, input) {
 }
 wireKeyToggle(setKeyToggle, setKey);
 wireKeyToggle(setNavKeyToggle, setNavKey);
+wireKeyToggle(setTestPasswordToggle, setTestPassword);
 
 /** A4: `{ focusKey: true }` opens straight onto the key field of the model that
  * clicks — the one thing a first-run user has to fill in. The focus waits for
@@ -1964,7 +2061,7 @@ function startRun(task) {
     showError('Open the page you want to test in this tab (an http/https page).');
     return;
   }
-  const t = (task || '').trim();
+  const t = withSavedLogin((task || '').trim());
   if (!t) {
     showError('Tell me what to test first, or tap one of the suggestions above.');
     taskInput.focus();

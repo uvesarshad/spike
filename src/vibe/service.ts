@@ -68,6 +68,31 @@ const VAULT_KEY_FOR: Partial<Record<ProviderId, string>> = {
   glm: 'glm',
 };
 
+/* A5 (P0): the ONLY two vault names the side panel may write.
+ *
+ * The panel's "Test login (optional)" card exists so a person stops typing a
+ * real password into the task box. That means the panel now needs to put a
+ * value into the vault — but it must never become a general-purpose vault
+ * writer: the same store holds the user's API keys, and a compromised or buggy
+ * page could otherwise overwrite one. Exactly like vibe.key.*, the name is
+ * looked up in a fixed table and anything else is refused. */
+const TEST_LOGIN_SECRET_NAMES = ['TEST_USER', 'TEST_PASSWORD'] as const;
+export type TestLoginSecretName = (typeof TEST_LOGIN_SECRET_NAMES)[number];
+
+/** True only for the two test-login field names. */
+export function isTestLoginSecretName(name: unknown): name is TestLoginSecretName {
+  return typeof name === 'string' && (TEST_LOGIN_SECRET_NAMES as readonly string[]).includes(name);
+}
+
+/** Narrow an incoming name to a test-login field, or refuse. Thrown before any
+ * vault read or write happens. */
+function requireTestLoginSecretName(method: string, name: unknown): TestLoginSecretName {
+  if (!isTestLoginSecretName(name)) {
+    throw new Error(`${method}: only the test-login fields can be stored here, not "${String(name)}"`);
+  }
+  return name;
+}
+
 /** Which transports each provider supports — panel-facing metadata, not the
  * PlannerMode union (nano's 'ondevice' isn't a PlannerMode), so this is a plain
  * string list: nano is on-device only; ollama is a local API; the hosted models
@@ -333,6 +358,12 @@ export class VibeService {
         spendCapUsd: settings.spendCapUsd,
         // A1 headline feature: deterministic verdicts, safe-by-default true.
         strictOracles: settings.strictOracles ?? true,
+        // A5: whether a test login has been saved. Presence only — the values
+        // stay on this machine and never cross this connection.
+        testLogin: {
+          user: Boolean(vault.get('TEST_USER')),
+          password: Boolean(vault.get('TEST_PASSWORD')),
+        },
         providers,
       };
     });
@@ -408,6 +439,33 @@ export class VibeService {
       if (!vaultName) throw new Error(`vibe.key.clear: provider ${String(p.provider)} takes no key`);
       const cleared = new Vault().delete(vaultName);
       return { ok: true, provider, cleared };
+    });
+
+    // A5 (P0) — vibe.secret.set: store one test-login field (the username or
+    // the password the panel's "Test login (optional)" card collected) in the
+    // encrypted store on this machine. The value is referenced from a task as
+    // {{secret:NAME}} and is only ever swapped in at the moment it is typed
+    // into the page — no model, no report, no recorded test ever sees it.
+    // Names are restricted to the two test-login fields; the value is never
+    // echoed back, only its presence.
+    this.bridge.onRequest('vibe.secret.set', async (params, ctx) => {
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.secret.set: unauthenticated client');
+      const p = (params ?? {}) as { name?: unknown; value?: unknown };
+      const name = requireTestLoginSecretName('vibe.secret.set', p.name);
+      const value = typeof p.value === 'string' ? p.value : '';
+      if (!value) throw new Error(`vibe.secret.set: a non-empty { value } is required for ${name}`);
+      new Vault().set(name, value);
+      return { ok: true, name };
+    });
+
+    // vibe.secret.clear — forget one test-login field. `cleared:false` means
+    // there was nothing stored under that name.
+    this.bridge.onRequest('vibe.secret.clear', async (params, ctx) => {
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.secret.clear: unauthenticated client');
+      const p = (params ?? {}) as { name?: unknown };
+      const name = requireTestLoginSecretName('vibe.secret.clear', p.name);
+      const cleared = new Vault().delete(name);
+      return { ok: true, name, cleared };
     });
   }
 

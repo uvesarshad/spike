@@ -320,6 +320,14 @@ const LITE_KEY_NAME = { gemini: 'gemini', claude: 'anthropic', gpt: 'openai', op
  * (same sweep as src/env-compat.ts). */
 const KEYS_STORAGE_KEY = 'spikeKeys';
 const SETTINGS_STORAGE_KEY = 'spikeSettings';
+/* A5: the test login the panel's optional card collected, kept on this machine
+ * only. Without the desktop helper there is no encrypted store to put it in, so
+ * it lives in the browser's own storage for this extension — the point of the
+ * card is that the value stops being typed into the task box, where it was
+ * ending up in saved runs, recorded tests and prompts people paste elsewhere.
+ * Same two names as the helper: TEST_USER / TEST_PASSWORD, nothing else. */
+const TEST_SECRETS_STORAGE_KEY = 'spikeTestSecrets';
+const TEST_LOGIN_SECRET_NAMES = ['TEST_USER', 'TEST_PASSWORD'];
 const LEGACY_STORAGE_KEYS = [['qaKeys', KEYS_STORAGE_KEY], ['qaSettings', SETTINGS_STORAGE_KEY]];
 
 function storageGet(key) {
@@ -387,6 +395,30 @@ async function liteClearKey(provider) {
   const had = name in keys;
   delete keys[name];
   await storageSet({ [KEYS_STORAGE_KEY]: keys });
+  return had;
+}
+async function getTestSecrets() {
+  return (await storageGet(TEST_SECRETS_STORAGE_KEY)) || {};
+}
+/** Refuse any name but the two test-login fields — this store also has to be
+ * safe to hand a panel, exactly like the API-key path. */
+function requireTestLoginName(name) {
+  if (!TEST_LOGIN_SECRET_NAMES.includes(name)) throw new Error(`"${name}" is not a test-login field`);
+  return name;
+}
+async function liteSetTestSecret(name, value) {
+  requireTestLoginName(name);
+  if (!value) throw new Error('a non-empty value is required');
+  const secrets = await getTestSecrets();
+  secrets[name] = String(value);
+  await storageSet({ [TEST_SECRETS_STORAGE_KEY]: secrets });
+}
+async function liteClearTestSecret(name) {
+  requireTestLoginName(name);
+  const secrets = await getTestSecrets();
+  const had = name in secrets;
+  delete secrets[name];
+  await storageSet({ [TEST_SECRETS_STORAGE_KEY]: secrets });
   return had;
 }
 async function liteSetSettings(patch) {
@@ -504,6 +536,7 @@ async function runLiteFromPanel(port, msg) {
   }
   const settings = await getSettings();
   const keys = await getKeys();
+  const secrets = await getTestSecrets();
   // A4: both model roles need a key here (no desktop helper to sign in for us).
   // The panel turns `code: 'no-key'` into an "Open Settings" button, so the text
   // itself stays plain and says nothing about roles or storage.
@@ -543,6 +576,7 @@ async function runLiteFromPanel(port, msg) {
       url: msg.url,
       allowedHosts,
       keys,
+      secrets,                         // A5: the saved test login, if any
       planner: settings.planner,       // BRAIN role
       navigator: settings.navigator,   // NAVIGATOR role
       browserDeps: makeLiteBrowserDeps(tabId),
@@ -719,7 +753,7 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         case 'config-get': {
           if (!daemonConnected()) {
-            port.postMessage({ kind: 'config', ...buildLiteConfig(await getKeys(), await getSettings()) });
+            port.postMessage({ kind: 'config', ...buildLiteConfig(await getKeys(), await getSettings(), await getTestSecrets()) });
             break;
           }
           try {
@@ -733,7 +767,7 @@ chrome.runtime.onConnect.addListener((port) => {
         case 'config-set': {
           if (!daemonConnected()) {
             await liteSetSettings(msg);
-            port.postMessage({ kind: 'config', ...buildLiteConfig(await getKeys(), await getSettings()) });
+            port.postMessage({ kind: 'config', ...buildLiteConfig(await getKeys(), await getSettings(), await getTestSecrets()) });
             break;
           }
           try {
@@ -771,6 +805,37 @@ chrome.runtime.onConnect.addListener((port) => {
             port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: true, cleared: true });
           } catch (e) {
             port.postMessage({ kind: 'key-saved', provider: msg.provider, ok: false, message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        // A5: store / forget one test-login field. Goes to the desktop helper's
+        // encrypted store when it is connected, otherwise to this browser's own
+        // storage. Values are never echoed back — only whether one is saved.
+        case 'set-secret': {
+          if (!daemonConnected()) {
+            try { await liteSetTestSecret(msg.name, msg.value); port.postMessage({ kind: 'secret-saved', name: msg.name, ok: true }); }
+            catch (e) { port.postMessage({ kind: 'secret-saved', name: msg.name, ok: false, message: String(e && e.message ? e.message : e) }); }
+            break;
+          }
+          try {
+            await sendRequest('vibe.secret.set', { name: msg.name, value: msg.value });
+            port.postMessage({ kind: 'secret-saved', name: msg.name, ok: true });
+          } catch (e) {
+            port.postMessage({ kind: 'secret-saved', name: msg.name, ok: false, message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'clear-secret': {
+          if (!daemonConnected()) {
+            try { const cleared = await liteClearTestSecret(msg.name); port.postMessage({ kind: 'secret-saved', name: msg.name, ok: true, cleared }); }
+            catch (e) { port.postMessage({ kind: 'secret-saved', name: msg.name, ok: false, message: String(e && e.message ? e.message : e) }); }
+            break;
+          }
+          try {
+            const r = await sendRequest('vibe.secret.clear', { name: msg.name });
+            port.postMessage({ kind: 'secret-saved', name: msg.name, ok: true, cleared: !!(r && r.cleared) });
+          } catch (e) {
+            port.postMessage({ kind: 'secret-saved', name: msg.name, ok: false, message: String(e && e.message ? e.message : e) });
           }
           break;
         }
