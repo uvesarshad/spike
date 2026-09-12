@@ -7,7 +7,9 @@
  * as `vibe.*` events.
  *
  * Reverse-RPC methods registered here:
- *   vibe.run    {task, url} → {accepted:true}      (then async vibe.progress/done/error events)
+ *   vibe.run    {task, url, allowHost?, allowHosts?} → {accepted:true}
+ *                             (then async vibe.progress/done/error events;
+ *                             allowHosts = A14's already-consented extra sites)
  *   vibe.status {}          → {busy:boolean}
  *   vibe.fix    {confirmed?} → {accepted:true} | {needsProjectFolder:true, message}
  *                             | {needsConfirmation:true, projectDir}
@@ -245,6 +247,22 @@ export class VibeService {
         throw new Error('vibe.run: invalid allowHost');
       }
       const allowHost = trimmedAllowHost || undefined;
+      // A14: extra hosts the user has already consented to for this site (the
+      // panel's "Allow <site> and run again" button, remembered per pair of
+      // sites). Validated exactly like allowHost — an authenticated caller is
+      // still not a reason to fold arbitrary strings into allowedHosts — and
+      // only honoured alongside a consented allowHost, so this can never widen
+      // a look-only run.
+      const rawAllowHosts = (params as { allowHosts?: unknown }).allowHosts;
+      const extraHosts: string[] = [];
+      if (Array.isArray(rawAllowHosts)) {
+        for (const h of rawAllowHosts) {
+          const t = typeof h === 'string' ? h.trim() : '';
+          if (!t) continue;
+          if (!isPlainHostname(t)) throw new Error('vibe.run: invalid allowHosts entry');
+          extraHosts.push(t);
+        }
+      }
       // A1 (P0): readOnly (look-only mode) for THIS run. The panel derives it
       // from the same per-site "Allow the agent to click & type" checkbox that
       // produces allowHost, so the one control the user sees is the real switch.
@@ -256,7 +274,7 @@ export class VibeService {
       // Fire-and-forget the actual run; the request returns immediately.
       // ctx.clientId binds the whole run (browser calls + UI events) to the
       // Chrome whose panel asked — a second connected Chrome stays untouched.
-      void this.execute(task, url, tabId, allowHost, ctx?.clientId, readOnly);
+      void this.execute(task, url, tabId, allowHost, ctx?.clientId, readOnly, extraHosts);
       return { accepted: true };
     });
 
@@ -571,7 +589,17 @@ export class VibeService {
     });
   }
 
-  private async execute(task: string, url: string, tabId?: number, allowHost?: string, clientId?: number, readOnly?: boolean): Promise<void> {
+  private async execute(
+    task: string,
+    url: string,
+    tabId?: number,
+    allowHost?: string,
+    clientId?: number,
+    readOnly?: boolean,
+    /** A14: extra sites already consented to for this one. Only applied when
+     * `allowHost` is present — they widen a consented run, never a look-only one. */
+    extraHosts: string[] = [],
+  ): Promise<void> {
     const controller = new AbortController();
     this.activeRun = controller;
     this.activeRunTabId = typeof tabId === 'number' ? tabId : null;
@@ -615,7 +643,7 @@ export class VibeService {
       // that decides. Omitted → no override, so the stored/env value stands.
       const config = {
         via: 'extension' as const,
-        ...(allowHost && { allowedHosts: [...loadConfig().allowedHosts, allowHost] }),
+        ...(allowHost && { allowedHosts: [...loadConfig().allowedHosts, allowHost, ...extraHosts] }),
         ...(readOnly !== undefined && { readOnly }),
       };
       const runOpts = {

@@ -1346,3 +1346,19 @@ body {
 .verdict-headline { font-size: 13px; font-weight: 650; line-height: 1.45; color: var(--ink); }
 .verdict-fault { font-size: 11.5px; line-height: 1.45; color: var(--muted); }
 .verdict-next { font-size: 12px; line-height: 1.5; color: var(--ink-2); }
+/* A14: "Allow <site> and run again" under the verdict explanation. */
+.allow-host-btn {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 7px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-accent);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--pill);
+  cursor: pointer;
+}
+.allow-host-btn:hover { background: var(--accent-2); }
+.allow-host-btn:disabled { opacity: .5; cursor: default; }

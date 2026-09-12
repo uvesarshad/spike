@@ -7,7 +7,7 @@
  * 'vibe-panel'. The SW relays our run/status/nano/bridge-status requests to the
  * daemon and broadcasts the daemon's vibe.* events back to us.
  *
- *   panel -> SW : { kind:'run', task, tabId, url, allowHost? }
+ *   panel -> SW : { kind:'run', task, tabId, url, allowHost?, allowHosts? }
  *                 { kind:'decompose', spec, url }  (A7: document → flow list)
  *                 { kind:'cancel' }
  *                 { kind:'fix' }
@@ -138,6 +138,7 @@ const verdictWhy = $('verdictWhy');
 const verdictHeadline = $('verdictHeadline');
 const verdictFault = $('verdictFault');
 const verdictNext = $('verdictNext');
+const allowHostBtn = $('allowHostBtn');
 
 // settings
 const settingsBtn = $('settingsBtn');
@@ -1148,6 +1149,86 @@ function refreshKeyGate() {
 }
 
 // ---- result card -----------------------------------------------------------
+// ---- A14: the cross-site hop -----------------------------------------------
+//
+// A run that follows a link off the site it was pointed at (a payment page, a
+// sign-in provider, a docs subdomain on another domain) is stopped, on purpose:
+// the agent is only trusted to click and type on the site you named. That was
+// a dead end — the reason said so and there was nothing to do about it from
+// here. Now the result card offers to allow that one extra site and run the
+// same test again, and remembers the answer for that pair of sites so the same
+// question is never asked twice.
+
+const ALLOWED_PAIRS_KEY = 'spikeAllowedHostPairs';
+/** { "<site you're testing>>": { "<extra site>": true } } — loaded once at
+ * startup and kept in step with storage on every grant. */
+let allowedHostPairs = {};
+/** The exact instruction the last run was given, so "run again" repeats THAT
+ * and not whatever has since been typed in the box. */
+let lastStartedTask = '';
+
+function loadAllowedHostPairs() {
+  try {
+    chrome.storage.local.get(ALLOWED_PAIRS_KEY, (res) => {
+      void chrome.runtime.lastError;
+      const v = res && res[ALLOWED_PAIRS_KEY];
+      if (v && typeof v === 'object') allowedHostPairs = v;
+    });
+  } catch { /* no storage — consent just isn't remembered between sessions */ }
+}
+
+/** The extra sites the user has already allowed while testing `origin`. */
+function allowedExtrasFor(origin) {
+  const forOrigin = origin && allowedHostPairs[origin];
+  return forOrigin ? Object.keys(forOrigin).filter((h) => forOrigin[h]) : [];
+}
+
+function rememberHostPair(origin, extra) {
+  if (!origin || !extra) return;
+  const forOrigin = allowedHostPairs[origin] || {};
+  forOrigin[extra] = true;
+  allowedHostPairs[origin] = forOrigin;
+  try { chrome.storage.local.set({ [ALLOWED_PAIRS_KEY]: allowedHostPairs }); } catch { /* noop */ }
+}
+
+/** The blocked site named in a host-block reason, or ''. */
+function blockedHostFrom(reason) {
+  const m = /blocked host:\s*([A-Za-z0-9._:-]+)/.exec(String(reason || ''));
+  return m ? m[1] : '';
+}
+
+/** Offer "Allow <site> and run again" when a host block is what ended the run. */
+function renderAllowHostOffer(params, explanation) {
+  allowHostBtn.hidden = true;
+  if (!explanation || explanation.id !== 'host-blocked') return;
+  const host = blockedHostFrom(params && params.reason);
+  const origin = activeTab ? hostOf(activeTab.url) : '';
+  if (!host || !origin || host === origin) return;
+  allowHostBtn.disabled = false;
+  allowHostBtn.textContent = `Allow ${host} and run again`;
+  allowHostBtn.setAttribute('data-host', host);
+  allowHostBtn.hidden = false;
+}
+
+allowHostBtn.addEventListener('click', () => {
+  if (busy) return;
+  const host = allowHostBtn.getAttribute('data-host') || '';
+  const origin = activeTab ? hostOf(activeTab.url) : '';
+  if (!host || !origin) return;
+  rememberHostPair(origin, host);
+  allowHostBtn.hidden = true;
+  const task = lastStartedTask || (taskInput.value || '').trim();
+  if (!task) { showError('Tell me what to test first.'); return; }
+  hideError();
+  resultCard.hidden = true;
+  flowResults.hidden = true;
+  resetFixUi();
+  clearFeed();
+  addProgressLine(`Allowed ${host} for this site. Running the same test again…`);
+  setBusy(true);
+  postToSW(buildRunMessage(task));
+});
+
 /** A14: headline / attribution / next step under the verdict badge. */
 const WHOSE_FAULT_TEXT = {
   'your app': 'This looks like a problem in your app.',
@@ -1167,6 +1248,7 @@ function renderVerdictWhy(params) {
   verdictNext.textContent = e.nextStep || '';
   verdictNext.hidden = !verdictNext.textContent;
   verdictWhy.hidden = false;
+  renderAllowHostOffer(params, e);
 }
 
 function renderResult(params) {
@@ -2499,9 +2581,14 @@ function buildRunMessage(task) {
   // Unchecked → look-only mode: it navigates and checks, never interacts.
   const lookOnly = !consentToggle.checked;
   const runMsg = { kind: 'run', task, tabId: activeTab.id, url: activeTab.url, readOnly: lookOnly };
+  lastStartedTask = task;
   if (!lookOnly) {
     const host = hostOf(activeTab.url);
     if (host) runMsg.allowHost = host;
+    // A14: sites the user has already said yes to while testing this one. The
+    // question is asked once per pair and then never again.
+    const extras = allowedExtrasFor(host);
+    if (extras.length) runMsg.allowHosts = extras;
   }
   return runMsg;
 }
@@ -2576,6 +2663,7 @@ initTheme();
 loadActiveTab();
 requestInitialState();
 probeInstallReachable();
+loadAllowedHostPairs();
 void loadHistory().then(renderHistory);
 
 // poll the bridge connection so the dot stays accurate

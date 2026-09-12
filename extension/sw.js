@@ -749,6 +749,10 @@ async function runLiteFromPanel(port, msg) {
     await attachDebugger(tabId);
     const allowedHosts = ['localhost', '127.0.0.1'];
     if (typeof msg.allowHost === 'string' && msg.allowHost) allowedHosts.push(msg.allowHost);
+    // A14: plus any extra site the user allowed for this one after a cross-site hop.
+    if (Array.isArray(msg.allowHosts)) {
+      for (const h of msg.allowHosts) if (typeof h === 'string' && h) allowedHosts.push(h);
+    }
     const result = await runLite({
       task: msg.task,
       url: msg.url,
@@ -820,6 +824,10 @@ chrome.runtime.onConnect.addListener((port) => {
             // present so old daemons / look-only runs are unaffected.
             const runParams = { task: msg.task, tabId: msg.tabId, url: msg.url };
             if (typeof msg.allowHost === 'string' && msg.allowHost) runParams.allowHost = msg.allowHost;
+            // A14: extra sites the user has already allowed for this one (the
+            // "Allow <site> and run again" button). Forwarded only when present,
+            // so an older helper is unaffected.
+            if (Array.isArray(msg.allowHosts) && msg.allowHosts.length) runParams.allowHosts = msg.allowHosts;
             // A1 (P0): the same checkbox decides look-only mode for THIS run —
             // forwarded explicitly so the stored setting never overrides what the
             // user just ticked. Omitted by older panels → the helper falls back
