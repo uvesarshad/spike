@@ -23,6 +23,10 @@
  *                                model's mapped host)
  *   vibe.coverage.get {host?} → {present:false} | {present:true, routes, interactiveElements,
  *                                perRoute}  (A51: read-only coverageReport() for `host`)
+ *   vibe.spec.decompose {spec, url?, maxFlows?} → {flows:[{name, task}]}
+ *                             (A7: one planning call that turns a pasted
+ *                             document into the flow checklist the panel shows
+ *                             before running anything)
  *
  * Events emitted (via bridge.sendEvent):
  *   vibe.progress     {line}
@@ -44,8 +48,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BridgeServer } from '../bridge/bridge-server.js';
-import { qaRun, type QaRunOptions } from '../engine.js';
+import { createPlanningRouter, qaRun, type QaRunOptions } from '../engine.js';
 import { loadConfig } from '../config.js';
+import { decomposeSpec } from '../driver/spec-decompose.js';
 import { slimReport, type Report } from '../report/report.js';
 import { renderPlainReport, buildFixPrompt } from './fix-prompt.js';
 import { dispatchFix, isAutoFixAcceptedFor, detectFixAgent, NO_PROJECT_FOLDER_MESSAGE } from './auto-fix.js';
@@ -351,6 +356,32 @@ export class VibeService {
         interactiveElements: report.interactiveElements,
         perRoute: report.perRoute,
       };
+    });
+
+    // vibe.spec.decompose — A7: the panel's "Paste a document" mode. ONE call
+    // to the model that plans turns a spec / PRD / story list into a short list
+    // of independent flows; the panel then shows them as a checklist and runs
+    // the ticked ones one after another as ordinary vibe.run calls. Nothing is
+    // driven here — no Chrome, no artifacts, just the planning call — so this
+    // deliberately does NOT take the single-run `busy` lock.
+    this.bridge.onRequest('vibe.spec.decompose', async (params, ctx) => {
+      // A3: same gate as vibe.run — decomposing spends model budget.
+      if (!this.bridge.isAuthenticated(ctx.clientId)) {
+        throw new Error('vibe.spec.decompose: unauthenticated client');
+      }
+      const spec = String((params as { spec?: unknown }).spec ?? '');
+      const rawUrl = (params as { url?: unknown }).url;
+      const url = typeof rawUrl === 'string' && rawUrl.trim() ? rawUrl.trim() : undefined;
+      const rawMax = (params as { maxFlows?: unknown }).maxFlows;
+      const maxFlows =
+        typeof rawMax === 'number' && Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax)) : undefined;
+      const router = createPlanningRouter({});
+      const flows = await decomposeSpec(spec, {
+        planFlows: (prompt, schema, step) => router.planGoals(prompt, schema, step),
+        url,
+        maxFlows,
+      });
+      return { flows };
     });
 
     // vibe.config.get — the panel's settings screen reads the user's current

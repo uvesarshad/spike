@@ -31,6 +31,7 @@ import {
   type QaSettings,
 } from '../vibe/settings-data.js';
 import { slimReport, type Report } from '../report/report.js';
+import { decomposeSpec, MAX_FLOWS, type FlowUnit } from '../driver/spec-decompose.js';
 import { renderPlainReport, buildFixPrompt } from '../vibe/fix-prompt.js';
 
 // Re-export the pure helpers sw.js (plain JS, module SW) needs, so it imports
@@ -39,6 +40,13 @@ export { isSafeModelId, DEFAULT_SETTINGS, defaultModelFor };
 export type { LiteBrowserDeps } from './lite-extension-browser.js';
 export type { LiteNanoDeps } from './lite-nano.js';
 export type { ArtifactBundle } from './browser-artifacts.js';
+export type { FlowUnit } from '../driver/spec-decompose.js';
+
+/** A7: how many flows a pasted document may fan out to when there is no
+ * desktop helper. Every flow is a whole extra run paid for with the user's own
+ * key, and the browser-only path has nowhere to park a long queue, so the
+ * default list is kept short; the panel says so when the document had more. */
+export const LITE_MAX_FLOWS = 8;
 
 /** API keys keyed by the vault CONTRACT name (anthropic/openai/gemini/openrouter/glm). */
 export interface LiteKeys {
@@ -215,6 +223,32 @@ export function buildLiteConfig(
     providers,
     mode: 'lite',
   };
+}
+
+/** A7: the document front door, without a desktop helper. ONE call to the
+ * model that plans, over the same BYOK ladder a run would use, turning a pasted
+ * spec / PRD / story list into a list of independent flows.
+ *
+ * The model is asked for the FULL list (up to MAX_FLOWS) and the cap is applied
+ * here afterwards — that is the only way to honestly tell the user "your
+ * document had more in it than I'm going to run", which asking for 8 in the
+ * prompt would hide. No browser and no artifacts are involved. */
+export async function decomposeSpecLite(opts: {
+  spec: string;
+  keys: LiteKeys;
+  planner: PlannerSelection;
+  navigator: PlannerSelection;
+  url?: string;
+  maxFlows?: number;
+}): Promise<{ flows: FlowUnit[]; cap: number; truncated: boolean; total: number }> {
+  const { adapters, plannerName, navigatorName } = buildLiteLadder(opts.keys, opts.planner, opts.navigator);
+  const router = new ModelRouter(adapters, { navigatorAdapter: navigatorName, plannerAdapter: plannerName });
+  const all = await decomposeSpec(opts.spec, {
+    planFlows: (prompt, schema, step) => router.planGoals(prompt, schema, step),
+    url: opts.url,
+  });
+  const cap = Math.max(1, Math.min(opts.maxFlows ?? LITE_MAX_FLOWS, MAX_FLOWS));
+  return { flows: all.slice(0, cap), cap, truncated: all.length > cap, total: all.length };
 }
 
 export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {

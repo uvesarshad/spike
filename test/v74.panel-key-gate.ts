@@ -140,9 +140,15 @@ const ONDEVICE = { id: 'nano', needsKey: false, hasKey: false };
 {
   const startRun = sliceFunction(panelSrc, 'startRun');
   const gateAt = startRun.indexOf('missingAiKey()');
-  const postAt = startRun.indexOf('postToSW(runMsg)');
+  // A7 moved the run message itself into buildRunMessage(), so what matters is
+  // that NOTHING is posted to the worker before the key gate has had its say —
+  // including the document-mode 'decompose' request, which spends model budget
+  // exactly like a run does.
+  const postAt = startRun.indexOf('postToSW(');
+  const decomposeAt = startRun.indexOf('requestFlows(');
   check('startRun checks for a key', gateAt > 0);
   check('...before it ever posts the run', gateAt > 0 && postAt > gateAt);
+  check('...and before it spends a planning call on a document', gateAt > 0 && decomposeAt > gateAt);
 
   check("the no-key banner offers 'Open Settings'", panelSrc.includes("label: 'Open Settings'"));
   check('...which opens straight onto the key field', panelSrc.includes('openSettings({ focusKey: true })'));

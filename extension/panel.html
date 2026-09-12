@@ -326,6 +326,15 @@
         Open the page you want to test in this tab.
       </div>
 
+      <!-- A7: the two ways in. "One test" is the single sentence this panel has
+           always taken; "Paste a document" takes a spec / PRD / story list and
+           turns it into a checklist of separate tests before running anything. -->
+      <div id="modeRow" class="mode-row" role="group" aria-label="What are you giving me?">
+        <button id="modeTaskBtn" class="mode-btn mode-btn-on" type="button" aria-pressed="true">One test</button>
+        <button id="modeDocBtn" class="mode-btn" type="button" aria-pressed="false">Paste a document</button>
+      </div>
+
+      <div id="suggestWrap">
       <div class="field-label">Try one of these</div>
       <div id="suggestions" class="suggestions">
         <button class="suggestion-card" type="button"
@@ -345,7 +354,9 @@
         </button>
       </div>
 
-      <label class="field-label" for="task">What should I test?</label>
+      </div>
+
+      <label id="taskLabel" class="field-label" for="task">What should I test?</label>
       <textarea id="task" class="text-area" rows="3"
                 placeholder="e.g. Add an item to the cart and complete checkout"></textarea>
 
@@ -362,6 +373,19 @@
       </div>
     </section>
 
+    <!-- A7: the derived flow checklist. Shown between "Run" and any actual
+         testing, so nothing is driven until the user has seen the list and
+         said yes to it. -->
+    <section id="flowsCard" class="flows-card" hidden>
+      <div class="field-label">Here's what I found in your document</div>
+      <div id="flowsNote" class="flows-note" hidden></div>
+      <div id="flowsList" class="flows-list"></div>
+      <div class="run-row">
+        <button id="flowsRunBtn" class="run-btn" type="button">Test these flows</button>
+        <button id="flowsCancelBtn" class="stop-btn" type="button">Cancel</button>
+      </div>
+    </section>
+
     <section id="errorBanner" class="error-banner" hidden></section>
 
     <section class="feed-wrap">
@@ -371,6 +395,8 @@
 
     <section id="resultCard" class="result-card" hidden>
       <div id="verdictBadge" class="verdict-badge"></div>
+      <!-- A7: one row per flow when the run came from a pasted document. -->
+      <div id="flowResults" class="flow-results" hidden></div>
       <pre id="plainReport" class="plain-report"></pre>
 
       <button id="clipBtn" class="clip-btn" type="button" hidden>

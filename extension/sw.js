@@ -29,7 +29,7 @@
  * static import below works. Pro mode (daemon present) is unchanged.
  */
 
-import { runLite, buildLiteConfig, DEFAULT_SETTINGS } from './lite-engine.js';
+import { runLite, buildLiteConfig, DEFAULT_SETTINGS, decomposeSpecLite, LITE_MAX_FLOWS } from './lite-engine.js';
 
 // MANIFEST_VARIANT: token-replaced at pack time by scripts/pack-extension.ts
 // (see stageVariant() there) — 'default' ships with extension/manifest.json
@@ -894,6 +894,48 @@ chrome.runtime.onConnect.addListener((port) => {
             });
           } catch (e) {
             port.postMessage({ kind: 'clip-error', message: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        // A7: "Paste a document" mode — ONE planning call turns the pasted
+        // document into a list of flows the panel shows as a checklist. No
+        // browser work happens here, so it is safe to answer while idle or not.
+        case 'decompose': {
+          const spec = typeof msg.spec === 'string' ? msg.spec : '';
+          const url = typeof msg.url === 'string' ? msg.url : undefined;
+          if (daemonConnected()) {
+            try {
+              const r = await sendRequest('vibe.spec.decompose', { spec, url });
+              const flows = (r && Array.isArray(r.flows)) ? r.flows : [];
+              port.postMessage({ kind: 'flows', flows, truncated: false, total: flows.length });
+            } catch (e) {
+              port.postMessage({ kind: 'flows-error', message: String(e && e.message ? e.message : e) });
+            }
+            break;
+          }
+          // No desktop helper: plan the flows right here with the saved key,
+          // and keep the list short (see LITE_MAX_FLOWS) because every flow is
+          // a whole extra run paid for out of that key.
+          try {
+            const settings = await getSettings();
+            const keys = await getKeys();
+            const r = await decomposeSpecLite({
+              spec,
+              keys,
+              planner: settings.planner,
+              navigator: settings.navigator,
+              url,
+              maxFlows: LITE_MAX_FLOWS,
+            });
+            port.postMessage({
+              kind: 'flows',
+              flows: r.flows,
+              truncated: r.truncated,
+              total: r.total,
+              cap: r.cap,
+            });
+          } catch (e) {
+            port.postMessage({ kind: 'flows-error', message: String(e && e.message ? e.message : e) });
           }
           break;
         }

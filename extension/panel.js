@@ -8,6 +8,7 @@
  * daemon and broadcasts the daemon's vibe.* events back to us.
  *
  *   panel -> SW : { kind:'run', task, tabId, url, allowHost? }
+ *                 { kind:'decompose', spec, url }  (A7: document → flow list)
  *                 { kind:'cancel' }
  *                 { kind:'fix' }
  *                 { kind:'clip' }
@@ -117,6 +118,19 @@ const historyList = $('historyList');
 const siteMapToggle = $('siteMapToggle');
 const siteMapBody = $('siteMapBody');
 const siteMapContent = $('siteMapContent');
+
+// A7: document mode — the "Paste a document" toggle, the derived flow
+// checklist, and the per-flow verdict rows in the result card.
+const modeTaskBtn = $('modeTaskBtn');
+const modeDocBtn = $('modeDocBtn');
+const suggestWrap = $('suggestWrap');
+const taskLabel = $('taskLabel');
+const flowsCard = $('flowsCard');
+const flowsNote = $('flowsNote');
+const flowsList = $('flowsList');
+const flowsRunBtn = $('flowsRunBtn');
+const flowsCancelBtn = $('flowsCancelBtn');
+const flowResults = $('flowResults');
 
 // settings
 const settingsBtn = $('settingsBtn');
@@ -406,8 +420,20 @@ function onPortMessage(msg) {
       // A10: a replayed result must never overwrite a test that is running now.
       if (msg.restored && busy) break;
       finalizePendingStep(true);
+      // A7: mid-sequence, this is one flow's verdict — record it and move on to
+      // the next rather than ending the whole thing here.
+      if (flowQueue && !msg.restored) {
+        noteFlowOutcome(msg, msg.verdict, msg.reason || '');
+        break;
+      }
       setBusy(false);
       renderResult(msg);
+      break;
+    case 'flows':
+      renderFlowChecklist(msg);
+      break;
+    case 'flows-error':
+      onFlowsError(msg.message);
       break;
     case 'history':
       // A10: the worker writes the "recent tests" list and hands it over.
@@ -415,6 +441,15 @@ function onPortMessage(msg) {
       break;
     case 'error':
       finalizePendingStep(false);
+      if (decomposing) { onFlowsError(msg.message); break; }
+      // A7: a missing key stops the whole sequence; anything else is this one
+      // flow's problem, so record it and keep going through the rest.
+      if (flowQueue && msg.code !== 'no-key') {
+        addProgressLine(msg.message || 'Something went wrong.');
+        noteFlowOutcome(null, 'uncertain', msg.message || 'Something went wrong.');
+        break;
+      }
+      if (flowQueue) flowQueue.cancelled = true;
       setBusy(false);
       // A4: "no key yet" is a setup problem, so the banner carries the way to fix it
       if (msg.code === 'no-key') showKeyCta(msg.message);
@@ -424,6 +459,8 @@ function onPortMessage(msg) {
       // The run will also emit done/error; handle both orders gracefully —
       // returning to idle here is safe even if the run already finalized.
       finalizePendingStep(null);
+      // A7: stopping means stopping the whole sequence, not just this flow.
+      if (flowQueue) flowQueue.cancelled = true;
       setBusy(false);
       addProgressLine(msg.cancelled === false ? 'Nothing to stop.' : 'Stopped.');
       break;
@@ -616,7 +653,7 @@ function setBusy(value) {
   busy = value;
   // running → hide Run, show Stop; idle → the reverse
   runBtn.hidden = value;
-  runBtn.textContent = 'Run test';
+  runBtn.textContent = runButtonLabel();
   stopBtn.hidden = !value;
   stopBtn.disabled = false;
   stopBtn.textContent = 'Stop test';
@@ -827,7 +864,7 @@ function refreshRunEnabled() {
   const testable = activeTab && isTestableUrl(activeTab.url);
   const hasTask = (taskInput.value || '').trim().length > 0;
   // Run stays greyed-out until there's both a testable tab AND a task to run.
-  runBtn.disabled = busy || !testable || !hasTask;
+  runBtn.disabled = busy || decomposing || !testable || !hasTask;
 }
 
 function loadActiveTab() {
@@ -1111,6 +1148,10 @@ function renderResult(params) {
     vIcon = 'uncertain'; vLabel = 'UNCERTAIN';
   }
   verdictBadge.innerHTML = qaIcon(vIcon) + '<span>' + vLabel + '</span>';
+
+  // A7: when the run came from a pasted document, the card leads with one row
+  // per flow — the single report below is the flow that most needs attention.
+  renderFlowOutcome(params.flowOutcome);
 
   const reportText = params.plainReport || params.reason || '(no report)';
   plainReport.textContent = reportText;
@@ -2148,7 +2189,270 @@ historyToggle.addEventListener('click', () => {
   historyList.hidden = open;
 });
 
+// ---- A7: document mode ------------------------------------------------------
+//
+// The panel used to take exactly one sentence. A person holding a spec, a PRD
+// or a list of stories had nowhere to put it — pasting the whole thing in the
+// task box sent it verbatim on every model call and quietly tested about 5% of
+// it. Document mode is the missing first step: ONE planning call turns the
+// document into a short list of separate, self-contained flows, the user sees
+// that list and unticks anything they don't want, and then each ticked flow is
+// tested as its own run, one after another, with one combined verdict at the
+// end. Nothing is driven until the user has approved the list.
+
+/** true while the task box is holding a document rather than one instruction. */
+let docMode = false;
+/** The in-flight sequence of flows, or null when a single test is running.
+ * { flows:[{name,task}], index, results:[], cancelled } */
+let flowQueue = null;
+/** The flows last derived from the document, awaiting the user's tick-boxes. */
+let derivedFlows = [];
+/** True while we are waiting for the planning call to come back. */
+let decomposing = false;
+
+function runButtonLabel() {
+  return docMode ? 'Find what to test' : 'Run test';
+}
+
+function setDocMode(on) {
+  if (busy || flowQueue) return;
+  docMode = !!on;
+  modeTaskBtn.classList.toggle('mode-btn-on', !docMode);
+  modeDocBtn.classList.toggle('mode-btn-on', docMode);
+  modeTaskBtn.setAttribute('aria-pressed', String(!docMode));
+  modeDocBtn.setAttribute('aria-pressed', String(docMode));
+  suggestWrap.hidden = docMode;
+  taskLabel.textContent = docMode ? 'Paste your spec, PRD or list of stories' : 'What should I test?';
+  taskInput.rows = docMode ? 10 : 3;
+  taskInput.placeholder = docMode
+    ? 'Paste the whole thing — I\'ll work out the separate things to test and show you the list before running anything.'
+    : 'e.g. Add an item to the cart and complete checkout';
+  runBtn.textContent = runButtonLabel();
+  hideFlowsCard();
+}
+
+modeTaskBtn.addEventListener('click', () => setDocMode(false));
+modeDocBtn.addEventListener('click', () => setDocMode(true));
+
+function hideFlowsCard() {
+  flowsCard.hidden = true;
+  flowsList.textContent = '';
+  flowsNote.hidden = true;
+  derivedFlows = [];
+}
+
+flowsCancelBtn.addEventListener('click', hideFlowsCard);
+
+/** Ask for the flow list. The answer arrives as a 'flows' message. */
+function requestFlows(spec) {
+  decomposing = true;
+  hideFlowsCard();
+  runBtn.disabled = true;
+  runBtn.textContent = 'Reading your document…';
+  addProgressLine('Reading your document and working out what to test…');
+  postToSW({ kind: 'decompose', spec, url: activeTab ? activeTab.url : undefined });
+}
+
+function endDecomposing() {
+  decomposing = false;
+  runBtn.textContent = runButtonLabel();
+  refreshRunEnabled();
+}
+
+function onFlowsError(message) {
+  endDecomposing();
+  showError(message || "I couldn't turn that document into a list of things to test.");
+}
+
+function renderFlowChecklist(msg) {
+  endDecomposing();
+  const flows = Array.isArray(msg.flows) ? msg.flows : [];
+  if (!flows.length) {
+    showError("I couldn't find anything testable in that document. Try a shorter one, or write the flows as a list.");
+    return;
+  }
+  derivedFlows = flows;
+  flowsList.textContent = '';
+  flows.forEach((f, i) => {
+    const row = document.createElement('label');
+    row.className = 'flow-row';
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = true;
+    box.setAttribute('data-flow-index', String(i));
+    box.addEventListener('change', refreshFlowsRunBtn);
+    const body = document.createElement('span');
+    const name = document.createElement('span');
+    name.className = 'flow-name';
+    name.textContent = f && f.name ? String(f.name) : `Flow ${i + 1}`;
+    const task = document.createElement('small');
+    task.className = 'flow-task';
+    task.textContent = f && f.task ? String(f.task) : '';
+    body.appendChild(name);
+    body.appendChild(task);
+    row.appendChild(box);
+    row.appendChild(body);
+    flowsList.appendChild(row);
+  });
+  // The cap only exists when there is no desktop helper — every flow is a whole
+  // extra test paid for with the user's own key.
+  if (msg.truncated) {
+    const total = typeof msg.total === 'number' ? msg.total : flows.length;
+    flowsNote.textContent =
+      `Your document had ${total} things to test in it. Without Spike Core (optional desktop helper) ` +
+      `I'll run the first ${flows.length} — each one is a separate test paid for with your AI key. ` +
+      `Connect Spike Core in Settings to run the rest.`;
+    flowsNote.hidden = false;
+  }
+  refreshFlowsRunBtn();
+  flowsCard.hidden = false;
+  flowsCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function checkedFlows() {
+  const out = [];
+  flowsList.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+    if (!box.checked) return;
+    const i = Number(box.getAttribute('data-flow-index'));
+    if (derivedFlows[i]) out.push(derivedFlows[i]);
+  });
+  return out;
+}
+
+function refreshFlowsRunBtn() {
+  const n = checkedFlows().length;
+  flowsRunBtn.disabled = n === 0;
+  flowsRunBtn.textContent = n === 1 ? 'Test this 1 flow' : `Test these ${n} flows`;
+}
+
+flowsRunBtn.addEventListener('click', () => {
+  if (busy || flowQueue) return;
+  const flows = checkedFlows();
+  if (!flows.length) return;
+  hideFlowsCard();
+  hideError();
+  resultCard.hidden = true;
+  flowResults.hidden = true;
+  resetFixUi();
+  clearFeed();
+  flowQueue = { flows, index: 0, results: [], cancelled: false };
+  runNextFlow();
+});
+
+/** Start the next flow in the queue, or finish up when they're all done. */
+function runNextFlow() {
+  if (!flowQueue) return;
+  if (flowQueue.cancelled || flowQueue.index >= flowQueue.flows.length) {
+    finishFlowQueue();
+    return;
+  }
+  const flow = flowQueue.flows[flowQueue.index];
+  addProgressLine(`Flow ${flowQueue.index + 1} of ${flowQueue.flows.length}: ${flow.name}`);
+  setBusy(true);
+  postToSW(buildRunMessage(withSavedLogin(flow.task)));
+}
+
+/** One flow finished (verdict or error). Record it and move on — one broken
+ * flow must never hide the verdict of the others. */
+function noteFlowOutcome(payload, verdict, reason) {
+  if (!flowQueue) return;
+  const flow = flowQueue.flows[flowQueue.index] || { name: `Flow ${flowQueue.index + 1}`, task: '' };
+  flowQueue.results.push({
+    name: flow.name,
+    task: flow.task,
+    verdict: String(verdict || 'uncertain').toLowerCase(),
+    reason: String(reason || ''),
+    payload: payload || null,
+  });
+  flowQueue.index += 1;
+  runNextFlow();
+}
+
+/** fail beats uncertain beats pass — the same rule the command line uses. */
+function aggregateFlowVerdict(results) {
+  if (!results.length) return 'uncertain';
+  if (results.some((r) => r.verdict === 'fail')) return 'fail';
+  if (results.some((r) => r.verdict === 'uncertain')) return 'uncertain';
+  return 'pass';
+}
+
+function finishFlowQueue() {
+  const q = flowQueue;
+  flowQueue = null;
+  setBusy(false);
+  if (!q || !q.results.length) return;
+  // Show the report and fix prompt of the flow that most needs attention.
+  const primary =
+    q.results.find((r) => r.verdict === 'fail' && r.payload) ||
+    q.results.find((r) => r.verdict === 'uncertain' && r.payload) ||
+    [...q.results].reverse().find((r) => r.payload) ||
+    q.results[q.results.length - 1];
+  const base = (primary && primary.payload) ? { ...primary.payload } : {};
+  base.verdict = aggregateFlowVerdict(q.results);
+  base.flowOutcome = {
+    flows: q.results.map((r) => ({ name: r.name, verdict: r.verdict, reason: r.reason })),
+    attempted: q.results.length,
+    total: q.flows.length,
+    cancelled: q.cancelled,
+  };
+  renderResult(base);
+}
+
+/** The per-flow rows in the result card. Returns true when it rendered any. */
+function renderFlowOutcome(outcome) {
+  if (!outcome || !Array.isArray(outcome.flows) || !outcome.flows.length) {
+    flowResults.hidden = true;
+    flowResults.textContent = '';
+    return false;
+  }
+  flowResults.textContent = '';
+  const TAG_CLASS = { pass: 'verdict-pass', fail: 'verdict-fail', uncertain: 'verdict-uncertain' };
+  const TAG_TEXT = { pass: 'PASS', fail: 'FAIL', uncertain: 'UNSURE' };
+  for (const f of outcome.flows) {
+    const row = document.createElement('div');
+    row.className = 'flow-result';
+    const tag = document.createElement('span');
+    tag.className = `flow-result-tag ${TAG_CLASS[f.verdict] || 'verdict-uncertain'}`;
+    tag.textContent = TAG_TEXT[f.verdict] || 'UNSURE';
+    const body = document.createElement('span');
+    body.className = 'flow-result-body';
+    body.textContent = f.name;
+    if (f.verdict !== 'pass' && f.reason) {
+      const why = document.createElement('small');
+      why.className = 'flow-result-reason';
+      why.textContent = f.reason;
+      body.appendChild(why);
+    }
+    row.appendChild(tag);
+    row.appendChild(body);
+    flowResults.appendChild(row);
+  }
+  if (outcome.attempted < outcome.total) {
+    const note = document.createElement('div');
+    note.className = 'flow-result';
+    note.textContent = `Stopped after ${outcome.attempted} of ${outcome.total} flows.`;
+    flowResults.appendChild(note);
+  }
+  flowResults.hidden = false;
+  return true;
+}
+
 // ---- run -------------------------------------------------------------------
+/** The run message for one instruction — shared by a single test and by every
+ * flow in a document run, so consent/look-only behave identically in both. */
+function buildRunMessage(task) {
+  // A1 (P0): the consent checkbox IS the look-only switch. Checked → the agent
+  // may click and type on this site (its host is allow-listed for this run).
+  // Unchecked → look-only mode: it navigates and checks, never interacts.
+  const lookOnly = !consentToggle.checked;
+  const runMsg = { kind: 'run', task, tabId: activeTab.id, url: activeTab.url, readOnly: lookOnly };
+  if (!lookOnly) {
+    const host = hostOf(activeTab.url);
+    if (host) runMsg.allowHost = host;
+  }
+  return runMsg;
+}
+
 function startRun(task) {
   if (busy) return;
   // A4: no key, no run — the suggestion cards used to start one and fail a few
@@ -2161,6 +2465,21 @@ function startRun(task) {
     showError('Open the page you want to test in this tab (an http/https page).');
     return;
   }
+  // A7: in document mode "Run" does not drive anything — it works out the list
+  // of flows first and hands it back for the user to approve.
+  if (docMode) {
+    const spec = (task || '').trim();
+    if (!spec) {
+      showError('Paste your spec, PRD or list of stories first.');
+      taskInput.focus();
+      return;
+    }
+    hideError();
+    resultCard.hidden = true;
+    clearFeed();
+    requestFlows(spec);
+    return;
+  }
   const t = withSavedLogin((task || '').trim());
   if (!t) {
     showError('Tell me what to test first, or tap one of the suggestions above.');
@@ -2169,21 +2488,13 @@ function startRun(task) {
   }
   hideError();
   resultCard.hidden = true;
+  flowResults.hidden = true;
   resetFixUi();
   clearFeed();
   addProgressLine(`Asking the agent to test: ${activeTab.url}`);
   // optimistic; the SW confirms with 'accepted' or 'error'
   setBusy(true);
-  // A1 (P0): the consent checkbox IS the look-only switch. Checked → the agent
-  // may click and type on this site (its host is allow-listed for this run).
-  // Unchecked → look-only mode: it navigates and checks, never interacts.
-  const lookOnly = !consentToggle.checked;
-  const runMsg = { kind: 'run', task: t, tabId: activeTab.id, url: activeTab.url, readOnly: lookOnly };
-  if (!lookOnly) {
-    const host = hostOf(activeTab.url);
-    if (host) runMsg.allowHost = host;
-  }
-  postToSW(runMsg);
+  postToSW(buildRunMessage(t));
 }
 
 runBtn.addEventListener('click', () => startRun(taskInput.value));

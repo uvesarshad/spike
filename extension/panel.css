@@ -1256,3 +1256,87 @@ body {
 }
 .settings-note .ico-svg { width: 13px; height: 13px; flex: 0 0 13px; margin-top: 2px; color: var(--muted); }
 .settings-note b { color: var(--ink); font-weight: 600; }
+
+/* ---- A7: document mode (paste a spec → a checklist of flows) --------------- */
+.mode-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.mode-btn {
+  flex: 1;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--pill);
+  cursor: pointer;
+  transition: background .14s ease, border-color .14s ease, color .14s ease;
+}
+.mode-btn:hover { background: var(--accent-tint); border-color: var(--accent); color: var(--ink); }
+.mode-btn-on, .mode-btn-on:hover {
+  color: var(--on-accent);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.flows-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--surface-line);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  background: var(--surface);
+  color: var(--ink);
+}
+.flows-note {
+  font-size: 11px;
+  color: var(--amber);
+  background: rgba(245, 194, 74, .08);
+  border: 1px solid rgba(245, 194, 74, .28);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+}
+.flows-list { display: flex; flex-direction: column; gap: 6px; }
+.flow-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.flow-row input { margin: 2px 0 0; flex: 0 0 auto; }
+.flow-name { font-weight: 650; }
+.flow-task { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.flow-results { display: flex; flex-direction: column; gap: 5px; }
+.flow-result {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--surface-line);
+  padding-bottom: 5px;
+}
+.flow-result:last-child { border-bottom: none; padding-bottom: 0; }
+.flow-result-tag {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .02em;
+  padding: 2px 7px;
+  border-radius: var(--pill);
+}
+.flow-result-body { flex: 1; min-width: 0; }
+.flow-result-reason { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
