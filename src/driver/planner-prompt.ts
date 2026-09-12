@@ -144,6 +144,13 @@ Action types:
  * vocabulary the single-tier planner used, plus goalComplete/blocked signals.
  * ------------------------------------------------------------------------- */
 
+/** A1 (P0): the one line both prompts get when look-only mode is on. Without
+ * it neither model knows its clicks will be refused, so the navigator re-issues
+ * the same click until the loop detector fires and the brain concludes the site
+ * is broken — on a site that works fine. */
+const LOOK_ONLY_NOTICE =
+  'LOOK-ONLY MODE: you may navigate and observe but clicks/typing will be refused; use assert_*/finish instead of interacting';
+
 export interface GoalPlannerContext {
   task: string;
   url: string;
@@ -160,6 +167,8 @@ export interface GoalPlannerContext {
    * caller (loop.ts) — see loadSiteMapSummary(). Absent when no app-model
    * file exists, it doesn't cover this host, or it's too stale to trust. */
   siteMapSummary?: string;
+  /** A1 (P0): look-only mode is on for this run — clicks/typing are refused. */
+  readOnly?: boolean;
 }
 
 /** The BRAIN prompt. First call: task + current page → an ordered sub-goal
@@ -173,7 +182,7 @@ export function buildGoalPlannerPrompt(ctx: GoalPlannerContext): string {
   return `You are the PLANNER (the "brain") of a browser QA agent. You do NOT drive the page yourself — a separate NAVIGATOR clicks, types, and looks at the page to carry out each goal you set. Your job is to turn the task into an ordered checklist of concrete sub-goals the navigator can execute one at a time.
 
 TASK: ${ctx.task}
-
+${ctx.readOnly ? `\n${LOOK_ONLY_NOTICE}\n` : ''}
 CURRENT URL: ${ctx.url}
 
 ${UNTRUSTED_CONTENT_NOTICE}
@@ -220,6 +229,8 @@ export interface NavigatorContext {
   maxSteps: number;
   /** Optional planner hint from the last escalation. */
   hint?: string;
+  /** A1 (P0): look-only mode is on for this run — clicks/typing are refused. */
+  readOnly?: boolean;
 }
 
 /** The NAVIGATOR prompt. Same action vocabulary + batching rules as the original
@@ -233,7 +244,7 @@ export function buildNavigatorPrompt(ctx: NavigatorContext): string {
 
 TASK: ${ctx.task}
 
-CURRENT GOAL: ${ctx.goal}
+${ctx.readOnly ? `${LOOK_ONLY_NOTICE}\n\n` : ''}CURRENT GOAL: ${ctx.goal}
 GOAL CHECKLIST (→ is the one you are on now):
 ${checklist}
 ${ctx.hint ? `\nPLANNER HINT: ${ctx.hint}\n` : ''}

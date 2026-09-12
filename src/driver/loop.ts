@@ -717,6 +717,7 @@ export async function runDriverLoop(
           currentGoal,
           siteMapSummary,
           failure,
+          readOnly, // A1 (P0): tell the brain clicks/typing are refused this run
         }),
         step: stepIndex,
       });
@@ -857,7 +858,7 @@ export async function runDriverLoop(
     onStep({ index: stepIndex, kind: 'plan', text: 'Planning goals…' });
     try {
       const goalPlan = await planGoalsOnce(router, {
-        prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text, siteMapSummary }),
+        prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text, siteMapSummary, readOnly }),
         step: stepIndex,
       });
       if (goalPlan.verdict) {
@@ -1054,6 +1055,7 @@ export async function runDriverLoop(
           stepIndex,
           maxSteps,
           hint,
+          readOnly, // A1 (P0): tell the navigator clicks/typing are refused this run
         }),
         step: stepIndex,
       });
@@ -1132,18 +1134,27 @@ export async function runDriverLoop(
     // a stall either way, so it defaults to "not a loop" (the safe
     // direction — see recentTreeTexts.length === 3 below).
     const repeatedActionHadNoEffect = recentTreeTexts.length === 3 && recentTreeTexts[0] === recentTreeTexts[2];
+    // A1 (P0): in look-only mode a refused click/type CANNOT change the page, so
+    // an identical tree proves nothing about a stall — the repeat is the model
+    // not knowing look-only is on. Excluded from the effect-blind check above
+    // and reported as what it actually is, so a look-only run never misreports
+    // as "repeated the same action 3×".
+    const repeatIsLookOnlyRefusal = readOnly && isMutatingAction(actions[0]);
     if (
       firstSig !== null &&
       firstSig === lastBatchFirstSig &&
       steps.length >= 2 &&
       JSON.stringify(steps[steps.length - 1].action) === firstSig &&
       JSON.stringify(steps[steps.length - 2].action) === firstSig &&
-      repeatedActionHadNoEffect
+      (repeatedActionHadNoEffect || repeatIsLookOnlyRefusal)
     ) {
       const visibleErr = visibleErrorText(lastSnapshotAx?.text);
       const outcome = await escalate(
-        `navigator repeated the same action 3×: ${describeAction(actions[0])}` +
-          (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : ''),
+        repeatIsLookOnlyRefusal
+          ? `look-only mode is on, so ${describeAction(actions[0])} was refused — only navigating and checking the page can run. ` +
+            'Re-plan using checks instead of interactions, or run again with look-only mode off.'
+          : `navigator repeated the same action 3×: ${describeAction(actions[0])}` +
+            (visibleErr ? ` — page shows: "${visibleErr}" (likely the real cause)` : ''),
       );
       if (outcome === 'end') break;
       lastBatchFirstSig = null; // brain re-planned — reset the loop signature
@@ -1286,9 +1297,14 @@ export async function runDriverLoop(
       let batchDirty = false;
       try {
         if (readOnly && isMutatingAction(action)) {
+          // A1 (P0): a refused action did NOT happen. Recording it ok:true made
+          // a look-only run read as a page of green ticks that all say
+          // "skipped", so nothing downstream (report, plain report, fix prompt,
+          // history) could tell a real success from a refusal.
           skippedReadOnly = true;
-          record.ok = true;
-          record.description = `read-only mode: skipped ${record.description}`;
+          record.ok = false;
+          record.error = 'skipped: look-only mode';
+          record.description = `look-only mode: skipped ${record.description}`;
         } else if (action.type === 'finish') {
           // trust a fail immediately; confirm a pass with one visual check
           if (action.verdict === 'fail') {
@@ -1546,7 +1562,9 @@ export async function runDriverLoop(
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
       await collectInvariants(browser, record);
-      await captureFailureShot(browser, artifacts, record);
+      // A1 (P0): a look-only refusal is a deliberate no-op, not a failure worth
+      // a screenshot — the page is exactly as the last real step left it.
+      if (!skippedReadOnly) await captureFailureShot(browser, artifacts, record);
       if (record.ok && record.target) lastTouchedTarget = { role: record.target.role, ...(record.target.name && { name: record.target.name }) };
 
       if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
@@ -1591,7 +1609,7 @@ export async function runDriverLoop(
         // progress line can show the resolved drop-target name. A5b: prefix the
         // same "read-only mode: skipped" label the step record carries.
         text: skippedReadOnly
-          ? `read-only mode: skipped ${humanizeAction(record.action, record.target)}`
+          ? `look-only mode: skipped ${humanizeAction(record.action, record.target)}`
           : humanizeAction(record.action, record.target),
         ok: record.ok,
       });

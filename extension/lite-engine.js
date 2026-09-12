@@ -10854,6 +10854,7 @@ Action types:
 - {"type":"wait","ms":number}
 - {"type":"wait_for_email","matching":string,"extractOtpTo":string,"timeoutMs":number} // all optional; poll the configured inbox for a verification email
 - {"type":"finish","verdict":"pass"|"fail","reason":string}`;
+var LOOK_ONLY_NOTICE = "LOOK-ONLY MODE: you may navigate and observe but clicks/typing will be refused; use assert_*/finish instead of interacting";
 function buildGoalPlannerPrompt(ctx) {
   const escalating = !!(ctx.failure || ctx.goals?.length || ctx.currentGoal !== void 0);
   const checklist = ctx.goals?.length ? goalChecklist(ctx.goals, ctx.currentGoal ?? 0) : "";
@@ -10861,7 +10862,9 @@ function buildGoalPlannerPrompt(ctx) {
   return `You are the PLANNER (the "brain") of a browser QA agent. You do NOT drive the page yourself \u2014 a separate NAVIGATOR clicks, types, and looks at the page to carry out each goal you set. Your job is to turn the task into an ordered checklist of concrete sub-goals the navigator can execute one at a time.
 
 TASK: ${ctx.task}
-
+${ctx.readOnly ? `
+${LOOK_ONLY_NOTICE}
+` : ""}
 CURRENT URL: ${ctx.url}
 
 ${UNTRUSTED_CONTENT_NOTICE}
@@ -10900,7 +10903,9 @@ function buildNavigatorPrompt(ctx) {
 
 TASK: ${ctx.task}
 
-CURRENT GOAL: ${ctx.goal}
+${ctx.readOnly ? `${LOOK_ONLY_NOTICE}
+
+` : ""}CURRENT GOAL: ${ctx.goal}
 GOAL CHECKLIST (\u2192 is the one you are on now):
 ${checklist}
 ${ctx.hint ? `
@@ -12342,7 +12347,9 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             goals,
             currentGoal,
             siteMapSummary,
-            failure
+            failure,
+            readOnly
+            // A1 (P0): tell the brain clicks/typing are refused this run
           }),
           step: stepIndex
         });
@@ -12457,7 +12464,7 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       onStep({ index: stepIndex, kind: "plan", text: "Planning goals\u2026" });
       try {
         const goalPlan = await planGoalsOnce(router, {
-          prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text, siteMapSummary }),
+          prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text, siteMapSummary, readOnly }),
           step: stepIndex
         });
         if (goalPlan.verdict) {
@@ -12608,7 +12615,9 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
             history: steps,
             stepIndex,
             maxSteps,
-            hint
+            hint,
+            readOnly
+            // A1 (P0): tell the navigator clicks/typing are refused this run
           }),
           step: stepIndex
         });
@@ -12655,10 +12664,11 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
       }
       const firstSig = actions.length === 1 ? JSON.stringify(actions[0]) : null;
       const repeatedActionHadNoEffect = recentTreeTexts.length === 3 && recentTreeTexts[0] === recentTreeTexts[2];
-      if (firstSig !== null && firstSig === lastBatchFirstSig && steps.length >= 2 && JSON.stringify(steps[steps.length - 1].action) === firstSig && JSON.stringify(steps[steps.length - 2].action) === firstSig && repeatedActionHadNoEffect) {
+      const repeatIsLookOnlyRefusal = readOnly && isMutatingAction(actions[0]);
+      if (firstSig !== null && firstSig === lastBatchFirstSig && steps.length >= 2 && JSON.stringify(steps[steps.length - 1].action) === firstSig && JSON.stringify(steps[steps.length - 2].action) === firstSig && (repeatedActionHadNoEffect || repeatIsLookOnlyRefusal)) {
         const visibleErr = visibleErrorText(lastSnapshotAx?.text);
         const outcome = await escalate(
-          `navigator repeated the same action 3\xD7: ${describeAction(actions[0])}` + (visibleErr ? ` \u2014 page shows: "${visibleErr}" (likely the real cause)` : "")
+          repeatIsLookOnlyRefusal ? `look-only mode is on, so ${describeAction(actions[0])} was refused \u2014 only navigating and checking the page can run. Re-plan using checks instead of interactions, or run again with look-only mode off.` : `navigator repeated the same action 3\xD7: ${describeAction(actions[0])}` + (visibleErr ? ` \u2014 page shows: "${visibleErr}" (likely the real cause)` : "")
         );
         if (outcome === "end") break;
         lastBatchFirstSig = null;
@@ -12748,8 +12758,9 @@ async function runDriverLoop(browser, router, artifacts, task, url, opts) {
         try {
           if (readOnly && isMutatingAction(action)) {
             skippedReadOnly = true;
-            record.ok = true;
-            record.description = `read-only mode: skipped ${record.description}`;
+            record.ok = false;
+            record.error = "skipped: look-only mode";
+            record.description = `look-only mode: skipped ${record.description}`;
           } else if (action.type === "finish") {
             if (action.verdict === "fail") {
               verdict = "fail";
@@ -12953,7 +12964,7 @@ ${m.html ?? ""}`.toLowerCase().includes(matching)) ?? null : messages[messages.l
         record.console = browser.drainConsole();
         record.network = browser.drainNetwork();
         await collectInvariants(browser, record);
-        await captureFailureShot(browser, artifacts, record);
+        if (!skippedReadOnly) await captureFailureShot(browser, artifacts, record);
         if (record.ok && record.target) lastTouchedTarget = { role: record.target.role, ...record.target.name && { name: record.target.name } };
         if (actionCache && cacheBefore && record.ok && !skippedReadOnly) {
           try {
@@ -12991,7 +13002,7 @@ ${m.html ?? ""}`.toLowerCase().includes(matching)) ?? null : messages[messages.l
           // drag_and_drop gains sourceTarget/targetTarget) — humanize THAT so the
           // progress line can show the resolved drop-target name. A5b: prefix the
           // same "read-only mode: skipped" label the step record carries.
-          text: skippedReadOnly ? `read-only mode: skipped ${humanizeAction(record.action, record.target)}` : humanizeAction(record.action, record.target),
+          text: skippedReadOnly ? `look-only mode: skipped ${humanizeAction(record.action, record.target)}` : humanizeAction(record.action, record.target),
           ok: record.ok
         });
         if (record.ok && !skippedReadOnly && (action.type === "click" || action.type === "type" || action.type === "hover" || action.type === "press_key" || action.type === "select_option" || action.type === "navigate" || action.type === "reload" || action.type === "go_back" || action.type === "upload_file" || action.type === "drag_and_drop" || action.type === "blur" || action.type === "mouse" || action.type === "open_tab" || action.type === "switch_tab" || action.type === "close_tab" || action.type === "script")) {
@@ -14725,7 +14736,7 @@ var NAVIGATOR_MODELS = {
   "gpt:cli": "",
   // codex uses its own configured model
   "ollama:api": "llama3.2-vision",
-  "openrouter:api": "anthropic/claude-3.5-haiku",
+  "openrouter:api": "anthropic/claude-haiku-4-5",
   "glm:api": "glm-5.2"
   // z.ai GLM-5.2 (text-only reasoning model; planner-only)
 };
@@ -14739,7 +14750,7 @@ var BRAIN_MODELS = {
   "gpt:cli": "",
   // codex uses its own configured model
   "ollama:api": "llama3.2-vision",
-  "openrouter:api": "anthropic/claude-3.5-sonnet",
+  "openrouter:api": "anthropic/claude-sonnet-5",
   "glm:api": "glm-5.2"
   // z.ai GLM-5.2 (text-only reasoning model)
 };
