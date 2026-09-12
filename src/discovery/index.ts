@@ -18,12 +18,29 @@
 export { discoverApp, type DiscoverAppOptions, type InteractionGatedCandidate } from './discover.js';
 
 export {
+  makeInteractionExplorer,
+  offerableControls,
+  buildExplorePrompt,
+  parseExploreDecision,
+  EXPLORE_JSON_SCHEMA,
+  DEFAULT_MAX_ACTIONS_PER_PAGE,
+  DEFAULT_MAX_ACTIONS_PER_RUN,
+  DEFAULT_MAX_PAGES,
+  type ExplorationResult,
+  type InteractionExplorerOptions,
+  type ExploreBrowser,
+  type ExplorePlanner,
+  type ExploreAxNode,
+} from './explore.js';
+
+export {
   APP_MODEL_VERSION,
   emptyAppModel,
   appModelPath,
   loadAppModel,
   saveAppModel,
   upsertCrawledPage,
+  upsertExploredState,
   upsertRunRoute,
   upsertStaticRoute,
   markRouteExercised,
@@ -37,6 +54,7 @@ export {
   type AppModelRoute,
   type AppModelState,
   type AppModelElement,
+  type ExploredState,
 } from './app-model.js';
 
 export { coverageReport, type CoverageReport, type RouteCoverage, type ElementCoverage, type RouteCoverageDetail } from './coverage.js';

@@ -2,18 +2,21 @@
  * options doc's recommendation: "static seeds -> crawl expands -> AI only
  * for what the crawl provably cannot reach... under a step budget."
  *
- * Layers 1 (static route extraction) and 2 (deterministic crawl) are fully
- * implemented here. Layer 3 (AI exploration of interaction-gated state —
- * modals/wizards the crawler's link-following can never reach) is
- * DELIBERATELY NOT implemented, per the task: this module only identifies
- * candidates (buttons/controls that produced no discoverable navigation) and
- * exposes them through `opts.exploreInteractionGated`, an optional hook that
- * defaults to a no-op. A future caller with model-calling budget plugs in
- * there; this module spends no model calls itself. */
+ * Layers 1 (static route extraction) and 2 (deterministic crawl) are
+ * implemented here and spend nothing. Layer 3 — the exploration pass over
+ * state that only exists after a click (pop-ups, tabs, expanders, wizard
+ * steps), which link-following can never reach — is the one layer that costs
+ * model calls, so this module still does not perform it itself: it identifies
+ * the candidates and hands them to `opts.exploreInteractionGated`, then folds
+ * whatever that returns into the same ledger. E7 supplies the implementation
+ * of that hook (`explore.ts`'s `makeInteractionExplorer`, budget-capped); a
+ * caller with no budget for it leaves the hook off and the ladder stops after
+ * layer 2, exactly as before. */
 
 import { normalizeUrlForActionCache } from '../cache/action-cache.js';
-import { type AppModel, emptyAppModel, findingsForPage, upsertCrawledPage, upsertStaticRoute } from './app-model.js';
+import { type AppModel, emptyAppModel, findingsForPage, upsertCrawledPage, upsertExploredState, upsertStaticRoute } from './app-model.js';
 import { crawlSite, type CrawledPage, type CrawlOptions, type Fetcher } from './crawler.js';
+import type { ExplorationResult, InteractionGatedCandidate } from './explore.js';
 import { parseRobotsTxt, parseSitemapXml, routesFromBundle, routesFromFileList, type RouterKind } from './static-routes.js';
 
 /** How many JavaScript bundles to read for declared routes. A page pulls in a
@@ -21,13 +24,7 @@ import { parseRobotsTxt, parseSitemapXml, routesFromBundle, routesFromFileList, 
  * the same megabyte repeatedly for nothing. */
 const MAX_BUNDLES_READ = 12;
 
-export interface InteractionGatedCandidate {
-  /** The route (normalized URL) the candidate control was found on. */
-  route: string;
-  role: string;
-  name?: string;
-  reason: string;
-}
+export type { ExplorationResult, InteractionGatedCandidate } from './explore.js';
 
 export interface DiscoverAppOptions {
   /** Seed URL — also fixes the crawl's same-origin boundary. */
@@ -53,9 +50,12 @@ export interface DiscoverAppOptions {
    * history forward. Omitted/`null` starts a fresh ledger. Never mutated —
    * `discoverApp` returns a new object. */
   previousModel?: AppModel | null;
-  /** Layer-3 seam (see file header) — NOT implemented by this module beyond
-   * identifying candidates and invoking this hook if supplied. */
-  exploreInteractionGated?: (candidates: InteractionGatedCandidate[]) => Promise<void>;
+  /** Layer-3 seam (see file header): given the controls the crawl could not
+   * follow, open what can be opened and report back what appeared. Anything
+   * returned is folded into the model; returning nothing (the old contract)
+   * is still valid and simply adds nothing. `explore.ts` builds the
+   * budget-capped implementation. */
+  exploreInteractionGated?: (candidates: InteractionGatedCandidate[]) => Promise<ExplorationResult | void>;
 }
 
 function normalizeRoutePatternForComparison(pattern: string): string {
@@ -139,8 +139,15 @@ export async function discoverApp(opts: DiscoverAppOptions): Promise<AppModel> {
   // `findings` field's own note on why a stale finding must not survive.
   model.findings = crawl.pages.flatMap((p) => findingsForPage(p, now));
 
+  // Layer 3. Runs LAST, on purpose: everything the crawl could reach for free
+  // is already in the model, so the pass only ever spends its budget on what
+  // is genuinely left over — and whatever it opens lands in the same ledger
+  // as the rest, indistinguishable to coverage and the report.
   const candidates = crawl.pages.flatMap(findInteractionGatedCandidates);
-  if (candidates.length > 0) await opts.exploreInteractionGated?.(candidates);
+  if (candidates.length > 0) {
+    const explored = await opts.exploreInteractionGated?.(candidates);
+    for (const state of explored?.states ?? []) upsertExploredState(model, state, now);
+  }
 
   return model;
 }

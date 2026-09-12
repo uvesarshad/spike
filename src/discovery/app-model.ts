@@ -40,16 +40,22 @@ export interface AppModelState {
   firstSeenAt: string;
   lastSeenAt: string;
   elements: AppModelElement[];
+  /** E7: the control whose click revealed this state ("Show more", "Accept"),
+   * when it took one. Absent for a state the crawl reached by address alone —
+   * which is the useful distinction: it is the one-line answer to "how does
+   * anyone get here?" for surface that has no address of its own. */
+  revealedBy?: string;
 }
 
 export interface AppModelRoute {
   /** Identity key — see file header. */
   route: string;
   /** Where the ledger first heard about this route: declared somewhere static
-   * (sitemap/robots/route files), reached by the crawl, or — A33 — reached by
-   * a RUN and by nothing else, which is the interaction-gated surface the
-   * crawl structurally cannot see. */
-  source: 'static' | 'crawl' | 'run';
+   * (sitemap/robots/route files), reached by the crawl, reached by the E7
+   * exploration pass (clicked open during mapping), or — A33 — reached by a
+   * RUN and by nothing else, which is the interaction-gated surface the crawl
+   * structurally cannot see. */
+  source: 'static' | 'crawl' | 'run' | 'explore';
   /** Collapsed pattern for a crawl-discovered concrete page (see
    * `crawler.ts`'s `collapseParameterizedPath`); absent for static routes,
    * which are already patterns. */
@@ -239,6 +245,52 @@ export function upsertCrawledPage(model: AppModel, page: CrawledPage, now: strin
 export function upsertStaticRoute(model: AppModel, route: string, now: string = new Date().toISOString()): AppModel {
   if (findRoute(model, route)) return model;
   model.routes.push({ route, source: 'static', discoveredAt: now, exercised: false, states: [], coveredByScripts: [] });
+  return model;
+}
+
+/** E7: one thing the exploration pass clicked open during mapping — either a
+ * new look for a page the crawl already has (a pop-up over it, a tab swapped
+ * in, a section expanded) or a whole address the crawl never had. */
+export interface ExploredState {
+  /** Normalized address the state was seen at. */
+  route: string;
+  structuralSignature: string;
+  elements: InteractiveElement[];
+  /** The control that revealed it, in the words on the page. */
+  revealedBy?: string;
+}
+
+/** Folds one explored state into the ledger. Deliberately the SAME shape
+ * everything else lands in — a state under a route, controls under a state —
+ * rather than a parallel list of "things behind clicks": coverage counts it,
+ * the diff classifies it and the report prints it with no special case, which
+ * is the whole point of putting it here instead of beside it.
+ *
+ * A route the crawl already reached keeps its `source`; only an address the
+ * crawl never had is tagged `explore`, so "what the crawl alone could see"
+ * stays answerable. Re-running discovery merges rather than duplicates: a
+ * state already present is refreshed, and its controls are merged the same
+ * way a re-crawled page's are (prior coverage never dropped). */
+export function upsertExploredState(model: AppModel, explored: ExploredState, now: string = new Date().toISOString()): AppModel {
+  let route = findRoute(model, explored.route);
+  if (!route) {
+    route = { route: explored.route, source: 'explore', discoveredAt: now, exercised: false, states: [], coveredByScripts: [] };
+    model.routes.push(route);
+  }
+  const existing = route.states.find((s) => s.structuralSignature === explored.structuralSignature);
+  if (existing) {
+    existing.lastSeenAt = now;
+    existing.elements = mergeElements(existing.elements, explored.elements, now);
+    if (!existing.revealedBy && explored.revealedBy) existing.revealedBy = explored.revealedBy;
+    return model;
+  }
+  route.states.push({
+    structuralSignature: explored.structuralSignature,
+    firstSeenAt: now,
+    lastSeenAt: now,
+    elements: mergeElements([], explored.elements, now),
+    ...(explored.revealedBy && { revealedBy: explored.revealedBy }),
+  });
   return model;
 }
 
