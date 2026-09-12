@@ -12,7 +12,7 @@
  *                 { kind:'fix' }
  *                 { kind:'clip' }
  *                 { kind:'nano-download' }
- *                 { kind:'status' }
+ *                 { kind:'status', tabId? }
  *                 { kind:'nano' }
  *                 { kind:'bridge-status' }
  *                 { kind:'map-get', host }       (A51: read-only site-map summary)
@@ -33,6 +33,11 @@
  *                   false means "connected but too old — show update UI")
  *                 { kind:'progress', line }       (relayed vibe.progress)
  *                 { kind:'done', ...verdict }     (relayed vibe.done)
+ *                 { kind:'done', ...verdict, restored:true, task, bundle }
+ *                   (A10: the last finished result, replayed on connect/status
+ *                   so closing this panel mid-test no longer loses it)
+ *                 { kind:'history', entries }     (A10: the "recent tests" list,
+ *                   written by the SW when a test finishes — even with no panel)
  *                 { kind:'error', message }       (relayed vibe.error)
  *                 { kind:<plan|click|type|navigate|assert|wait|finish>,
  *                   index, text, ok? }            (relayed vibe.step — see below)
@@ -293,45 +298,16 @@ function bridgeHealthy() {
 let currentConfig = null;
 let debugMode = 'prompt';
 
-// the task + verdict of the most recent result (for history persistence)
-let lastResult = null; // { task, verdict, reason }
 // clipPath of the most recent result, if any (drives the daemon-gated clip btn)
 let lastClipPath = null;
 
 // ---- run history (chrome.storage.local) ------------------------------------
+//
+// A10: the list is WRITTEN by the service worker the moment a test finishes —
+// not here — so a test that ends while this panel is closed still lands in it.
+// The panel only reads and renders it (and takes the fresh list the worker
+// hands over on the 'history' message).
 const HISTORY_KEY = 'qaHistory';
-const HISTORY_CAP = 10;
-
-/* Run history is kept on this machine, but it is still a file that outlives the
- * run and gets read back on screen — so a password someone typed straight into
- * the task box ("log in with me@x.com / hunter2") must not be what we keep. The
- * live run still gets the original text; only the stored copy is trimmed.
- * A {{secret:NAME}} reference is stepped over: it holds no value, and it is the
- * form we want people using. Mirrors src/report/redact.ts. */
-const SECRET_PLACEHOLDER_RE = /\{\{secret:[a-zA-Z0-9_-]+\}\}/g;
-const TASK_SECRET_PATTERNS = [
-  /\b\S+@\S+\s*\/\s*\S+/g,
-  /\b(?:password|passcode|passwd|pwd|pin|otp|token)\s*[:=]\s*\S+/gi,
-];
-function redactTaskSegment(segment) {
-  let out = segment;
-  for (const re of TASK_SECRET_PATTERNS) {
-    re.lastIndex = 0;
-    out = out.replace(re, '[redacted]');
-  }
-  return out;
-}
-function redactTaskText(task) {
-  if (!task) return task;
-  let out = '';
-  let last = 0;
-  SECRET_PLACEHOLDER_RE.lastIndex = 0;
-  for (let m = SECRET_PLACEHOLDER_RE.exec(task); m; m = SECRET_PLACEHOLDER_RE.exec(task)) {
-    out += redactTaskSegment(task.slice(last, m.index)) + m[0];
-    last = m.index + m[0].length;
-  }
-  return out + redactTaskSegment(task.slice(last));
-}
 
 // the active tab we will test (refreshed on activation/update)
 let activeTab = null; // { id, url, title, favIconUrl }
@@ -410,9 +386,15 @@ function onPortMessage(msg) {
       addProgressLine(msg.line);
       break;
     case 'done':
+      // A10: a replayed result must never overwrite a test that is running now.
+      if (msg.restored && busy) break;
       finalizePendingStep(true);
       setBusy(false);
       renderResult(msg);
+      break;
+    case 'history':
+      // A10: the worker writes the "recent tests" list and hands it over.
+      renderHistory(Array.isArray(msg.entries) ? msg.entries : []);
       break;
     case 'error':
       finalizePendingStep(false);
@@ -1107,7 +1089,13 @@ function renderResult(params) {
   resultCard.hidden = false;
   resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-  if (params.durationMs) {
+  if (params.restored) {
+    // A10: replayed by the worker because this panel wasn't open (or was
+    // reopened) when the test finished. Say so, and put the task back in the
+    // box so "run it again" is one tap.
+    addProgressLine('This is the result of your last test — it finished while this panel was closed.');
+    if (!(taskInput.value || '').trim() && typeof params.task === 'string') taskInput.value = params.task;
+  } else if (params.durationMs) {
     addProgressLine(`Done in ${(params.durationMs / 1000).toFixed(1)}s.`);
   } else {
     addProgressLine('Done.');
@@ -1124,13 +1112,9 @@ function renderResult(params) {
     );
   }
 
-  // persist to run history
-  lastResult = {
-    task: (taskInput.value || '').trim(),
-    verdict,
-    reason: reportText,
-  };
-  void saveHistory(lastResult);
+  // A10: the "recent tests" row is written by the service worker when the test
+  // finishes (so it happens even with this panel closed) and pushed here on the
+  // 'history' message — nothing to save from this side.
 }
 
 // ---- copy fix prompt -------------------------------------------------------
@@ -1987,23 +1971,6 @@ function loadHistory() {
   });
 }
 
-async function saveHistory(result) {
-  if (!result) return;
-  const entry = {
-    ts: Date.now(),
-    task: redactTaskText(String(result.task || '')).slice(0, 80),
-    verdict: result.verdict,
-    reason: String(result.reason || '').slice(0, 120),
-  };
-  const list = await loadHistory();
-  list.unshift(entry);
-  const capped = list.slice(0, HISTORY_CAP);
-  try {
-    chrome.storage.local.set({ [HISTORY_KEY]: capped }, () => { void chrome.runtime.lastError; });
-  } catch { /* storage unavailable — non-fatal */ }
-  renderHistory(capped);
-}
-
 function renderHistory(list) {
   historyList.textContent = '';
   if (!list || list.length === 0) {
@@ -2101,7 +2068,9 @@ suggestions.addEventListener('click', (ev) => {
 function requestInitialState() {
   postToSW({ kind: 'bridge-status' });
   postToSW({ kind: 'nano' });
-  postToSW({ kind: 'status' });
+  // A10: the tab, when we already know it — the worker keeps the last result
+  // per tab and replays it in the answer to this.
+  postToSW({ kind: 'status', tabId: activeTab ? activeTab.id : undefined });
   // fetch the planner/debug config so debugMode is known before the first result
   postToSW({ kind: 'config-get' });
 }

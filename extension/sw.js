@@ -289,6 +289,11 @@ function handleBridgeEvent(event, params) {
   if (event === 'vibe.done' || event === 'vibe.error') {
     sendOverlayEnd(lastRunTabId);
   }
+  // A10: remember the verdict (and write its "recent tests" row) even when no
+  // panel is open to receive the message below.
+  if (event === 'vibe.done') {
+    void rememberRunResult(lastRunTabId, params || {}, { task: lastRunTask });
+  }
   if (typeof event === 'string' && event.startsWith('vibe.')) {
     // strip the 'vibe.' prefix into a panel message kind: vibe.progress -> progress
     // (this generic fan-out already covers vibe.step → 'step', vibe.done → 'done', …)
@@ -516,6 +521,177 @@ function sessionRemove(key) {
   });
 }
 
+/* A10: a finished test the panel never got to show.
+ *
+ * A verdict used to reach the UI ONLY as a live message to an open side panel.
+ * Close the panel to watch the page — the thing people naturally do while a
+ * test runs — and the result, the fix prompt and the "recent tests" row were
+ * all simply gone when it was reopened. Both halves of the fix live here, in
+ * the worker, rather than in the panel:
+ *
+ *   1. the finished payload is written to session storage keyed by the tab it
+ *      ran on (kept until Chrome closes, like the run checkpoint above) and
+ *      replayed to a panel the moment it connects or asks how things stand;
+ *   2. the "recent tests" row is written HERE, when the run finishes, instead
+ *      of by the panel on receipt — so it is written whether or not anything
+ *      is listening.
+ */
+const LAST_RESULT_KEY = 'spikeLastResult';
+/** How many tabs' results to keep. A browser can have hundreds of tabs open;
+ * the panel only ever asks about one, so this is just a bound on the store. */
+const LAST_RESULT_TABS = 5;
+/** The "recent tests" list the panel renders — written here, read there. */
+const HISTORY_STORAGE_KEY = 'qaHistory';
+const HISTORY_CAP = 10;
+
+/** What the user asked for, for the run in flight — the panel's task box may
+ * be empty or already retyped by the time the run ends (or closed entirely). */
+let lastRunTask = '';
+
+/* Kept on this machine, but a saved row outlives the run and gets read back on
+ * screen — so a password typed straight into the task box ("log in with
+ * me@x.com / hunter2") must not be what we keep. The live run still gets the
+ * original text; only the stored copy is trimmed. A {{secret:NAME}} reference
+ * is stepped over: it holds no value, and it is the form we want people using.
+ * Mirrors src/report/redact.ts (and, before A10, panel.js). */
+const SECRET_PLACEHOLDER_RE = /\{\{secret:[a-zA-Z0-9_-]+\}\}/g;
+const TASK_SECRET_PATTERNS = [
+  /\b\S+@\S+\s*\/\s*\S+/g,
+  /\b(?:password|passcode|passwd|pwd|pin|otp|token)\s*[:=]\s*\S+/gi,
+];
+function redactTaskSegment(segment) {
+  let out = segment;
+  for (const re of TASK_SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    out = out.replace(re, '[redacted]');
+  }
+  return out;
+}
+function redactTaskText(task) {
+  if (!task) return task;
+  let out = '';
+  let last = 0;
+  SECRET_PLACEHOLDER_RE.lastIndex = 0;
+  for (let m = SECRET_PLACEHOLDER_RE.exec(task); m; m = SECRET_PLACEHOLDER_RE.exec(task)) {
+    out += redactTaskSegment(task.slice(last, m.index)) + m[0];
+    last = m.index + m[0].length;
+  }
+  return out + redactTaskSegment(task.slice(last));
+}
+
+/** Write one row of the "recent tests" list and hand the fresh list to any
+ * open panel (which would otherwise have to re-read storage to notice). */
+async function appendHistoryEntry(task, done) {
+  const entry = {
+    ts: Date.now(),
+    task: redactTaskText(String(task || '')).slice(0, 80),
+    verdict: String((done && done.verdict) || 'uncertain'),
+    reason: String((done && (done.plainReport || done.reason)) || '').slice(0, 120),
+  };
+  const stored = await storageGet(HISTORY_STORAGE_KEY);
+  const list = [entry, ...(Array.isArray(stored) ? stored : [])].slice(0, HISTORY_CAP);
+  await storageSet({ [HISTORY_STORAGE_KEY]: list });
+  broadcastToPanels({ kind: 'history', entries: list });
+  return list;
+}
+
+/** The screenshots and report a run produced are far too big to keep in
+ * storage (one full-page image is megabytes) — this is the small "there IS a
+ * report for this run" note that a reopened panel can act on. */
+function describeBundle(bundle) {
+  if (!bundle || typeof bundle !== 'object') return null;
+  return {
+    runId: bundle.runId || null,
+    screenshotCount: Array.isArray(bundle.screenshots) ? bundle.screenshots.length : 0,
+    reportBytes: typeof bundle.reportJson === 'string' ? bundle.reportJson.length : 0,
+  };
+}
+
+async function readLastResults() {
+  const stored = await sessionGet(LAST_RESULT_KEY);
+  return stored && typeof stored === 'object' ? stored : {};
+}
+
+/** Remember a finished run (and write its history row) so a panel that was
+ * closed when it ended can still show the verdict and the fix prompt. */
+async function rememberRunResult(tabId, done, extra) {
+  const task = (extra && extra.task) || lastRunTask || '';
+  try { await appendHistoryEntry(task, done); } catch { /* the list is a nicety, never fatal */ }
+  if (typeof tabId !== 'number' || !done || typeof done !== 'object') return;
+  try {
+    const all = await readLastResults();
+    // savedAt doubles as the "have I already shown this one?" marker a panel is
+    // compared against, so two results a millisecond apart must not look alike.
+    const prev = all[String(tabId)];
+    const savedAt = Math.max(Date.now(), (prev && prev.savedAt ? prev.savedAt : 0) + 1);
+    all[String(tabId)] = {
+      done,
+      task,
+      savedAt,
+      bundle: describeBundle(extra && extra.bundle),
+    };
+    const kept = Object.entries(all)
+      .sort((a, b) => ((b[1] && b[1].savedAt) || 0) - ((a[1] && a[1].savedAt) || 0))
+      .slice(0, LAST_RESULT_TABS);
+    await sessionSet({ [LAST_RESULT_KEY]: Object.fromEntries(kept) });
+  } catch { /* storage full/unavailable — the live message still went out */ }
+}
+
+/** Drop the stored result for a tab — called when a new run starts on it, so a
+ * panel reopened mid-run is never shown the PREVIOUS verdict as if it were the
+ * current one. */
+async function forgetRunResult(tabId) {
+  if (typeof tabId !== 'number') return;
+  try {
+    const all = await readLastResults();
+    if (!(String(tabId) in all)) return;
+    delete all[String(tabId)];
+    await sessionSet({ [LAST_RESULT_KEY]: all });
+  } catch { /* nothing to lose */ }
+}
+
+/** The tab the panel is looking at, when it didn't tell us. */
+function activeTabId() {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        void chrome.runtime.lastError;
+        resolve(tabs && tabs[0] && typeof tabs[0].id === 'number' ? tabs[0].id : null);
+      });
+    } catch { resolve(null); }
+  });
+}
+
+/** Which stored result we have already handed each open panel, so a panel that
+ * asks how things stand every few seconds isn't re-shown the same verdict. */
+const panelReplayedAt = new WeakMap();
+
+/** Hand a just-connected (or just-asking) panel the last finished result for
+ * its tab, shaped exactly like the live one plus `restored: true`. */
+async function replayLastResult(port, tabId) {
+  if (liteBusy) return; // a run is in flight; its own messages are the truth
+  let id = typeof tabId === 'number' ? tabId : await activeTabId();
+  let all;
+  try { all = await readLastResults(); } catch { return; }
+  let entry = id === null ? null : all[String(id)];
+  // The panel may be pointed at a tab that never ran anything while a result
+  // from the tab we DID drive is sitting there — prefer that over nothing.
+  if (!entry && typeof lastRunTabId === 'number') { entry = all[String(lastRunTabId)]; id = lastRunTabId; }
+  if (!entry || !entry.done) return;
+  if (panelReplayedAt.get(port) === entry.savedAt) return;
+  panelReplayedAt.set(port, entry.savedAt);
+  try {
+    port.postMessage({
+      ...entry.done,
+      kind: 'done',
+      restored: true,
+      task: entry.task,
+      bundle: entry.bundle || null,
+      tabId: id,
+    });
+  } catch { /* port closed under us */ }
+}
+
 // SW cold-start check (runs once per SW init, including a restart after
 // eviction): a leftover checkpoint means the run it named never completed.
 (async () => {
@@ -559,6 +735,8 @@ async function runLiteFromPanel(port, msg) {
   liteAbort = new AbortController();
   liteAbortReason = null;
   lastRunTabId = tabId;
+  lastRunTask = typeof msg.task === 'string' ? msg.task : '';
+  await forgetRunResult(tabId); // A10: the previous verdict for this tab is now stale
   // A22: this run supersedes whatever orphan report (if any) was left from a
   // prior SW life — starting fresh work is the natural "acknowledged" point.
   orphanedRun = null;
@@ -599,6 +777,10 @@ async function runLiteFromPanel(port, msg) {
       broadcastToPanels({ kind: 'error', message: liteAbortReason });
     } else {
       lastLiteBundle = result.bundle;
+      // A10: save before we broadcast — a panel that IS open re-reads the
+      // "recent tests" list on this message, and a panel that isn't gets the
+      // whole thing replayed when it comes back.
+      await rememberRunResult(tabId, result.done, { task: msg.task, bundle: result.bundle });
       broadcastToPanels({ kind: 'done', ...result.done });
     }
   } catch (e) {
@@ -615,6 +797,9 @@ async function runLiteFromPanel(port, msg) {
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'vibe-panel') return;
   panelPorts.add(port);
+  // A10: a panel opening (or reopening) gets the last finished result straight
+  // away, so closing it mid-test no longer throws the verdict away.
+  void replayLastResult(port, null);
 
   port.onMessage.addListener(async (msg) => {
     if (!msg || typeof msg.kind !== 'string') return;
@@ -629,6 +814,8 @@ chrome.runtime.onConnect.addListener((port) => {
             // The panel targets the user's CURRENT tab (tabId/url from
             // chrome.tabs.query). Remember it so the overlay end signal lands there.
             if (msg.tabId !== undefined && msg.tabId !== null) lastRunTabId = msg.tabId;
+            lastRunTask = typeof msg.task === 'string' ? msg.task : '';
+            await forgetRunResult(lastRunTabId); // A10: previous verdict for this tab is stale
             // allowHost (panel consent toggle) is optional — forward it only when
             // present so old daemons / look-only runs are unaffected.
             const runParams = { task: msg.task, tabId: msg.tabId, url: msg.url };
@@ -726,6 +913,9 @@ chrome.runtime.onConnect.addListener((port) => {
           break;
         }
         case 'status': {
+          // A10: a status request is also the panel saying "catch me up" — if a
+          // run finished while it was closed, replay that result now.
+          void replayLastResult(port, typeof msg.tabId === 'number' ? msg.tabId : null);
           // A22: surface a leftover checkpoint from a run the SW never got to
           // finish (evicted/crashed mid-run) so the panel can tell the user
           // rather than staying silent about it.
