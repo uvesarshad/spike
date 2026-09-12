@@ -5,6 +5,7 @@ import './env-compat.js'; // aliases legacy QA_* env vars onto SPIKE_* — must 
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import readline from 'node:readline';
 import { Command } from 'commander';
 import os from 'node:os';
 import { loadConfig, type QaConfig } from './config.js';
@@ -641,24 +642,79 @@ program
     console.log(prompt);
   });
 
+/** A5 (P0): read one line from stdin without echoing it.
+ *
+ * `spike secret set <name> <value>` put the value in the shell's history and on
+ * screen. Omitting the value now prompts for it instead: keystrokes are
+ * swallowed while typing (a paste included), so nothing is left behind in the
+ * scrollback or in ~/.bash_history.
+ *
+ * Two paths, because both are real: an interactive terminal gets the muted
+ * prompt; a piped stdin (`echo … | spike secret set NAME`) just reads the line,
+ * which is how a script or a password manager would feed it.
+ */
+function readSecretFromStdin(promptText: string): Promise<string> {
+  const input = process.stdin;
+  const output = process.stdout;
+  const interactive = Boolean(input.isTTY && output.isTTY);
+  return new Promise((resolve, reject) => {
+    const rl = readline.createInterface({ input, output, terminal: interactive });
+    if (interactive) {
+      // readline writes every keystroke back to the terminal; replace that with
+      // nothing for everything after the prompt itself.
+      let shown = false;
+      (rl as unknown as { _writeToOutput: (s: string) => void })._writeToOutput = (s: string) => {
+        if (!shown) {
+          output.write(promptText);
+          shown = true;
+        }
+      };
+    }
+    let answered = false;
+    rl.question(interactive ? promptText : '', (answer) => {
+      answered = true;
+      rl.close();
+      if (interactive) output.write('\n');
+      resolve(answer.trim());
+    });
+    // stdin ended without a line (an empty pipe, or Ctrl-D): resolve empty so
+    // the caller reports "nothing entered" instead of hanging forever.
+    rl.on('close', () => {
+      if (!answered) {
+        if (interactive) output.write('\n');
+        resolve('');
+      }
+    });
+    rl.on('error', reject);
+  });
+}
+
 program
   .command('secret')
   .description('manage the local encrypted vault — secrets are typed via {{secret:NAME}} and never reach any model')
   .argument('<action>', 'set | get | list | delete')
   .argument('[name]', 'secret name')
-  .argument('[value]', 'secret value (for set)')
+  .argument('[value]', 'secret value (for set) — omit it to be prompted, hidden as you type')
   .option('--reveal', 'with get: print the value (default only confirms existence)', false)
-  .action((action: string, name?: string, value?: string, opts?: { reveal: boolean }) => {
+  .action(async (action: string, name?: string, value?: string, opts?: { reveal: boolean }) => {
     const vault = new Vault();
     switch (action) {
-      case 'set':
-        if (!name || value === undefined) {
-          console.error('usage: spike secret set <name> <value>');
+      case 'set': {
+        if (!name) {
+          console.error('usage: spike secret set <name> [value]   (omit the value to type it hidden)');
           process.exit(2);
         }
-        vault.set(name, value);
+        // A5: no value on the command line → ask for it with echo off, so a
+        // password is never written into the shell's history or left on screen.
+        const secret = value !== undefined ? value : await readSecretFromStdin(`Value for ${name} (hidden): `);
+        if (!secret) {
+          console.error('nothing entered — no secret was saved');
+          process.exit(2);
+        }
+        vault.set(name, secret);
         console.log(`set "${name}" — use it in tasks as {{secret:${name}}}`);
         break;
+      }
       case 'get': {
         if (!name) { console.error('usage: spike secret get <name> [--reveal]'); process.exit(2); }
         const v = vault.get(name);

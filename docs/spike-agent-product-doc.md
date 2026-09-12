@@ -73,7 +73,7 @@ Escalate only on uncertainty. a11y-tree-first extraction (~800 tok/page); vision
 
 ### Tier-4 guardrails (non-negotiable — one "AI deleted my products" thread kills the product)
 
-- **Local credential vault:** encrypted on-device; typed via CDP `Input.insertText`; **the model never sees credentials**; auto-redacted from logs, screenshots, and shareable clips.
+- **Local credential vault:** encrypted on-device; typed via CDP `Input.insertText`; **the model never sees credentials**; redacted from logs, reports, recorded tests and the fix prompt (text only — screenshots and clips are NOT redacted today; see E15).
 - **Read-only by default** on third-party sites; mutations require explicit confirm or pre-approved allowlist.
 - **Domain scoping** per task + complete action audit log.
 - Trust as differentiator: *"your passwords never leave your machine"* — no cloud browser-agent can claim this.
@@ -85,7 +85,7 @@ Escalate only on uncertainty. a11y-tree-first extraction (~800 tok/page); vision
 **The spectacle is free.** Token efficiency and showmanship don't conflict: the compressed a11y-tree goes to the model; the live theater goes to the human at zero token cost. Same run, two audiences.
 
 - **Ghost cursor mode** — animated cursor trails, click ripples, plain-English caption bar narrating each step ("Logging in… ✓ Trying checkout… ✗ found it"), green/red step ticks, pass celebration. Satisfying to watch ≈ satisfying to share.
-- **Auto-generated replay clip** — every run ends with a ready-to-post MP4/GIF (cursor trails + captions + verdict card, subtle watermark, secrets auto-redacted). One-tap share. **Every user demo is our ad** (the Loom loop).
+- **Auto-generated replay clip** — every run ends with a ready-to-post MP4/GIF (cursor trails + captions + verdict card, subtle watermark). One-tap share. *(Pixel-level redaction of on-screen secrets is not implemented — E15; review a clip before posting it.)* **Every user demo is our ad** (the Loom loop).
 - **Launch video writes itself:** split screen — Lovable building an app | our ghost cursor testing it, catching the broken checkout, producing the fix prompt → paste → re-run → all green. 45 seconds, zero jargon.
 - Grok's verdict on the format: "almost perfectly aligned" with what's currently pulling millions of views in builder circles.
 
