@@ -1,5 +1,5 @@
 > Source audit: [26-09-12-audit-usability-autonomy](./26-09-12-audit-usability-autonomy.md)
-> Updated: 26-09-13 · 41/81 done
+> Updated: 26-09-13 · 50/81 done
 
 ## Execution protocol (for the agent working this list)
 
@@ -82,7 +82,7 @@ Work the list **top to bottom** (severity order). For every task:
 - [ ] "Check this site" zero-input mode — covered by A24's second task; tick together. (E2)
 - [ ] "Test login (optional)" vault-backed card — covered by A5's third task; tick together. (E3)
 - [x] `spike doctor` + resolved-config view — covered by A21; tick together. (E4)
-- [ ] Document intake with a user-confirmed flow checklist — covered by A7; tick together. (E5)
+- [x] Document intake with a user-confirmed flow checklist — covered by A7; tick together. (E5)
 - [ ] Route/flow fan-out orchestrator with a coverage line on every non-pass — covered by A8; tick together. (E6)
 - [ ] Implement the AI exploration pass in the `exploreInteractionGated` seam (`src/discovery/discover.ts:46`) under a step budget so modals, wizards and auth-gated surface enter the app-model. (E7)
 - [ ] Optional "What should be true at the end?" field → precise assertion verbs — covered by A17; tick together. (E8)
@@ -91,7 +91,7 @@ Work the list **top to bottom** (severity order). For every task:
 - [x] Tier-0 oracles in lite mode — covered by A17's second task; tick together. (E11)
 - [x] Metamorphic relations only from observed actions + cart-badge fixture — covered by A2; tick together. (E12)
 - [ ] Result card v2 (inline screenshot, one-line verdict in user words, whose-fault attribution, three buttons) — covered by A14/A15/A19; tick when all three land. (E13)
-- [ ] Reason translation layer — covered by A14; tick together. (E14)
+- [x] Reason translation layer — covered by A14; tick together. (E14)
 - [ ] Redaction pass incl. pixel-blur on password-field screenshots: after A5, blur the bounding box of any password-type input in step screenshots before writing them (CDP `DOM.getBoxModel` + canvas blur in the runner page, or skip the screenshot for that step). (E15)
 - [ ] Reopenable history + Saved tests card — covered by A19; tick together. (E16)
 - [ ] CLI prints the plain report by default + `schemaVersion` — covered by A30; tick together. (E17)
