@@ -3237,7 +3237,11 @@ function startSiteCheck() {
   findingPages = true;
   refreshCheckSiteBtn();
   addProgressLine('Looking around your site to see what pages there are…');
-  postToSW({ kind: 'check-site', url: activeTab.url });
+  // E7: while looking around, also open pop-ups, tabs and "show more" sections
+  // so the pages behind them get checked too. That means pressing a few things
+  // on the site, so it follows the same switch everything else does — if the
+  // user has not allowed clicking here, the look-around only follows links.
+  postToSW({ kind: 'check-site', url: activeTab.url, allowClicks: !!consentToggle.checked });
 }
 
 /** The pages came back. Turn each one into a test and hand the list to the

@@ -22,7 +22,7 @@ import { applyExpectation, resolveSuite, skipsForMissingAuth, SUITE_CONFIG_FILEN
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
 import { isSuiteReporter, writeSuiteReport, SUITE_REPORTERS } from './suite/reporters.js';
 import { DEFAULT_BASELINE_DIR, blessBaseline } from './assertions/differential.js';
-import { browserFetcher, checkInstruction, checkTargets, coverageReport, DEFAULT_CHECK_PAGES, diffAppModel, discoverApp, emptyAppModel, hasBlockingFindings, loadAppModel, renderCheckSummary, saveAppModel, type AppModel, type AppModelFinding, type Fetched } from './discovery/index.js';
+import { browserFetcher, checkInstruction, checkTargets, coverageReport, DEFAULT_CHECK_PAGES, diffAppModel, discoverApp, emptyAppModel, explorationOptions, hasBlockingFindings, loadAppModel, renderCheckSummary, saveAppModel, type AppModel, type AppModelFinding, type Fetched } from './discovery/index.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
 import { installService, uninstallService } from './service/install-service.js';
@@ -440,6 +440,12 @@ interface MapCrawlOptions {
   via?: 'cdp' | 'extension' | 'playwright';
   storageState?: string;
   headless?: boolean;
+  /** E7: after the walk, open a few of the things the walk could not follow —
+   * a pop-up, a "show more" section, a tab, the next step of a form — and add
+   * whatever appears to the map. Needs a real Chrome (there is nothing to
+   * click in a plain network fetch) and costs a small, capped number of calls
+   * to the cheap model, so it is `map`'s default and `check`'s opt-in. */
+  explore?: boolean;
 }
 
 /** Build the model for a site, opening (and closing) a browser when the crawl
@@ -479,7 +485,20 @@ async function buildSiteMap(url: string, opts: MapCrawlOptions, progress?: (line
       progress?.('Signed in using the saved session.');
     }
     progress?.('Walking the site…');
-    return await discoverApp({ ...common, fetcher: browserFetcher(session.browser, { sameOrigin: new URL(url).origin }) });
+    // E7: the walk itself only ever follows links. Everything that appears
+    // after a click — a pop-up, an expander, a tab, step 2 of a form — is added
+    // afterwards by the exploration pass, under its own small fixed budget.
+    return await discoverApp({
+      ...common,
+      fetcher: browserFetcher(session.browser, { sameOrigin: new URL(url).origin }),
+      ...explorationOptions({
+        enabled: opts.explore === true,
+        browser: session.browser,
+        planner: createPlanningRouter(),
+        allowedOrigin: new URL(url).origin,
+        ...(progress && { onProgress: progress }),
+      }),
+    });
   } finally {
     await session.close().catch(() => {});
   }
@@ -517,9 +536,10 @@ program
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
   .option('--no-browser', 'fetch pages over the network instead of opening them in Chrome: faster, but it cannot sign in and cannot see a page that draws itself with JavaScript')
   .option('--headless', 'run Chrome without a window', false)
+  .option('--no-explore', 'skip opening pop-ups, tabs and "show more" sections after the walk — faster and free, but the map then only covers what a link leads to')
   .option('--diff', 'compare against the stored map and print what changed', false)
   .option('--json', 'machine-readable output', false)
-  .action(async (url: string, opts: { maxDepth?: number; maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; diff: boolean; json: boolean }) => {
+  .action(async (url: string, opts: { maxDepth?: number; maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; diff: boolean; json: boolean }) => {
     const root = process.cwd();
     const previousModel = loadAppModel(root);
     const progress = opts.json ? undefined : (l: string) => console.error(l);
@@ -534,6 +554,9 @@ program
           via: opts.via,
           storageState: opts.storageState,
           headless: opts.headless,
+          // Only a real Chrome can open anything; over the network there is
+          // nothing to click, so the flag is quietly irrelevant there.
+          explore: opts.explore !== false && opts.browser,
         },
         progress,
       );
@@ -583,8 +606,9 @@ program
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
   .option('--no-browser', 'find the pages over the network instead of opening them in Chrome: faster, but it cannot sign in and cannot see a page that draws itself with JavaScript')
   .option('--headless', 'run Chrome without a window', false)
+  .option('--explore', 'while finding the pages, also open pop-ups, tabs and "show more" sections so what is behind them gets checked too — this does press a few things on your site', false)
   .option('--json', 'machine-readable output', false)
-  .action(async (url: string, opts: { maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; json: boolean }) => {
+  .action(async (url: string, opts: { maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; json: boolean }) => {
     const root = process.cwd();
     const maxPages = opts.maxPages && opts.maxPages > 0 ? opts.maxPages : DEFAULT_CHECK_PAGES;
     const progress = opts.json ? undefined : (l: string) => console.error(l);
@@ -601,6 +625,9 @@ program
           via: opts.via,
           storageState: opts.storageState,
           headless: opts.headless,
+          // E7: opt-in here, unlike `map`. A check nobody typed a word for is
+          // look-only on purpose, and opening things means pressing them.
+          explore: opts.explore === true && opts.browser,
         },
         progress,
       );

@@ -19,6 +19,7 @@ export { discoverApp, type DiscoverAppOptions, type InteractionGatedCandidate } 
 
 export {
   makeInteractionExplorer,
+  explorationOptions,
   offerableControls,
   buildExplorePrompt,
   parseExploreDecision,
@@ -27,6 +28,7 @@ export {
   DEFAULT_MAX_ACTIONS_PER_RUN,
   DEFAULT_MAX_PAGES,
   type ExplorationResult,
+  type ExplorationWiring,
   type InteractionExplorerOptions,
   type ExploreBrowser,
   type ExplorePlanner,

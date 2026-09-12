@@ -348,6 +348,29 @@ export function makeInteractionExplorer(opts: InteractionExplorerOptions): (cand
   };
 }
 
+/** What a caller passes to switch the pass on. `enabled` false — or a missing
+ * browser or model — means "leave it off", which is the pre-E7 behaviour. */
+export interface ExplorationWiring extends Omit<InteractionExplorerOptions, 'browser' | 'planner'> {
+  enabled: boolean;
+  browser?: ExploreBrowser | null | undefined;
+  planner?: ExplorePlanner | null | undefined;
+}
+
+/** The one line every caller adds to a `discoverApp(...)` call to switch the
+ * exploration pass on — spread it into the options object.
+ *
+ * It exists so the decision "should this walk open things?" is made in ONE
+ * place and reads the same from the command line and from the panel, and so
+ * that neither caller has to know that "off" means leaving a particular option
+ * out. Off returns an empty object, which spreads to nothing. */
+export function explorationOptions(opts: ExplorationWiring): {
+  exploreInteractionGated?: (candidates: InteractionGatedCandidate[]) => Promise<ExplorationResult>;
+} {
+  const { enabled, browser, planner, ...budget } = opts;
+  if (!enabled || !browser || !planner) return {};
+  return { exploreInteractionGated: makeInteractionExplorer({ ...budget, browser, planner }) };
+}
+
 function labelOf(c: OfferedControl): string {
   return `${c.role}|${c.name.toLowerCase()}`;
 }

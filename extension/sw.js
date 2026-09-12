@@ -1078,7 +1078,11 @@ chrome.runtime.onConnect.addListener((port) => {
           if (!url) { port.postMessage({ kind: 'check-error', message: 'Open the site you want checked in this tab first.' }); break; }
           if (bridgeHealthy()) {
             try {
-              const r = await sendRequest('vibe.check.site', { url });
+              // E7: `explore` asks the helper to also open pop-ups, tabs and
+              // "show more" sections while it looks around, so what is behind
+              // them gets checked too. Sent only when the user has allowed
+              // clicking on this site; an older helper simply ignores it.
+              const r = await sendRequest('vibe.check.site', { url, explore: !!msg.allowClicks });
               port.postMessage({
                 kind: 'check-pages',
                 pages: (r && Array.isArray(r.pages)) ? r.pages : [],

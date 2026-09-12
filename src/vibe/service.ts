@@ -79,6 +79,7 @@ import {
   browserFetcher,
   checkTargets,
   checkInstruction,
+  explorationOptions,
   DEFAULT_CHECK_PAGES,
   type AppModel,
 } from '../discovery/index.js';
@@ -596,7 +597,15 @@ export class VibeService {
       this.busy = true;
       try {
         progress('Looking around your site…');
-        const model = await this.crawlSite(url, maxPages * 2, ctx?.clientId);
+        // E7: `explore` comes from the panel's "allow click & type on this
+        // site" switch. Absent (an older panel) → link-following only, exactly
+        // as before.
+        const explore = (params as { explore?: unknown }).explore === true;
+        const model = await this.crawlSite(url, maxPages * 2, {
+          explore,
+          ...(ctx?.clientId !== undefined && { clientId: ctx.clientId }),
+          onProgress: progress,
+        });
         saveAppModel(model, process.cwd());
         const targets = checkTargets(model, url, maxPages);
         const everything = checkTargets(model, url, Number.MAX_SAFE_INTEGER);
@@ -852,7 +861,8 @@ export class VibeService {
   /** A24: walk a site in the user's attached Chrome. Opens a tab of its own
    * (the user's cookies still apply — they are the profile's, not the tab's)
    * so the page they are reading is never steered out from under them. */
-  private async crawlSite(url: string, maxPages: number, clientId?: number): Promise<AppModel> {
+  private async crawlSite(url: string, maxPages: number, opts: { explore: boolean; clientId?: number; onProgress?: (line: string) => void }): Promise<AppModel> {
+    const clientId = opts.clientId;
     const session = await openBrowserSession(
       { via: 'extension' as const },
       { bridge: this.bridge, ...(clientId !== undefined && { clientId }) },
@@ -863,6 +873,17 @@ export class VibeService {
         fetcher: browserFetcher(session.browser, { sameOrigin: new URL(url).origin }),
         previousModel: loadAppModel(process.cwd()),
         crawl: { maxPages },
+        // E7: the walk itself only follows links. When the user has allowed
+        // clicking on this site, a small capped pass afterwards also opens
+        // pop-ups, tabs and "show more" sections so what is behind them is in
+        // the map — and therefore gets checked — too.
+        ...explorationOptions({
+          enabled: opts.explore,
+          browser: session.browser,
+          planner: createPlanningRouter({}),
+          allowedOrigin: new URL(url).origin,
+          ...(opts.onProgress && { onProgress: opts.onProgress }),
+        }),
       });
     } finally {
       await session.close().catch(() => {});

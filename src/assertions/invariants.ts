@@ -96,6 +96,14 @@ function originOf(url: string): string | null {
 
 const UNHANDLED_REJECTION_RE = /\(in promise\)|unhandled.*rejection/i;
 
+/** E10: a same-origin write request that the server accepted. Used by
+ * checkSubmitEffect below as the "the form really was submitted" half of the
+ * form-submit-with-no-effect rule. GET is excluded deliberately — a click that
+ * fires a background GET (analytics, a prefetch, a search-as-you-type) is not
+ * a submission, and counting it would fire this rule on half the clicks on a
+ * modern page. */
+const SUBMIT_METHODS = new Set(['POST', 'PUT', 'PATCH']);
+
 // ---- Tier 0a: drain-derived invariants ------------------------------------
 
 /** Derivable from drains + url, no page evaluation needed. */
@@ -162,6 +170,56 @@ export function checkDrainInvariants(input: {
   return out;
 }
 
+/** E10: "it said it saved, and nothing happened."
+ *
+ * The signature of a half-wired form in a hand-assembled app: the submit
+ * really does reach the server, the server really does answer 200, and then
+ * the page just sits there — no navigation, no confirmation, no new content,
+ * no error. Every single-surface check passes (no console error, no failed
+ * request, the click itself "worked"), so nothing downstream notices.
+ *
+ * This joins the two halves the step already has: the network drain for the
+ * step (was there an accepted write request?) and the same before/after
+ * reading the dead-click check uses (did anything observably change?). Both
+ * true → one warning.
+ *
+ * Warn, never a failure, for the same reason the dead-click check is a
+ * warning: a submit can legitimately change only something we cannot see
+ * (a background save whose only feedback is a toast that has already faded,
+ * an idempotent re-save). Deliberately same-origin only — a third-party
+ * write (analytics beacon, chat widget) says nothing about this app. */
+export function checkSubmitEffect(input: {
+  network: NetworkEntry[];
+  /** True when the URL or the page content observably changed around the
+   * action — i.e. `verifyActionEffect().changes.length > 0`. */
+  pageChanged: boolean;
+  url: string;
+  /** Accessible name of the control that was activated, for the message. */
+  targetName?: string;
+  config?: InvariantConfig;
+}): InvariantViolation[] {
+  if (input.pageChanged) return [];
+  const out: InvariantViolation[] = [];
+  const cap = new Capped(input.config);
+  const targetOrigin = originOf(input.url);
+
+  for (const entry of input.network) {
+    if (!SUBMIT_METHODS.has(String(entry.method || '').toUpperCase())) continue;
+    if (typeof entry.status !== 'number' || entry.status < 200 || entry.status > 299) continue;
+    const entryOrigin = originOf(entry.url);
+    if (!targetOrigin || !entryOrigin || entryOrigin !== targetOrigin) continue;
+    const what = input.targetName ? `submitting "${input.targetName}"` : 'the submission';
+    cap.push(out, {
+      rule: 'inert-submit',
+      severity: 'warn',
+      detail: `${what} was accepted by the server (${entry.status}) but nothing on the page changed — no new page, no confirmation, no visible update.`,
+      evidence: truncateEvidence(`${entry.method} ${entry.url} -> ${entry.status}`),
+    });
+  }
+
+  return out;
+}
+
 // ---- Tier 0b: in-page probe ------------------------------------------------
 
 /** In-page probe JS (string literal, IIFE returning a JSON-serialisable
@@ -176,6 +234,17 @@ export const INVARIANT_PROBE_JS = `
   try {
     var PROBE_CAP = 50;
     var TOKEN_RE = /\\b(?:undefined|NaN|null|Infinity)\\b/;
+    // E10 — raw translation key shown instead of the translated words
+    // ("common.errors.notFound"). Dotted lowercase-rooted paths of 3+ segments.
+    var I18N_KEY_RE = /^[a-z]+(\\.[a-zA-Z_]+){2,}$/;
+    // ...but a bare hostname and a filename have exactly that shape, so the
+    // last segment is checked against the usual suspects before reporting.
+    var NOT_A_KEY_TAIL_RE = /^(?:com|org|net|io|co|uk|gov|edu|dev|app|ai|me|xyz|js|ts|jsx|tsx|mjs|cjs|css|scss|html|htm|json|xml|yml|yaml|md|txt|csv|pdf|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|map|min|lock|log|zip|gz)$/i;
+    // E10 — a price that quietly failed to compute. Currency symbols/codes,
+    // and the broken values that show up where a number should be.
+    var CURRENCY_RE = /[$\\u00a3\\u00a5\\u20ac\\u20b9\\u20a9\\u20bd]|\\b(?:USD|EUR|GBP|INR|JPY|CAD|AUD|CHF|CNY|BRL|MXN|ZAR)\\b/;
+    var BROKEN_VALUE_RE = /\\b(?:NaN|undefined|null|Infinity)\\b/;
+    var ZERO_PRICE_RE = /[$\\u00a3\\u00a5\\u20ac\\u20b9\\u20a9\\u20bd]\\s*0(?:[.,]0{1,2})?(?![.,]?\\d)/;
 
     function isVisible(el) {
       try {
@@ -191,26 +260,83 @@ export const INVARIANT_PROBE_JS = `
       }
     }
 
-    // ---- rendered-undefined: visible text nodes only, skip script/style ----
+    // ---- one visible-text pass feeding three rules --------------------------
+    // rendered-undefined (raw undefined/NaN in the copy), untranslated-text
+    // (E10, a raw translation key), and broken-price (E10, a broken value
+    // sitting next to a currency symbol). One traversal, three collectors —
+    // each with its own cap so a chatty page can't starve the others.
     var renderedUndefined = [];
+    var untranslatedKeys = [];
+    var brokenValues = [];
     try {
       var walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT, null);
       var visited = 0;
       var node;
-      while ((node = walker.nextNode()) && visited < 20000 && renderedUndefined.length < PROBE_CAP) {
+      while ((node = walker.nextNode()) && visited < 20000) {
         visited++;
         var text = node.nodeValue;
         if (!text) continue;
         var trimmed = text.trim();
         if (!trimmed) continue;
-        var hasToken = TOKEN_RE.test(trimmed) || trimmed.indexOf('[object Object]') !== -1;
-        if (!hasToken) continue;
         var parent = node.parentElement;
         if (!parent) continue;
         var tag = parent.tagName ? parent.tagName.toLowerCase() : '';
         if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'title') continue;
         if (!isVisible(parent)) continue;
-        renderedUndefined.push(trimmed.slice(0, 300));
+
+        if (renderedUndefined.length < PROBE_CAP) {
+          if (TOKEN_RE.test(trimmed) || trimmed.indexOf('[object Object]') !== -1) {
+            renderedUndefined.push(trimmed.slice(0, 300));
+          }
+        }
+
+        // ---- untranslated-text (E10) ----
+        if (untranslatedKeys.length < PROBE_CAP && trimmed.length <= 80 && I18N_KEY_RE.test(trimmed)) {
+          var segments = trimmed.split('.');
+          var tail = segments[segments.length - 1];
+          if (!NOT_A_KEY_TAIL_RE.test(tail)) {
+            // A link's own href being shown as its text is a URL, not a key.
+            var anchor = parent.closest ? parent.closest('a[href]') : null;
+            var isOwnHref = false;
+            try {
+              isOwnHref = !!anchor && String(anchor.getAttribute('href') || '').indexOf(trimmed) !== -1;
+            } catch (e) {}
+            if (!isOwnHref) untranslatedKeys.push(trimmed.slice(0, 300));
+          }
+        }
+
+        // ---- broken-price (E10) ----
+        // "Near a currency symbol" = in the same small text container, or in
+        // the immediately neighbouring one. The container is capped so a whole
+        // page of prose that happens to contain a "$" somewhere doesn't count.
+        if (brokenValues.length < PROBE_CAP) {
+          var brokenHere = BROKEN_VALUE_RE.test(trimmed);
+          var zeroHere = ZERO_PRICE_RE.test(trimmed);
+          if (brokenHere || zeroHere) {
+            var context = trimmed;
+            if (!zeroHere) {
+              try {
+                var box = parent;
+                for (var hop = 0; hop < 3 && box; hop++) {
+                  var boxText = box.textContent ? box.textContent.replace(/\\s+/g, ' ').trim() : '';
+                  if (boxText.length > 200) break;
+                  context = boxText || context;
+                  if (CURRENCY_RE.test(context)) break;
+                  var sib = box.previousElementSibling || box.nextElementSibling;
+                  if (sib && sib.textContent) {
+                    var sibText = sib.textContent.replace(/\\s+/g, ' ').trim();
+                    if (sibText.length <= 80 && CURRENCY_RE.test(sibText)) {
+                      context = sibText + ' ' + context;
+                      break;
+                    }
+                  }
+                  box = box.parentElement;
+                }
+              } catch (e) {}
+            }
+            if (CURRENCY_RE.test(context)) brokenValues.push(context.slice(0, 300));
+          }
+        }
       }
     } catch (e) {}
 
@@ -281,6 +407,8 @@ export const INVARIANT_PROBE_JS = `
 
     return {
       renderedUndefined: renderedUndefined,
+      untranslatedKeys: untranslatedKeys,
+      brokenValues: brokenValues,
       brokenImages: brokenImages,
       overflow: overflow,
       landmarks: landmarks,
@@ -319,6 +447,34 @@ export function checkProbeInvariants(raw: unknown, config?: InvariantConfig): In
       rule: 'rendered-undefined',
       severity: 'error',
       detail: 'Visible text renders a raw undefined/NaN/null/Infinity/[object Object] token.',
+      evidence: truncateEvidence(item),
+    });
+  }
+
+  // untranslated-text (E10) — a raw translation key on screen instead of the
+  // words it stands for. Warn, not error: a docs page or a settings screen can
+  // legitimately display a dotted key, and config.allowText exists for exactly
+  // the app that does it on purpose.
+  for (const item of asArray(root.untranslatedKeys)) {
+    if (typeof item !== 'string' || !item) continue;
+    if (allowText.some((a) => typeof a === 'string' && a.length > 0 && item.includes(a))) continue;
+    cap.push(out, {
+      rule: 'untranslated-text',
+      severity: 'warn',
+      detail: 'The page shows a raw text key instead of the words it stands for.',
+      evidence: truncateEvidence(item),
+    });
+  }
+
+  // broken-price (E10) — "NaN"/"undefined"/a zero total sitting where a price
+  // belongs, the usual tell of a price calculation that failed quietly.
+  for (const item of asArray(root.brokenValues)) {
+    if (typeof item !== 'string' || !item) continue;
+    if (allowText.some((a) => typeof a === 'string' && a.length > 0 && item.includes(a))) continue;
+    cap.push(out, {
+      rule: 'broken-price',
+      severity: 'warn',
+      detail: 'A price on the page shows a broken or empty value.',
       evidence: truncateEvidence(item),
     });
   }
