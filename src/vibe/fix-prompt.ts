@@ -6,6 +6,7 @@
  * yields the same prose (testable, no token spend, no flake). */
 
 import type { Report, StepRecord } from '../report/report.js';
+import { redactTypedText } from '../report/redact.js';
 import type { NetworkEntry } from '../ports/browser-port.js';
 
 /** Humanize a single step into "what the robot did", preferring the role+name
@@ -24,7 +25,12 @@ export function humanizeStep(step: StepRecord): string {
     case 'click':
       return `clicked ${targetPhrase ?? 'an element'}`;
     case 'type':
-      return `typed ${JSON.stringify(a.text)} into ${targetPhrase ?? 'a field'}`;
+      // A5 (P0): second line of defence. The driver already hides a value typed
+      // into a credential field before the step is recorded, but this text is
+      // read straight into the panel AND into the fix prompt people paste into a
+      // third-party coding tool — so an older report, a hand-built one, or a
+      // future caller that skips the driver still cannot leak a password here.
+      return `typed ${JSON.stringify(redactTypedText(a.text, t))} into ${targetPhrase ?? 'a field'}`;
     case 'hover':
       return `hovered over ${targetPhrase ?? 'an element'}`;
     case 'press_key':

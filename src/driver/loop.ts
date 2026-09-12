@@ -25,6 +25,7 @@ import { loadAppModel, appModelPath, type AppModel } from '../discovery/index.js
 import type { ModelRouter } from '../router/model-router.js';
 import type { ArtifactStore } from '../report/artifacts.js';
 import { describeAction, slimReport, type FailingStep, type Report, type SpendSummary, type StepRecord, type RunVerdict } from '../report/report.js';
+import { isSecretTarget, redactSecretText } from '../report/redact.js';
 import {
   buildExtractPrompt,
   EXTRACT_JSON_SCHEMA,
@@ -1258,6 +1259,21 @@ export async function runDriverLoop(
             } catch {
               /* best-effort: a stamp failure must not fail the step */
             }
+          }
+        }
+        // A5 (P0): a value typed into a credential-looking field never enters
+        // the record in the clear. The vaulted {{secret:NAME}} form is already
+        // safe (resolved at execute time only, below) and is preserved
+        // verbatim so the step stays replayable; a literal the user typed into
+        // the task — the actual leak — becomes "•••" here, BEFORE the record is
+        // pushed, so every downstream surface (report.json, the recorded
+        // script, the plain-English report, the fix prompt) inherits it.
+        // `action` itself is untouched: the browser still types the real value.
+        if (record.action.type === 'type' && isSecretTarget({ ...record.target, testId: t?.testId })) {
+          const hidden = redactSecretText(record.action.text);
+          if (hidden !== record.action.text) {
+            record.action = { ...record.action, text: hidden };
+            record.description = describeAction(record.action);
           }
         }
       } else if (action.type === 'drag_and_drop') {
