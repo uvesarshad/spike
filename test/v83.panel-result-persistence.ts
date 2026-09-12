@@ -266,6 +266,48 @@ function makePort() {
   );
 }
 
+// ---- 6. a test Chrome interrupted is rendered, not swallowed ---------------
+{
+  // the worker has always computed this and put it in every status reply; the
+  // panel read only `busy` and dropped it on the floor
+  check(
+    'the panel acts on an interrupted test',
+    /if \(!msg\.busy && msg\.orphanedRun\) showInterruptedRun\(msg\.orphanedRun\)/.test(panelSrc),
+  );
+  const SENTENCE = 'Your last test stopped when Chrome put the extension to sleep — run it again.';
+  check('...with the plain sentence', panelSrc.includes(SENTENCE));
+  check("...and a way to start over", /label: 'Run again'/.test(panelSrc));
+  check(
+    '...that actually starts the test',
+    /label: 'Run again',[\s\S]{0,200}startRun\(taskInput\.value\)/.test(panelSrc),
+  );
+  check(
+    '...only once, not on every poll',
+    panelSrc.includes('interruptedRunShown === id'),
+  );
+  check(
+    'the task from the interrupted test is put back in the box',
+    /if \(task && !\(taskInput\.value \|\| ''\)\.trim\(\)\) taskInput\.value = task;/.test(panelSrc),
+  );
+
+  const jargon = ['service worker', 'evicted', 'orphan', 'MV3', 'daemon', 'runId'];
+  check(
+    'the interrupted-test sentence is plain English',
+    jargon.every((w) => !SENTENCE.toLowerCase().includes(w.toLowerCase())),
+  );
+}
+
+// ---- 7. the panel keeps asking while a test is running ----------------------
+{
+  const tail = panelSrc.slice(panelSrc.indexOf('// poll the bridge connection'));
+  check('the few-second poll also asks how the test is doing', /if \(busy\) postToSW\(\{ kind: 'status'/.test(tail));
+  check('...only while one is running', tail.indexOf('if (busy)') > tail.indexOf("kind: 'bridge-status'"));
+  check(
+    'the "already running" line is printed on the transition, not every poll',
+    /if \(msg\.busy && !wasBusy\) addProgressLine/.test(panelSrc),
+  );
+}
+
 const failed = checks.filter(([, ok]) => !ok);
 console.log(`\n${checks.length - failed.length}/${checks.length} v83 checks passed`);
 process.exit(failed.length ? 1 : 0);

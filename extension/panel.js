@@ -25,7 +25,9 @@
  *                 { kind:'nano-progress', status } (download progress)
  *                 { kind:'clip', name, mime, dataBase64 } (last replay clip)
  *                 { kind:'clip-error', message }
- *                 { kind:'status', busy }
+ *                 { kind:'status', busy, orphanedRun? }
+ *                   (A10: orphanedRun = {runId, startedAt, task} of a test
+ *                   Chrome interrupted by putting the extension to sleep)
  *                 { kind:'nano', availability }
  *                 { kind:'bridge-status', connected, protocolVersion, compatible }
  *                   (A4: protocolVersion/compatible are null until the daemon
@@ -373,10 +375,17 @@ function onPortMessage(msg) {
     case 'nano':
       setNano(msg.availability);
       break;
-    case 'status':
+    case 'status': {
+      const wasBusy = busy;
       setBusy(!!msg.busy);
-      if (msg.busy) addProgressLine('(a test is already running — showing live progress)');
+      // only on the transition — this now arrives every few seconds while a
+      // test is running, and one line per poll would bury the real progress
+      if (msg.busy && !wasBusy) addProgressLine('(a test is already running — showing live progress)');
+      // A10: Chrome can put the extension to sleep mid-test. That was already
+      // noticed and then thrown away; now it is said out loud.
+      if (!msg.busy && msg.orphanedRun) showInterruptedRun(msg.orphanedRun);
       break;
+    }
     case 'accepted':
       setBusy(true);
       hideError();
@@ -995,6 +1004,33 @@ function showError(message, action) {
 function hideError() {
   errorBanner.hidden = true;
   keyCtaShown = false;
+}
+
+// ---- a test Chrome interrupted (A10) ---------------------------------------
+//
+// Chrome shuts an idle extension down, and it can do that while a test is
+// still going — the feed simply stops and the panel drifts back to idle with
+// nothing said. The worker has always noticed this on its next start; until
+// now nobody rendered it. Say what happened, in the user's terms, and make
+// starting over one tap.
+
+/** The interrupted test we have already told the user about, so the few-second
+ * status poll doesn't re-raise the same banner over and over. */
+let interruptedRunShown = null;
+
+function showInterruptedRun(run) {
+  const id = run && run.runId ? String(run.runId) : 'unknown';
+  if (interruptedRunShown === id || busy) return;
+  interruptedRunShown = id;
+  const task = run && typeof run.task === 'string' ? run.task : '';
+  if (task && !(taskInput.value || '').trim()) taskInput.value = task;
+  showError('Your last test stopped when Chrome put the extension to sleep — run it again.', {
+    label: 'Run again',
+    onClick: () => {
+      hideError();
+      startRun(taskInput.value);
+    },
+  });
 }
 
 /** The banner action that takes the user to the key field. */
@@ -2082,4 +2118,11 @@ probeInstallReachable();
 void loadHistory().then(renderHistory);
 
 // poll the bridge connection so the dot stays accurate
-setInterval(() => postToSW({ kind: 'bridge-status' }), 3000);
+setInterval(() => {
+  postToSW({ kind: 'bridge-status' });
+  // A10: while a test is marked as running, keep asking how it is doing. Its
+  // messages can stop arriving — the panel was closed when it finished, or
+  // Chrome put the extension to sleep mid-test — and without this the panel
+  // sits on a spinner for a test that ended long ago.
+  if (busy) postToSW({ kind: 'status', tabId: activeTab ? activeTab.id : undefined });
+}, 3000);
