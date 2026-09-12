@@ -105,7 +105,13 @@ export const DEFAULT_SETTINGS: QaSettings = {
 /** NAVIGATOR (cheap) default model per provider+mode. Called on EVERY step, so
  * cheap tiers throughout — that is the whole point of the ladder. Also the
  * back-compat / legacy table: defaultModelFor() with no role falls back here so
- * every pre-split 2-arg caller keeps today's behaviour. */
+ * every pre-split 2-arg caller keeps today's behaviour.
+ *
+ * Model ids last verified current 2026-09-12 (A31) — the OpenRouter slug was a
+ * generation behind (`anthropic/claude-3.5-haiku`); bumped to match the
+ * `claude:api`/`claude:cli` id already in use (`claude-haiku-4-5`). Re-check
+ * this table periodically; every id here must also pass isSafeModelId (see
+ * test/v71.model-table-ids.ts). */
 const NAVIGATOR_MODELS: Record<string, string> = {
   'gemini:api': 'gemini-3-flash-preview',
   'gemini:cli': 'gemini-3-flash-preview',
@@ -114,13 +120,19 @@ const NAVIGATOR_MODELS: Record<string, string> = {
   'gpt:api': 'gpt-4o-mini',
   'gpt:cli': '', // codex uses its own configured model
   'ollama:api': 'llama3.2-vision',
-  'openrouter:api': 'anthropic/claude-3.5-haiku',
+  'openrouter:api': 'anthropic/claude-haiku-4-5',
   'glm:api': 'glm-5.2', // z.ai GLM-5.2 (text-only reasoning model; planner-only)
 };
 
 /** BRAIN (smart) default model per provider+mode. The brain is consulted rarely,
  * so a pricier/smarter tier barely affects run cost. gemini has no confirmed Pro
- * id here, so it keeps flash; cli variants match their api brain value. */
+ * id here, so it keeps flash; cli variants match their api brain value.
+ *
+ * Model ids last verified current 2026-09-12 (A31) — the OpenRouter slug was a
+ * generation behind (`anthropic/claude-3.5-sonnet`); bumped to match the
+ * `claude:api`/`claude:cli` id already in use (`claude-sonnet-5`). Re-check
+ * this table periodically; every id here must also pass isSafeModelId (see
+ * test/v71.model-table-ids.ts). */
 const BRAIN_MODELS: Record<string, string> = {
   'gemini:api': 'gemini-3-flash-preview', // no confirmed pro id — keep flash
   'gemini:cli': 'gemini-3-flash-preview',
@@ -129,7 +141,7 @@ const BRAIN_MODELS: Record<string, string> = {
   'gpt:api': 'gpt-4o',
   'gpt:cli': '', // codex uses its own configured model
   'ollama:api': 'llama3.2-vision',
-  'openrouter:api': 'anthropic/claude-3.5-sonnet',
+  'openrouter:api': 'anthropic/claude-sonnet-5',
   'glm:api': 'glm-5.2', // z.ai GLM-5.2 (text-only reasoning model)
 };
 
