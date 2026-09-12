@@ -78,7 +78,7 @@ Work the list **top to bottom** (severity order). For every task:
 
 ## Suggested enhancements
 
-- [ ] Three-screen first run: one key with provider auto-detect from the key prefix (`sk-ant-` → Claude, `AIza` → Gemini, `sk-` → GPT), current tab, one consent switch; never asks for a second key unless the user opens Advanced. (E1)
+- [x] Three-screen first run: one key with provider auto-detect from the key prefix (`sk-ant-` → Claude, `AIza` → Gemini, `sk-` → GPT), current tab, one consent switch; never asks for a second key unless the user opens Advanced. (E1) <!-- note: shown only while nothing at all is stored; the detected key is saved for BOTH roles with the model left blank (each role keeps its own default). `sk-or-` → OpenRouter added alongside the three in the brief. Advanced opens the existing Settings untouched. Tests in test/v110.first-run.ts. -->
 - [x] "Check this site" zero-input mode — covered by A24's second task; tick together. (E2)
 - [x] "Test login (optional)" vault-backed card — covered by A5's third task; tick together. (E3)
 - [x] `spike doctor` + resolved-config view — covered by A21; tick together. (E4)
