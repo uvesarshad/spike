@@ -543,7 +543,10 @@ async function runLiteFromPanel(port, msg) {
       navigator: settings.navigator,   // NAVIGATOR role
       browserDeps: makeLiteBrowserDeps(tabId),
       nanoDeps: liteNanoDeps,
-      readOnly: settings.readOnly,        // safety: skip mutating actions when ON (default)
+      // A1 (P0): the panel's per-site "Allow the agent to click & type" checkbox
+      // is the look-only switch — it decides THIS run. Absent (older panel) →
+      // fall back to the stored setting.
+      readOnly: typeof msg.readOnly === 'boolean' ? msg.readOnly : settings.readOnly,
       spendCapUsd: settings.spendCapUsd,  // safety: abort if estimated paid spend exceeds this
       strictOracles: settings.strictOracles, // A1: deterministic verdicts, safe-by-default ON
       onProgress: (line) => broadcastToPanels({ kind: 'progress', line }),
@@ -589,9 +592,14 @@ chrome.runtime.onConnect.addListener((port) => {
             // chrome.tabs.query). Remember it so the overlay end signal lands there.
             if (msg.tabId !== undefined && msg.tabId !== null) lastRunTabId = msg.tabId;
             // allowHost (panel consent toggle) is optional — forward it only when
-            // present so old daemons / read-only runs are unaffected.
+            // present so old daemons / look-only runs are unaffected.
             const runParams = { task: msg.task, tabId: msg.tabId, url: msg.url };
             if (typeof msg.allowHost === 'string' && msg.allowHost) runParams.allowHost = msg.allowHost;
+            // A1 (P0): the same checkbox decides look-only mode for THIS run —
+            // forwarded explicitly so the stored setting never overrides what the
+            // user just ticked. Omitted by older panels → the helper falls back
+            // to its stored setting, as before.
+            if (typeof msg.readOnly === 'boolean') runParams.readOnly = msg.readOnly;
             const result = await sendRequest('vibe.run', runParams);
             port.postMessage({ kind: 'accepted', ...(result || {}) });
           } catch (e) {

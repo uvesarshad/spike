@@ -196,17 +196,6 @@
               </span>
             </label>
 
-            <label class="settings-toggle-row" for="setReadOnly">
-              <span class="settings-toggle-copy">
-                <span class="settings-toggle-label">Read-only (safe) mode</span>
-                <span class="settings-toggle-sub">On (recommended): the agent looks and reports but never clicks, types, or submits — it can't change or delete anything. Off: the agent may interact with the page. Turn off only when you want it to actually drive your app.</span>
-              </span>
-              <span class="switch">
-                <input id="setReadOnly" class="switch-input" type="checkbox" />
-                <span class="switch-track"><span class="switch-thumb"></span></span>
-              </span>
-            </label>
-
             <label class="settings-toggle-row" for="setStrictOracles">
               <span class="settings-toggle-copy">
                 <span class="settings-toggle-label">Deterministic verdicts (strict oracle mode)</span>
@@ -297,7 +286,8 @@
 
       <label class="consent-row" for="consentToggle">
         <input id="consentToggle" class="consent-check" type="checkbox" checked />
-        <span class="consent-text">Allow the agent to click &amp; type on this site</span>
+        <span class="consent-text">Allow the agent to click &amp; type on this site<br />
+          <small>Off = look-only mode: I look and report, never click or type.</small></span>
       </label>
       <div id="consentNote" class="consent-note" hidden></div>
 

@@ -139,7 +139,6 @@ const setDebugAgentRow = $('setDebugAgentRow');
 const setDebugAgent = $('setDebugAgent');
 const setAutoFix = $('setAutoFix');
 const setVideoAssert = $('setVideoAssert');
-const setReadOnly = $('setReadOnly');
 const setSpendCap = $('setSpendCap');
 const setStrictOracles = $('setStrictOracles');
 const setAutoFixNote = $('setAutoFixNote');
@@ -735,13 +734,22 @@ function refreshConsent() {
     consentInitHost = host;
     consentToggle.checked = true;
   }
-  if (isLocalHost(host)) {
+  // A1 (P0): the checkbox is the look-only switch, so the note has to say which
+  // mode the next run will be in — not just flag third-party sites.
+  if (!consentToggle.checked) {
+    consentNote.hidden = false;
+    consentNote.textContent = 'look-only mode: I\u2019ll look at this site and report, but never click or type';
+  } else if (isLocalHost(host)) {
     consentNote.hidden = true;
   } else {
     consentNote.hidden = false;
     consentNote.textContent = 'third-party site — the agent will interact with it as you';
   }
 }
+
+// Re-render the note as soon as the user flips the switch (the note tells them
+// which mode the next run will be in).
+consentToggle.addEventListener('change', refreshConsent);
 
 function refreshRunEnabled() {
   const testable = activeTab && isTestableUrl(activeTab.url);
@@ -1399,8 +1407,9 @@ function renderSettings(cfg) {
   // opt-in video assertions (paid, slower)
   if (setVideoAssert) setVideoAssert.checked = Boolean(cfg.videoAssertions);
 
-  // safety: read-only defaults ON when unset; spend cap blank = no cap
-  if (setReadOnly) setReadOnly.checked = cfg.readOnly !== false;
+  // safety: spend cap blank = no cap. (Look-only mode has no Settings control —
+  // the per-site "Allow the agent to click & type" checkbox above the Run button
+  // is the switch; the stored key survives for command-line/config parity only.)
   if (setSpendCap) setSpendCap.value = typeof cfg.spendCapUsd === 'number' ? String(cfg.spendCapUsd) : '';
 
   // A1: deterministic verdicts default ON when unset
@@ -1574,7 +1583,6 @@ settingsSave.addEventListener('click', () => {
     debugMode: selectedDebugMode(),
     debugAgent: setDebugAgent.value,
     videoAssertions: Boolean(setVideoAssert && setVideoAssert.checked),
-    readOnly: Boolean(setReadOnly && setReadOnly.checked),
     spendCapUsd:
       setSpendCap && setSpendCap.value.trim() !== '' && Number(setSpendCap.value) > 0
         ? Number(setSpendCap.value)
@@ -1699,10 +1707,12 @@ function startRun(task) {
   addProgressLine(`Asking the agent to test: ${activeTab.url}`);
   // optimistic; the SW confirms with 'accepted' or 'error'
   setBusy(true);
-  const runMsg = { kind: 'run', task: t, tabId: activeTab.id, url: activeTab.url };
-  // Consent: when the user allows interaction, pass the tab's host so the daemon
-  // adds it to allowedHosts. Unchecked → omit, and the read-only guard applies.
-  if (consentToggle.checked) {
+  // A1 (P0): the consent checkbox IS the look-only switch. Checked → the agent
+  // may click and type on this site (its host is allow-listed for this run).
+  // Unchecked → look-only mode: it navigates and checks, never interacts.
+  const lookOnly = !consentToggle.checked;
+  const runMsg = { kind: 'run', task: t, tabId: activeTab.id, url: activeTab.url, readOnly: lookOnly };
+  if (!lookOnly) {
     const host = hostOf(activeTab.url);
     if (host) runMsg.allowHost = host;
   }

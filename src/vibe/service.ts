@@ -195,12 +195,18 @@ export class VibeService {
         throw new Error('vibe.run: invalid allowHost');
       }
       const allowHost = trimmedAllowHost || undefined;
+      // A1 (P0): readOnly (look-only mode) for THIS run. The panel derives it
+      // from the same per-site "Allow the agent to click & type" checkbox that
+      // produces allowHost, so the one control the user sees is the real switch.
+      // Absent (an older panel) → undefined, and the stored setting still wins.
+      const rawReadOnly = (params as { readOnly?: unknown }).readOnly;
+      const readOnly = typeof rawReadOnly === 'boolean' ? rawReadOnly : undefined;
       if (!task || !url) throw new Error('vibe.run requires { task, url }');
       this.busy = true;
       // Fire-and-forget the actual run; the request returns immediately.
       // ctx.clientId binds the whole run (browser calls + UI events) to the
       // Chrome whose panel asked — a second connected Chrome stays untouched.
-      void this.execute(task, url, tabId, allowHost, ctx?.clientId);
+      void this.execute(task, url, tabId, allowHost, ctx?.clientId, readOnly);
       return { accepted: true };
     });
 
@@ -405,7 +411,7 @@ export class VibeService {
     });
   }
 
-  private async execute(task: string, url: string, tabId?: number, allowHost?: string, clientId?: number): Promise<void> {
+  private async execute(task: string, url: string, tabId?: number, allowHost?: string, clientId?: number, readOnly?: boolean): Promise<void> {
     const controller = new AbortController();
     this.activeRun = controller;
     this.activeRunTabId = typeof tabId === 'number' ? tabId : null;
@@ -444,9 +450,14 @@ export class VibeService {
       // target) is explicitly turned off here unless the checkbox was on — the
       // panel drives whatever tab happens to be open, so naming a URL is not
       // itself consent the way typing it on a command line is.
-      const config = allowHost
-        ? { via: 'extension' as const, allowedHosts: [...loadConfig().allowedHosts, allowHost] }
-        : { via: 'extension' as const };
+      // A1 (P0): look-only mode for THIS run comes from the panel's checkbox,
+      // not from the stored setting — the switch the user can see is the one
+      // that decides. Omitted → no override, so the stored/env value stands.
+      const config = {
+        via: 'extension' as const,
+        ...(allowHost && { allowedHosts: [...loadConfig().allowedHosts, allowHost] }),
+        ...(readOnly !== undefined && { readOnly }),
+      };
       const runOpts = {
         bridge: this.bridge,
         tabId,
