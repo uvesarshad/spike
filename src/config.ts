@@ -16,6 +16,7 @@ import {
   type PlannerMode,
 } from './vibe/settings.js';
 import type { AssertionPolicy } from './assertions/policy.js';
+import type { InvariantConfig } from './assertions/invariants.js';
 
 /** Repo's extension/ dir, resolved relative to this source file (src/ → up → extension). */
 const DEFAULT_EXTENSION_DIR = path.resolve(
@@ -203,6 +204,19 @@ export interface QaConfig {
    * bug (a rendered-undefined total) must not slip past as a model-judged
    * pass. Set false to restore the pre-A1 evidence-only behavior. */
   strictOracles: boolean;
+  /** A17 (P1): per-project tuning for the deterministic page checks above.
+   *
+   *  - `disabled` — rule ids to skip entirely on this project.
+   *  - `allowText` — literal strings that are legitimate on THIS app. Without
+   *    it, a glossary, a docs site or a JS tutorial that genuinely renders the
+   *    word "undefined" is reported as broken on every single step; with
+   *    strictOracles on (the default) that is a forced failure on a page that
+   *    is working exactly as intended.
+   *
+   * Set via the `invariants` key in spike.config.json, or the allow-list alone
+   * via SPIKE_INVARIANT_ALLOW_TEXT (comma-separated). Default: nothing skipped
+   * and nothing allowed, which is the pre-A17 behaviour exactly. */
+  invariants: InvariantConfig;
   /** Email/OTP module wiring: which EmailProvider (src/email/) the driver's
    * `wait_for_email` action polls. 'none' (default) — the action is not
    * offered at all: A9 (P0) strips the verb from the navigator's prompt AND
@@ -300,6 +314,8 @@ const DEFAULTS: QaConfig = {
   debugAgent: 'auto',
   // A1: deterministic oracles gate the verdict by default — see QaConfig.strictOracles.
   strictOracles: true,
+  // A17: nothing skipped, nothing allow-listed — see QaConfig.invariants.
+  invariants: {},
   // no email provider wired by default — see QaConfig.emailProvider.
   emailProvider: 'none',
 };
@@ -398,6 +414,12 @@ function fromEnv(): Partial<QaConfig> {
   if (e.SPIKE_READ_ONLY) out.readOnly = e.SPIKE_READ_ONLY !== '0' && e.SPIKE_READ_ONLY !== 'false';
   // A1: default is true (DEFAULTS.strictOracles) — only an explicit '0'/'false' opts out.
   if (e.SPIKE_STRICT_ORACLES) out.strictOracles = e.SPIKE_STRICT_ORACLES !== '0' && e.SPIKE_STRICT_ORACLES !== 'false';
+  // A17: the allow-list is the half people actually need on the command line;
+  // the rule-skip list is config-file-only (it needs rule ids, not prose).
+  if (e.SPIKE_INVARIANT_ALLOW_TEXT) {
+    const allowText = e.SPIKE_INVARIANT_ALLOW_TEXT.split(',').map((t) => t.trim()).filter(Boolean);
+    if (allowText.length) out.invariants = { allowText };
+  }
   if (e.SPIKE_SPEND_CAP_USD) {
     const n = Number(e.SPIKE_SPEND_CAP_USD);
     if (Number.isFinite(n) && n > 0) out.spendCapUsd = n; // 0/garbage → leave unset (no cap)
@@ -558,6 +580,22 @@ export function loadConfig(overrides: Partial<QaConfig> = {}, cwd = process.cwd(
     ...(envCfg.navigator ?? {}),
     ...(overrides.navigator ?? {}),
   };
+  // A17: the page-check tuning arrives straight from spike.config.json (or the
+  // env allow-list), so sanitise it once here — a hand-edited file is the only
+  // way in, and a stray number in one of the lists must not reach the checker.
+  merged.invariants = sanitizeInvariantConfig(merged.invariants);
   warnIfDeadPlanner(merged);
   return merged;
+}
+
+/** A17: keep only non-empty strings in either list, and drop an empty list
+ * entirely so the resolved value stays `{}` when nothing useful was given. */
+function sanitizeInvariantConfig(raw: unknown): InvariantConfig {
+  if (!raw || typeof raw !== 'object') return {};
+  const { disabled: rawDisabled, allowText: rawAllowText } = raw as { disabled?: unknown; allowText?: unknown };
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim()) : [];
+  const disabled = strings(rawDisabled);
+  const allowText = strings(rawAllowText);
+  return { ...(disabled.length && { disabled }), ...(allowText.length && { allowText }) };
 }

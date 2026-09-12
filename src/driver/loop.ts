@@ -41,7 +41,7 @@ import {
 import { buildGoalPlannerPrompt, buildNavigatorPrompt } from './planner-prompt.js';
 import { detectSsoPopupClick } from './sso-popup.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
-import { checkDrainInvariants, checkProbeInvariants, type InvariantViolation } from '../assertions/invariants.js';
+import { checkDrainInvariants, checkProbeInvariants, type InvariantConfig, type InvariantViolation } from '../assertions/invariants.js';
 import { evaluateAssertion, type AssertionSpec } from '../assertions/dom-assertions.js';
 import { axToObservation, checkRelation, countDeltaDirection, detectRelationCandidates } from '../assertions/metamorphic.js';
 import { validateScriptSteps, runScriptSteps } from './script-runner/index.js';
@@ -311,6 +311,19 @@ export interface LoopOptions {
    * default rather than silently falling back to pre-A1 evidence-only
    * behavior. */
   strictOracles?: boolean;
+  /** A17 (P1): the run's own "what should be true at the end?" text, in the
+   * user's words. Both models are shown it as REQUIRED FINAL CHECKS, and the
+   * navigator is told to prove each one with a precise assertion verb instead
+   * of eyeballing the page. Omitted (the common case) leaves both prompts
+   * exactly as they were — a run with no stated expectations is still the
+   * page-health smoke test it always was. */
+  expectations?: string;
+  /** A17 (P1): per-project tuning for the deterministic page checks — rule ids
+   * to skip entirely, and literal strings that are legitimate on THIS app so a
+   * page that genuinely renders the word "undefined" (a glossary, a docs site,
+   * a JS tutorial) isn't reported as broken every step. Resolved from config
+   * (SPIKE_INVARIANT_ALLOW_TEXT / the `invariants` config key) by the caller. */
+  invariants?: InvariantConfig;
 }
 
 /** Map an action to its onStep kind. */
@@ -471,12 +484,12 @@ function humanizeAction(action: Action, target?: { role: string; name?: string }
  * Best-effort throughout: a port with no `probeInvariants` (extension
  * transport) still gets the drain-derived rules, and a probe that throws is
  * swallowed rather than failing the step. */
-async function collectInvariants(browser: BrowserPort, record: StepRecord): Promise<void> {
+async function collectInvariants(browser: BrowserPort, record: StepRecord, config?: InvariantConfig): Promise<void> {
   const url = await browser.url().catch(() => '');
-  const violations = checkDrainInvariants({ console: record.console, network: record.network, url });
+  const violations = checkDrainInvariants({ console: record.console, network: record.network, url, config });
   if (browser.probeInvariants) {
     try {
-      violations.push(...checkProbeInvariants(await browser.probeInvariants()));
+      violations.push(...checkProbeInvariants(await browser.probeInvariants(), config));
     } catch {
       /* the probe is evidence, never a gate — a page that refuses evaluation
        * (CSP, mid-navigation, detached target) must not fail the run. */
@@ -620,6 +633,11 @@ export async function runDriverLoop(
   const spendCapUsd = opts.spendCapUsd && opts.spendCapUsd > 0 ? opts.spendCapUsd : undefined;
   // A1 (P0): default true — see LoopOptions.strictOracles's doc comment.
   const strictOracles = opts.strictOracles ?? true;
+  // A17 (P1): blank/whitespace-only expectations are the same as none at all —
+  // normalize once here so no prompt has to guard against an empty section.
+  const expectations = opts.expectations?.trim() || undefined;
+  // A17 (P1): per-project tuning for the deterministic page checks.
+  const invariantConfig = opts.invariants;
   const assertionTrace: AssertionTraceEntry[] = [];
   const runData = createRunDataState(opts.runEmailDomain ? { emailDomain: opts.runEmailDomain } : {});
   // A9 (P0): a run only has the wait-for-email verb when an inbox is actually
@@ -780,6 +798,7 @@ export async function runDriverLoop(
           siteMapSummary,
           failure,
           readOnly, // A1 (P0): tell the brain clicks/typing are refused this run
+          expectations, // A17 (P1): what the user said must be true at the end
         }),
         step: stepIndex,
       });
@@ -891,7 +910,7 @@ export async function runDriverLoop(
     await sleep(150);
     record.console = browser.drainConsole();
     record.network = browser.drainNetwork();
-    await collectInvariants(browser, record);
+    await collectInvariants(browser, record, invariantConfig);
     await artifacts.appendAudit({
       ts: record.ts,
       runId: artifacts.runId,
@@ -925,7 +944,7 @@ export async function runDriverLoop(
     onStep({ index: stepIndex, kind: 'plan', text: 'Planning goals…' });
     try {
       const goalPlan = await planGoalsOnce(router, {
-        prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text, siteMapSummary, readOnly }),
+        prompt: buildGoalPlannerPrompt({ task, url: planUrl, axText: ax.text, siteMapSummary, readOnly, expectations }),
         step: stepIndex,
       });
       if (goalPlan.verdict) {
@@ -1099,7 +1118,7 @@ export async function runDriverLoop(
         }
         record.console = browser.drainConsole();
         record.network = browser.drainNetwork();
-        await collectInvariants(browser, record);
+        await collectInvariants(browser, record, invariantConfig);
         await artifacts.appendAudit({
           ts: record.ts,
           runId: artifacts.runId,
@@ -1141,6 +1160,7 @@ export async function runDriverLoop(
           hint,
           readOnly, // A1 (P0): tell the navigator clicks/typing are refused this run
           emailEnabled, // A9 (P0): only offer the wait-for-email verb if an inbox is wired
+          expectations, // A17 (P1): what the user said must be true at the end
         }),
         step: stepIndex,
         emailEnabled,
@@ -1700,7 +1720,7 @@ export async function runDriverLoop(
       await sleep(150); // let async fallout (fetches, navigations) land
       record.console = browser.drainConsole();
       record.network = browser.drainNetwork();
-      await collectInvariants(browser, record);
+      await collectInvariants(browser, record, invariantConfig);
       // A2 (P0): the matching "after" reading. A click that failed or was
       // refused moved nothing, so its "before" reading is dropped too and no
       // count-delta relation is proposed for it.
