@@ -445,6 +445,21 @@
       </div>
     </section>
 
+    <!-- A19: the tests already recorded for this site. A test that passed is
+         saved automatically, and re-running a saved one costs nothing (no AI
+         is involved) — so this card is where regression testing actually
+         happens. Shown only while Spike Core (the optional desktop helper) is
+         connected: the saved tests are its files. Reuses the history-* card
+         classes rather than new CSS. -->
+    <section id="savedTestsSection" class="history-section" hidden>
+      <button id="savedTestsToggle" class="history-toggle" type="button" aria-expanded="false">
+        <span class="history-caret" data-icon="chevron"></span>
+        <span class="history-label">Saved tests</span>
+        <span id="savedTestsCount" class="history-time"></span>
+      </button>
+      <div id="savedTestsList" class="history-list" hidden></div>
+    </section>
+
     <section id="historySection" class="history-section" hidden>
       <button id="historyToggle" class="history-toggle" type="button" aria-expanded="false">
         <span class="history-caret" data-icon="chevron"></span>

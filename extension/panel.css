@@ -818,6 +818,27 @@ body {
 }
 .history-time { flex: 0 0 auto; font-size: 10.5px; color: var(--muted); }
 
+/* ---- A19: saved tests ------------------------------------------------------ */
+.saved-test {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+}
+.saved-test-task {
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.saved-test-meta { font-size: 10.5px; color: var(--muted); }
+.saved-test-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+
 /* ---- settings modal (centered overlay with backdrop) ----------------------- */
 .settings-modal {
   position: fixed;

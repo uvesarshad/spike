@@ -579,6 +579,31 @@ function redactTaskText(task) {
   return out + redactTaskSegment(task.slice(last));
 }
 
+/** A19: what a history row keeps of a finished test, so reopening it re-shows
+ * the RESULT instead of silently starting (and charging for) a brand-new test.
+ * It is the slim report the panel's result card already renders — the verdict,
+ * the plain-English report, the translated headline, the fix prompt — minus
+ * anything bulky: an embedded screenshot is dropped (the picture is fetched
+ * from disk by path, and an old run's has usually been cleaned up anyway). */
+const HISTORY_REPORT_FIELDS = [
+  'verdict', 'console_error', 'failing_step', 'evidence_paths', 'reasonExplained',
+  'screenshotPath', 'durationMs', 'spendSummary', 'savedTest', 'repaired', 'clipPath',
+];
+const DATA_URI_RE = /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g;
+const HISTORY_FIX_PROMPT_CAP = 20_000;
+function historyReport(done) {
+  if (!done || typeof done !== 'object') return null;
+  const out = {};
+  for (const f of HISTORY_REPORT_FIELDS) if (done[f] !== undefined) out[f] = done[f];
+  // the same redaction the stored task gets — a report echoes what was typed
+  // into the page, and a history row outlives the run on screen.
+  if (done.reason !== undefined) out.reason = redactTaskText(String(done.reason));
+  if (done.plainReport !== undefined) out.plainReport = redactTaskText(String(done.plainReport));
+  const fix = String(done.fixPrompt || '');
+  if (fix) out.fixPrompt = redactTaskText(fix).replace(DATA_URI_RE, '[screenshot attached to the original result]').slice(0, HISTORY_FIX_PROMPT_CAP);
+  return out;
+}
+
 /** Write one row of the "recent tests" list and hand the fresh list to any
  * open panel (which would otherwise have to re-read storage to notice). */
 async function appendHistoryEntry(task, done) {
@@ -586,7 +611,10 @@ async function appendHistoryEntry(task, done) {
     ts: Date.now(),
     task: redactTaskText(String(task || '')).slice(0, 80),
     verdict: String((done && done.verdict) || 'uncertain'),
-    reason: String((done && (done.plainReport || done.reason)) || '').slice(0, 120),
+    // A19: no longer clipped to 120 characters — the row's tooltip and the
+    // reopened result card both want the whole thing.
+    reason: redactTaskText(String((done && (done.plainReport || done.reason)) || '')),
+    report: historyReport(done),
   };
   const stored = await storageGet(HISTORY_STORAGE_KEY);
   const list = [entry, ...(Array.isArray(stored) ? stored : [])].slice(0, HISTORY_CAP);
@@ -1027,6 +1055,37 @@ chrome.runtime.onConnect.addListener((port) => {
             port.postMessage({ kind: 'coverage', ...(result || { present: false }) });
           } catch (e) {
             port.postMessage({ kind: 'coverage', present: false, error: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'tests-list': {
+          // A19: the saved tests recorded for this site. They live on disk next
+          // to Spike Core, so with no helper connected there is simply nothing
+          // to list (the browser-only path records nothing).
+          if (!daemonConnected()) { port.postMessage({ kind: 'tests', tests: [] }); break; }
+          try {
+            const result = await sendRequest('vibe.tests.list', { host: msg.host });
+            port.postMessage({ kind: 'tests', tests: (result && result.tests) || [] });
+          } catch (e) {
+            port.postMessage({ kind: 'tests', tests: [], error: String(e && e.message ? e.message : e) });
+          }
+          break;
+        }
+        case 'replay': {
+          // A19: re-run one saved test ($0), optionally repairing it. Only the
+          // desktop helper can do this — the saved tests are its files.
+          if (!daemonConnected()) {
+            port.postMessage({ kind: 'error', message: 'Saved tests need Spike Core, the optional desktop helper.' });
+            break;
+          }
+          try {
+            if (msg.tabId !== undefined && msg.tabId !== null) lastRunTabId = msg.tabId;
+            lastRunTask = typeof msg.task === 'string' ? msg.task : '';
+            await forgetRunResult(lastRunTabId); // the previous verdict for this tab is stale
+            const result = await sendRequest('vibe.replay', { name: msg.name, heal: !!msg.heal, tabId: msg.tabId });
+            port.postMessage({ kind: 'accepted', ...(result || {}) });
+          } catch (e) {
+            port.postMessage({ kind: 'error', message: String(e && e.message ? e.message : e) });
           }
           break;
         }

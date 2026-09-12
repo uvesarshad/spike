@@ -30,6 +30,12 @@
  *                                model's mapped host)
  *   vibe.coverage.get {host?} → {present:false} | {present:true, routes, interactiveElements,
  *                                perRoute}  (A51: read-only coverageReport() for `host`)
+ *   vibe.tests.list   {host?} → {tests:[{name, task, url, host, createdAt, steps,
+ *                                repairedAt?}]}  (A19: the saved tests recorded for
+ *                                this site, newest first)
+ *   vibe.replay {name, heal?, tabId?} → {accepted:true}  (A19: re-run one saved
+ *                                test with no AI calls — same progress/done/error
+ *                                events as vibe.run; heal re-records it on failure)
  *   vibe.spec.decompose {spec, url?, maxFlows?} → {flows:[{name, task}]}
  *                             (A7: one planning call that turns a pasted
  *                             document into the flow checklist the panel shows
@@ -55,7 +61,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BridgeServer } from '../bridge/bridge-server.js';
-import { createPlanningRouter, qaRun, type QaRunOptions } from '../engine.js';
+import { createPlanningRouter, qaReplay, qaRun, type QaReplayOptions, type QaRunOptions } from '../engine.js';
+import { listScripts, loadScript } from '../recorder/script.js';
 import { loadConfig } from '../config.js';
 import { decomposeSpec } from '../driver/spec-decompose.js';
 import { headlineScreenshot, slimReport, type Report } from '../report/report.js';
@@ -135,6 +142,13 @@ const PROVIDER_ORDER: ProviderId[] = ['nano', 'gemini', 'claude', 'gpt', 'ollama
 const PLAIN_HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:\d{1,5})?$/;
 function isPlainHostname(host: string): boolean {
   return PLAIN_HOSTNAME_RE.test(host);
+}
+
+/** A19: `www.shop.com` and `shop.com` are the same site to a user, and a saved
+ * test recorded on one must still be offered on the other — the same apex↔www
+ * equivalence the run-time host guard already applies. */
+function stripWww(host: string): string {
+  return host.startsWith('www.') ? host.slice(4) : host;
 }
 
 /** Shape of the extension's rec.start / rec.stop bridge responses. */
@@ -437,6 +451,67 @@ export class VibeService {
       };
     });
 
+    // vibe.tests.list — A19: the saved tests this machine has recorded, for the
+    // panel's "Saved tests" card. Read-only: it loads the scripts already on
+    // disk in generated-tests/ and reports what they are. `host` (the panel's
+    // current-tab hostname) scopes the list to the site being looked at —
+    // without it every saved test on the machine would be offered for a site
+    // it was never recorded against. A malformed/hand-edited script is skipped
+    // rather than failing the whole list.
+    this.bridge.onRequest('vibe.tests.list', async (params) => {
+      const rawHost = (params as { host?: unknown } | undefined)?.host;
+      const host = typeof rawHost === 'string' ? rawHost.trim().toLowerCase() : '';
+      const tests: Array<Record<string, unknown>> = [];
+      for (const file of listScripts()) {
+        let script;
+        try {
+          script = loadScript(file);
+        } catch {
+          continue; // a malformed script is not a reason to show the user nothing
+        }
+        let scriptHost = '';
+        try {
+          scriptHost = new URL(script.url).hostname.toLowerCase();
+        } catch {
+          /* a script with an unparseable url simply has no host to match */
+        }
+        if (host && scriptHost && scriptHost !== host && stripWww(scriptHost) !== stripWww(host)) continue;
+        tests.push({
+          name: script.name,
+          task: script.task,
+          url: script.url,
+          host: scriptHost,
+          createdAt: script.createdAt,
+          steps: script.steps.length,
+          ...(script.healedFrom && { repairedAt: script.healedFrom.healedAt }),
+        });
+      }
+      tests.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      return { tests };
+    });
+
+    // vibe.replay — A19: re-run one saved test with no AI calls at all ($0),
+    // optionally repairing it (heal) when the page has moved on. Same
+    // single-run lock, the same progress/done/error events and the same
+    // consent contract as vibe.run: the script's own site is trusted (it is
+    // what was recorded), nothing else is.
+    this.bridge.onRequest('vibe.replay', async (params, ctx) => {
+      // A3: replaying drives the user's browser — and healing spends model
+      // budget — so the same authentication gate as vibe.run applies.
+      if (!this.bridge.isAuthenticated(ctx.clientId)) throw new Error('vibe.replay: unauthenticated client');
+      if (this.busy) throw new Error('a run is already in progress');
+      const name = String((params as { name?: unknown }).name ?? '').trim();
+      if (!name) throw new Error('vibe.replay requires { name }');
+      // the name addresses a file we wrote in generated-tests/ — never a path
+      if (!/^[A-Za-z0-9._-]+$/.test(name) || name.includes('..')) throw new Error('vibe.replay: invalid test name');
+      const heal = Boolean((params as { heal?: unknown }).heal);
+      const rawTabId = (params as { tabId?: unknown }).tabId;
+      const tabId = typeof rawTabId === 'number' ? rawTabId : undefined;
+      this.busy = true;
+      void this.executeReplay(name, heal, tabId, ctx?.clientId);
+      return { accepted: true };
+    });
+
     // vibe.map.get — A51: read-only summary of the discovery layer's
     // `.spike/app-model.json` (built by `spike map`) for the panel's "Site map"
     // card. No mutation, no host-trust implications — this never drives the
@@ -692,6 +767,60 @@ export class VibeService {
     });
   }
 
+  /** A19: re-run one saved test deterministically — no AI calls, so free —
+   * streaming the same progress/done/error events a fresh run does, so the
+   * panel renders the result card it already knows how to render. `heal`
+   * re-engages the driver on the original task when the replay fails and
+   * re-emits the script (that part DOES spend model budget, which is why the
+   * panel calls it "Repair" and keeps it a separate button). */
+  private async executeReplay(name: string, heal: boolean, tabId?: number, clientId?: number): Promise<void> {
+    const controller = new AbortController();
+    this.activeRun = controller;
+    this.activeRunTabId = typeof tabId === 'number' ? tabId : null;
+    this.detachAbortMessage = null;
+    const target = clientId !== undefined ? { clientId } : undefined;
+    const progress = (line: string) => this.bridge.sendEvent('vibe.progress', { line }, target);
+    try {
+      const opts: QaReplayOptions = {
+        heal,
+        bridge: this.bridge,
+        ...(tabId !== undefined && { tabId }),
+        ...(clientId !== undefined && { clientId }),
+        config: { via: 'extension' as const },
+        onProgress: progress,
+      };
+      const report = await qaReplay(name, opts);
+      if (this.detachAbortMessage) {
+        this.bridge.sendEvent('vibe.error', { message: this.detachAbortMessage }, target);
+        return;
+      }
+      this.lastFailedReport = report.verdict === 'pass' ? null : report;
+      this.lastEvidencePaths = new Set(report.evidence_paths ?? []);
+      this.lastRunDir = report.evidence_paths?.[0] ? path.dirname(report.evidence_paths[0]) : null;
+      this.bridge.sendEvent('vibe.done', {
+        ...slimReport(report),
+        plainReport: renderPlainReport(report),
+        reasonExplained: explainReason(report.reason),
+        screenshotPath: headlineScreenshot(report),
+        fixPrompt: buildFixPrompt(report, { screenshotDataUri: fixPromptThumbnail(report) }),
+        durationMs: report.durationMs,
+        // the panel labels a saved-test result differently from a fresh AI pass
+        // — it cost nothing, and "Repair" is the follow-up, not "fix my code".
+        savedTest: name,
+        ...(report.healed ? { repaired: true } : {}),
+      }, target);
+    } catch (e) {
+      this.bridge.sendEvent('vibe.error', {
+        message: this.detachAbortMessage ?? (e instanceof Error ? e.message : String(e)),
+      }, target);
+    } finally {
+      this.busy = false;
+      this.activeRun = null;
+      this.activeRunTabId = null;
+      this.detachAbortMessage = null;
+    }
+  }
+
   private async execute(
     task: string,
     url: string,
@@ -755,7 +884,11 @@ export class VibeService {
         clientId,
         config,
         trustTargetHost: Boolean(allowHost),
-        record: false,
+        // A19: a passing panel run becomes a saved test, exactly as a run
+        // started from a terminal does. Without this the panel could only ever
+        // pay for a fresh AI pass — it consumed saved tests (the pre-run
+        // matcher) but never produced one.
+        record: true,
         onProgress: progress,
         onStep: (info) => this.bridge.sendEvent('vibe.step', info as unknown as Record<string, unknown>, target),
         signal: controller.signal,

@@ -42,7 +42,11 @@
  *                   (A10: the last finished result, replayed on connect/status
  *                   so closing this panel mid-test no longer loses it)
  *                 { kind:'history', entries }     (A10: the "recent tests" list,
- *                   written by the SW when a test finishes — even with no panel)
+ *                   written by the SW when a test finishes — even with no panel;
+ *                   A19: each entry also carries the slim report, so reopening a
+ *                   row re-shows the result instead of starting a new test)
+ *                 { kind:'tests', tests }         (A19: the saved tests recorded
+ *                   for this site — relayed vibe.tests.list; empty with no helper)
  *                 { kind:'error', message }       (relayed vibe.error)
  *                 { kind:<plan|click|type|navigate|assert|wait|finish>,
  *                   index, text, ok? }            (relayed vibe.step — see below)
@@ -117,6 +121,11 @@ const historyToggle = $('historyToggle');
 const historyList = $('historyList');
 // A51: "Site map" card — read-only summary of `.spike/app-model.json` (built
 // by `spike map`/`spike coverage`) for the current tab's host.
+// A19: the "Saved tests" card (desktop-helper only — the tests are its files).
+const savedTestsSection = $('savedTestsSection');
+const savedTestsToggle = $('savedTestsToggle');
+const savedTestsList = $('savedTestsList');
+const savedTestsCount = $('savedTestsCount');
 const siteMapToggle = $('siteMapToggle');
 const siteMapBody = $('siteMapBody');
 const siteMapContent = $('siteMapContent');
@@ -519,6 +528,10 @@ function onPortMessage(msg) {
       lastCoverageInfo = msg;
       renderSiteMapCard();
       break;
+    case 'tests':
+      // A19: the saved tests recorded for this site.
+      onSavedTests(msg);
+      break;
     case 'config':
       currentConfig = msg;
       if (typeof msg.debugMode === 'string') debugMode = msg.debugMode;
@@ -574,6 +587,9 @@ function setBridge(msg) {
     siteMapRequestedHost = null; // force requestSiteMap() to re-fetch below
     requestSiteMap();
   }
+  // A19: the saved tests live with the helper — its arrival or departure
+  // decides whether that card exists at all.
+  requestSavedTests(true);
   wasBridgeHealthyForSiteMap = healthyNow;
   // A4: with the desktop helper gone, a command-line model can no longer sign
   // in for itself — whether a key is needed can change with this dot.
@@ -702,6 +718,10 @@ function setBusy(value) {
     c.disabled = value;
   });
   if (!value) finalizePendingStep(null);
+  // A19: "Run again"/"Repair" must not be tappable while something is running,
+  // and a finished run may have just saved a NEW test for this site.
+  renderSavedTests();
+  if (!value) requestSavedTests(true);
 }
 
 // ---- stop / cancel ---------------------------------------------------------
@@ -755,6 +775,7 @@ function renderTabCard() {
   refreshConsent();
   refreshRunEnabled();
   requestSiteMap();
+  requestSavedTests(false);
 }
 
 // ---- A51: "Site map" card ---------------------------------------------------
@@ -846,6 +867,120 @@ if (siteMapToggle && siteMapBody) {
     const open = siteMapToggle.getAttribute('aria-expanded') === 'true';
     siteMapToggle.setAttribute('aria-expanded', String(!open));
     siteMapBody.hidden = open;
+  });
+}
+
+// ---- A19: "Saved tests" card ------------------------------------------------
+//
+// A test that passed is saved automatically; running a saved one again costs
+// nothing, because no AI is involved — it just repeats the exact clicks and
+// typing that worked last time. That is regression testing, and until now the
+// panel neither produced nor offered it.
+//
+// The saved tests are files next to Spike Core (the optional desktop helper),
+// so the whole card only exists while the helper is connected.
+let savedTests = [];
+let savedTestsRequestedHost = null;
+
+function requestSavedTests(force) {
+  if (!savedTestsSection) return;
+  if (!bridgeHealthy()) {
+    savedTestsRequestedHost = null;
+    savedTests = [];
+    renderSavedTests();
+    return;
+  }
+  const testable = activeTab && isTestableUrl(activeTab.url);
+  const host = testable ? hostOf(activeTab.url) : '';
+  if (!force && host === savedTestsRequestedHost) return;
+  savedTestsRequestedHost = host;
+  postToSW({ kind: 'tests-list', host });
+}
+
+function onSavedTests(msg) {
+  savedTests = Array.isArray(msg && msg.tests) ? msg.tests : [];
+  renderSavedTests();
+}
+
+function renderSavedTests() {
+  if (!savedTestsSection || !savedTestsList) return;
+  if (!bridgeHealthy() || savedTests.length === 0) {
+    savedTestsSection.hidden = true;
+    return;
+  }
+  savedTestsSection.hidden = false;
+  if (savedTestsCount) {
+    savedTestsCount.textContent = savedTests.length === 1 ? '1 saved' : `${savedTests.length} saved`;
+  }
+  savedTestsList.textContent = '';
+  for (const t of savedTests) {
+    const row = document.createElement('div');
+    row.className = 'saved-test';
+
+    const title = document.createElement('div');
+    title.className = 'saved-test-task';
+    title.textContent = t.task || t.name || '(unnamed test)';
+    title.title = t.url || '';
+    row.appendChild(title);
+
+    const meta = document.createElement('div');
+    meta.className = 'saved-test-meta';
+    const when = t.createdAt ? new Date(t.createdAt).toLocaleDateString() : '';
+    const stepWord = t.steps === 1 ? 'step' : 'steps';
+    meta.textContent = `${t.steps || 0} ${stepWord}${when ? ` · saved ${when}` : ''}${t.repairedAt ? ' · repaired' : ''}`;
+    row.appendChild(meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'saved-test-actions';
+
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.className = 'settings-btn-secondary';
+    again.textContent = 'Run again (free)';
+    again.title = 'Repeat exactly what worked last time. No AI is involved, so this costs nothing.';
+    again.disabled = busy;
+    again.addEventListener('click', () => startSavedTest(t, false));
+    actions.appendChild(again);
+
+    const repair = document.createElement('button');
+    repair.type = 'button';
+    repair.className = 'connect-alt';
+    repair.textContent = 'Repair';
+    repair.title = 'The page has changed and the saved test no longer fits? Re-run it and, if it fails, let the AI work out the new steps and save those instead. This one does cost.';
+    repair.disabled = busy;
+    repair.addEventListener('click', () => startSavedTest(t, true));
+    actions.appendChild(repair);
+
+    row.appendChild(actions);
+    savedTestsList.appendChild(row);
+  }
+}
+
+function startSavedTest(test, heal) {
+  if (busy || !test || !test.name) return;
+  clearFeed();
+  hideError();
+  resultCard.hidden = true;
+  setBusy(true);
+  addProgressLine(
+    heal
+      ? `Running the saved test "${test.task || test.name}" and repairing it if the page has moved on…`
+      : `Running the saved test "${test.task || test.name}" again — free, no AI involved.`,
+  );
+  postToSW({
+    kind: 'replay',
+    name: test.name,
+    heal: Boolean(heal),
+    task: test.task || test.name,
+    ...(activeTab && typeof activeTab.id === 'number' ? { tabId: activeTab.id } : {}),
+  });
+}
+
+if (savedTestsToggle && savedTestsList) {
+  savedTestsToggle.addEventListener('click', () => {
+    const open = savedTestsToggle.getAttribute('aria-expanded') === 'true';
+    savedTestsToggle.setAttribute('aria-expanded', String(!open));
+    savedTestsList.hidden = open;
   });
 }
 
@@ -1373,7 +1508,13 @@ function renderResult(params) {
   resultCard.hidden = false;
   resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
-  if (params.restored) {
+  if (params.fromHistory) {
+    // A19: reopened from "Recent tests" — say so, and don't pretend it just ran.
+    addProgressLine(
+      `Showing a saved result from ${relativeTime(params.historyTs || Date.now())}. Nothing was run — tap Run test to try it again.`,
+    );
+    if (!(taskInput.value || '').trim() && typeof params.task === 'string') taskInput.value = params.task;
+  } else if (params.restored) {
     // A10: replayed by the worker because this panel wasn't open (or was
     // reopened) when the test finished. Say so, and put the task back in the
     // box so "run it again" is one tap.
@@ -2454,14 +2595,24 @@ function renderHistory(list) {
     task.textContent = item.task || '(no task)';
     task.title = item.reason || '';
     row.appendChild(task);
+    row.title = item.report ? 'Show this result again' : 'Put this back in the box';
 
     const time = document.createElement('span');
     time.className = 'history-time';
     time.textContent = relativeTime(item.ts);
     row.appendChild(time);
 
-    // clicking re-fills the task textarea (no auto-run)
+    // A19: clicking a past test SHOWS it again. It used to re-fill the task box
+    // and (from a suggestion-card tap) start a fresh, paid test — the one thing
+    // someone looking back at a result does not want. Rows written before this
+    // kept no report, so those still just re-fill the box.
     row.addEventListener('click', () => {
+      if (busy) return;
+      if (item.report) {
+        clearFeed();
+        renderResult({ ...item.report, reason: item.reason || item.report.reason, fromHistory: true, historyTs: item.ts, task: item.task });
+        return;
+      }
       taskInput.value = item.task || '';
       taskInput.focus();
     });

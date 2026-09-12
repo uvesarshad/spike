@@ -1291,6 +1291,11 @@ export interface QaReplayOptions {
   onProgress?: (line: string) => void;
   /** Caller-owned bridge (extension mode) — see QaRunOptions.bridge. */
   bridge?: BridgeServer;
+  /** A19: the tab a panel-initiated replay should drive, and the Chrome whose
+   * panel asked — same meaning as QaRunOptions.tabId/clientId. Absent (the CLI
+   * path) → the transport's own create-a-tab behaviour, unchanged. */
+  tabId?: number;
+  clientId?: number;
   /** A11 (P1): on a FAILED replay attempt, retry up to this many additional
    * times (each a fresh navigate-and-replay over the SAME session/script)
    * before giving up / engaging `heal`. Default 0 — opt-in, no behaviour
@@ -1448,7 +1453,13 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
   // headless replay with no assert_visual step never needs a second Chrome.
   const scriptNeedsNano = script.steps.some((s) => s.type === 'assert_visual');
   const wantNano = !preCfg.headless || scriptNeedsNano;
-  const session = await openSession(configOverride, { bridge: opts.bridge, allowedHosts, wantNano });
+  const session = await openSession(configOverride, {
+    bridge: opts.bridge,
+    ...(opts.tabId !== undefined && { tabId: opts.tabId }),
+    ...(opts.clientId !== undefined && { clientId: opts.clientId }),
+    allowedHosts,
+    wantNano,
+  });
   // A12 (P0): same vault a fresh AI pass gets (runFreshAiPass's `new Vault()`)
   // — without it, a recorded `type` step's {{secret:NAME}} placeholder can
   // never resolve, so a credentialed regression test always failed and
