@@ -1,5 +1,5 @@
 > Source audit: [26-09-12-audit-usability-autonomy](./26-09-12-audit-usability-autonomy.md)
-> Updated: 26-09-13 · 71/81 done
+> Updated: 26-09-13 · 77/81 done — remaining 4 are owner-blocked (A3, E22, E23) or a partial fallback already shipped (E19: popup attach lands for the command-line transport; the in-browser transports fall back to a clear "sign-in popups aren't supported yet" message)
 
 ## Execution protocol (for the agent working this list)
 
