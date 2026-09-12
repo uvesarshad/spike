@@ -51,6 +51,7 @@ import {
   actionFromCachedValue,
   buildActionCacheKey,
   captureActionEffectState,
+  pageSignatureFromAx,
   toCachedActionValue,
   verifyActionEffect,
   type CachedActionValue,
@@ -606,6 +607,15 @@ export async function runDriverLoop(
    * anchor for a focused re-serialization when the tree overflows its budget. */
   let lastTouchedTarget: { role: string; name?: string } | undefined;
   let done = false;
+  /* A6 (P0): fingerprint of the page as it looked when the run last executed a
+   * step, paired with that step's replayable form. Re-running the SAME action
+   * on a page that has not changed since cannot move the run forward — a page
+   * check that passes without touching anything is the common case — so the
+   * cached-step shortcut below refuses such a repeat and falls through to a
+   * fresh planning call instead. Without this, one passing check replays every
+   * iteration until the step budget runs out and a working site is reported as
+   * "couldn't finish". */
+  let lastExecutedSig: { page: string; action: string } | null = null;
 
   // ---- the plan (two-tier split) ----
   // goals: the ordered sub-goal checklist the smart BRAIN makes ONCE up front;
@@ -839,6 +849,11 @@ export async function runDriverLoop(
       ok: record.ok,
     });
     onStep({ index: i, kind: stepKind(action), text: humanizeAction(action), ok: record.ok });
+    // A6 (P0): 'pass'/'end' means the verdict is settled — stop the run right
+    // here rather than relying on every caller to break out of the loop, so a
+    // settled finish is always the last step in the history. Only an explicit
+    // re-plan ('continue') keeps the run going.
+    if (outcome !== 'continue') done = true;
     return outcome;
   };
 
@@ -945,7 +960,10 @@ export async function runDriverLoop(
     if (recentTreeTexts.length > 3) recentTreeTexts.shift();
     const batchUrl = await browser.url();
 
-    if (actionCache && stepIndex < maxSteps) {
+    // A6 (P0): `!done` — once a finish has settled the verdict the run is over;
+    // never take another shortcut step after it (the finish must be the last
+    // thing in the history).
+    if (actionCache && !done && stepIndex < maxSteps) {
       const cachedRecords = actionCache.findForContext({ url: batchUrl, goal: goals[currentGoal], page: ax });
       if (cachedRecords.length === 0) actionCacheStats.misses++;
       let acceptedCacheHit = false;
@@ -975,6 +993,19 @@ export async function runDriverLoop(
             actionCacheStats.stale++;
             continue;
           }
+        }
+        // A6 (P0): refuse a repeat of the step that just ran when the page has
+        // not changed since — see lastExecutedSig. Counted as a miss, because
+        // that is exactly what it costs: this step falls through to a fresh
+        // planning call rather than replaying a no-op.
+        const replaySig = { page: pageSignatureFromAx(ax), action: JSON.stringify(cached.value) };
+        if (
+          lastExecutedSig &&
+          lastExecutedSig.page === replaySig.page &&
+          lastExecutedSig.action === replaySig.action
+        ) {
+          actionCacheStats.misses++;
+          continue;
         }
         const i = stepIndex++;
         stepsInGoal++;
@@ -1006,6 +1037,7 @@ export async function runDriverLoop(
             actionCacheStats.hits++;
             actionCache.markHit(cached);
             acceptedCacheHit = true;
+            lastExecutedSig = replaySig; // A6 (P0)
           }
         } catch (e) {
           record.ok = false;
@@ -1606,6 +1638,9 @@ export async function runDriverLoop(
             const value = toCachedActionValue(action, record.target);
             actionCache.put(key, value, { sourceRunId: artifacts.runId, sourceStepIndex: record.index });
             actionCacheStats.stored++;
+            // A6 (P0): remember what just ran, against the page it ran on — so
+            // the very next iteration cannot take the shortcut and repeat it.
+            lastExecutedSig = { page: pageSignatureFromAx(ax), action: JSON.stringify(value) };
           }
         } catch (e) {
           if (!(e instanceof ActionCacheRejectedError)) {

@@ -104,6 +104,25 @@ function describeCall(n: NetworkEntry): string {
   return where;
 }
 
+/** A6: group consecutive steps that read identically (same words, same
+ * outcome) into one entry carrying how many times it happened. Non-adjacent
+ * repeats stay separate — the order of what happened is the point. */
+export function collapseRepeats(
+  steps: StepRecord[],
+): { text: string; ok: boolean; count: number; position: number }[] {
+  const out: { text: string; ok: boolean; count: number; position: number }[] = [];
+  for (const s of steps) {
+    const text = humanizeStep(s);
+    const prev = out[out.length - 1];
+    if (prev && prev.text === text && prev.ok === s.ok) {
+      prev.count++;
+      continue;
+    }
+    out.push({ text, ok: s.ok, count: 1, position: out.length + 1 });
+  }
+  return out;
+}
+
 /* ---- plain-English report -------------------------------------------------- */
 
 export function renderPlainReport(report: Report): string {
@@ -125,10 +144,14 @@ export function renderPlainReport(report: Report): string {
   if (did.length === 0) {
     lines.push('1. (no steps were taken)');
   } else {
-    did.forEach((s, i) => {
-      const mark = s.ok ? '' : ' — this is where it broke';
-      lines.push(`${i + 1}. ${humanizeStep(s)}${mark}`);
-    });
+    // A6: a check that passes without changing the page used to print as
+    // dozens of byte-identical lines. Fold a back-to-back run of identical
+    // steps into a single "(×N)" line so the list reads as what happened.
+    for (const g of collapseRepeats(did)) {
+      const mark = g.ok ? '' : ' — this is where it broke';
+      const times = g.count > 1 ? ` (×${g.count})` : '';
+      lines.push(`${g.position}. ${g.text}${times}${mark}`);
+    }
   }
 
   if (report.verdict !== 'pass') {
