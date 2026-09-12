@@ -504,18 +504,22 @@ async function runLiteFromPanel(port, msg) {
   }
   const settings = await getSettings();
   const keys = await getKeys();
-  // Brain (planner) key: required unless its provider needs none (e.g. ollama).
+  // A4: both model roles need a key here (no desktop helper to sign in for us).
+  // The panel turns `code: 'no-key'` into an "Open Settings" button, so the text
+  // itself stays plain and says nothing about roles or storage.
+  const NO_KEY_MESSAGE = 'No AI key saved yet. Open Settings and paste a key from Anthropic, Google or OpenAI.';
+  // The model that plans: required unless its provider needs none (e.g. ollama).
   const brainProvider = settings.planner.provider;
   const brainKeyName = LITE_KEY_NAME[brainProvider];
   if (brainKeyName && !keys[brainKeyName]) {
-    port.postMessage({ kind: 'error', message: `Add your Brain (planner) API key in Settings — no "${brainProvider}" key found (lite mode is BYOK; no daemon).` });
+    port.postMessage({ kind: 'error', code: 'no-key', message: NO_KEY_MESSAGE });
     return;
   }
-  // Navigator key: required unless nano/ollama (they need no key).
+  // The model that clicks: required unless it runs on this device / locally.
   const navProvider = settings.navigator.provider;
   const navKeyName = LITE_KEY_NAME[navProvider];
   if (navProvider !== 'nano' && navProvider !== 'ollama' && navKeyName && !keys[navKeyName]) {
-    port.postMessage({ kind: 'error', message: `Add your Navigator API key in Settings (or set Navigator to Nano) — no "${navProvider}" key found.` });
+    port.postMessage({ kind: 'error', code: 'no-key', message: NO_KEY_MESSAGE });
     return;
   }
   liteBusy = true;

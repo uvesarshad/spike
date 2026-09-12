@@ -379,7 +379,9 @@ function onPortMessage(msg) {
     case 'error':
       finalizePendingStep(false);
       setBusy(false);
-      showError(msg.message || 'Something went wrong.');
+      // A4: "no key yet" is a setup problem, so the banner carries the way to fix it
+      if (msg.code === 'no-key') showKeyCta(msg.message);
+      else showError(msg.message || 'Something went wrong.');
       break;
     case 'cancelled':
       // The run will also emit done/error; handle both orders gracefully —
@@ -415,6 +417,7 @@ function onPortMessage(msg) {
       currentConfig = msg;
       if (typeof msg.debugMode === 'string') debugMode = msg.debugMode;
       renderSettings(msg);
+      refreshKeyGate();
       break;
     case 'key-saved':
       onKeySaved(msg);
@@ -460,6 +463,9 @@ function setBridge(msg) {
     requestSiteMap();
   }
   wasBridgeHealthyForSiteMap = healthyNow;
+  // A4: with the desktop helper gone, a command-line model can no longer sign
+  // in for itself — whether a key is needed can change with this dot.
+  refreshKeyGate();
 }
 
 function setNano(availability) {
@@ -942,12 +948,81 @@ function clearFeed() {
 }
 
 // ---- error banner ----------------------------------------------------------
-function showError(message) {
-  errorBanner.textContent = message;
+/** Show the banner. `action` (optional) appends a clickable link after the
+ * message — A4: a banner that says "open Settings" should BE the way there. */
+function showError(message, action) {
+  keyCtaShown = false;
+  errorBanner.textContent = '';
+  const text = document.createElement('span');
+  text.textContent = message;
+  errorBanner.appendChild(text);
+  if (action && action.label && typeof action.onClick === 'function') {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = action.label;
+    // styled inline: the banner is the only place this link shape appears
+    btn.style.cssText =
+      'margin-left:6px;padding:0;border:0;background:none;color:inherit;' +
+      'font:inherit;text-decoration:underline;cursor:pointer;';
+    btn.addEventListener('click', action.onClick);
+    errorBanner.appendChild(btn);
+  }
   errorBanner.hidden = false;
 }
 function hideError() {
   errorBanner.hidden = true;
+  keyCtaShown = false;
+}
+
+/** The banner action that takes the user to the key field. */
+const OPEN_SETTINGS_ACTION = {
+  label: 'Open Settings',
+  onClick: () => openSettings({ focusKey: true }),
+};
+
+// ---- first run: no AI key yet (A4) -----------------------------------------
+//
+// Without a key the panel used to look ready — three suggestion cards that each
+// started a run and failed a few seconds later. Now the first tap (and the
+// panel's own first render) says what's missing and opens the right field.
+
+/** Is the banner currently showing the "add a key" call-to-action? */
+let keyCtaShown = false;
+
+/** True when a model this run needs has no key stored yet. Both roles are
+ * checked, because the run refuses on either one. Unknown (settings not
+ * fetched yet) is never treated as missing — we don't block on a guess. */
+function missingAiKey() {
+  if (!currentConfig || !Array.isArray(currentConfig.providers)) return false;
+  const roles = [currentConfig.navigator, currentConfig.planner];
+  for (const role of roles) {
+    if (!role || !role.provider) continue;
+    const info = providerInfo(role.provider);
+    if (!info || !info.needsKey || info.hasKey) continue;
+    // a command-line model signs in by itself, but only when Spike Core
+    // (the optional desktop helper) is there to run it
+    if (role.mode === 'cli' && bridgeHealthy()) continue;
+    return true;
+  }
+  return false;
+}
+
+/** Put the "add a key" call-to-action in the banner. */
+function showKeyCta(message) {
+  showError(message || 'Add your AI key to start — paste a key from Anthropic, Google or OpenAI and Spike can test this page.', OPEN_SETTINGS_ACTION);
+  keyCtaShown = true;
+}
+
+/** Show the call-to-action as soon as we know there's no key, and take it back
+ * down the moment one is saved. Never disturbs a banner showing something else. */
+function refreshKeyGate() {
+  if (missingAiKey()) {
+    // already up (this runs on every status poll) or a different banner is
+    // showing → leave it alone
+    if (!busy && !keyCtaShown && errorBanner.hidden) showKeyCta();
+  } else if (keyCtaShown) {
+    hideError();
+  }
 }
 
 // ---- result card -----------------------------------------------------------
@@ -1455,6 +1530,12 @@ function renderSettings(cfg) {
   if (cfg.debugAgent) setDebugAgent.value = cfg.debugAgent;
 
   refreshSettingsVisibility();
+
+  // A4: a first-run user sent here by the "add a key" prompt lands on the field
+  if (focusKeyOnRender) {
+    focusKeyOnRender = false;
+    focusKeyEntry();
+  }
 }
 
 // ---- saving the key (A4) ---------------------------------------------------
@@ -1482,7 +1563,7 @@ function saveKeyFromCard(refs) {
   const key = refs.key.value.trim();
   if (!key) return null;
   const provider = refs.provider.value;
-  const stamp = provider + ' ' + key;
+  const stamp = provider + '\n' + key;
   if (refs.savedStamp === stamp) return refs.saving ? provider : null;
   refs.savedStamp = stamp;
   refs.saving = true;
@@ -1539,6 +1620,8 @@ function onKeySaved(msg) {
     if (!msg.ok) primarySaveFailed = true;
     settlePrimarySave();
   }
+  // a key that just landed clears the "add a key" prompt on the main screen
+  refreshKeyGate();
 }
 
 // show / hide the API key (one eye toggle per card)
@@ -1553,9 +1636,33 @@ function wireKeyToggle(toggle, input) {
 wireKeyToggle(setKeyToggle, setKey);
 wireKeyToggle(setNavKeyToggle, setNavKey);
 
-function openSettings() {
+/** A4: `{ focusKey: true }` opens straight onto the key field of the model that
+ * clicks — the one thing a first-run user has to fill in. The focus waits for
+ * the settings render when they haven't been fetched yet. */
+let focusKeyOnRender = false;
+function openSettings(opts) {
   settingsModal.hidden = false;
+  const wantKey = Boolean(opts && opts.focusKey === true);
+  focusKeyOnRender = wantKey;
   postToSW({ kind: 'config-get' });
+  if (wantKey && currentConfig) {
+    focusKeyOnRender = false;
+    focusKeyEntry();
+  }
+}
+
+/** Expand the "model that clicks" section and put the cursor in its key field. */
+function focusKeyEntry() {
+  for (const acc of ACCORDIONS) {
+    if (!acc.head || !acc.body) continue;
+    const open = acc === ACCORDIONS[0];   // the model that clicks
+    acc.head.setAttribute('aria-expanded', String(open));
+    acc.body.hidden = !open;
+  }
+  const field = navCardRefs.keyRow && !navCardRefs.keyRow.hidden ? navCardRefs.key : navCardRefs.provider;
+  if (!field) return;
+  try { field.focus(); } catch { /* not focusable — the section is open either way */ }
+  if (typeof field.scrollIntoView === 'function') field.scrollIntoView({ block: 'nearest' });
 }
 
 function closeSettings() {
@@ -1816,6 +1923,12 @@ historyToggle.addEventListener('click', () => {
 // ---- run -------------------------------------------------------------------
 function startRun(task) {
   if (busy) return;
+  // A4: no key, no run — the suggestion cards used to start one and fail a few
+  // seconds later. Say what's missing and offer the way to fix it instead.
+  if (missingAiKey()) {
+    showKeyCta();
+    return;
+  }
   if (!activeTab || !isTestableUrl(activeTab.url)) {
     showError('Open the page you want to test in this tab (an http/https page).');
     return;
