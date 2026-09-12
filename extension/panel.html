@@ -456,7 +456,11 @@
         <img id="shotImg" class="shot-img" alt="" />
         <figcaption id="shotCaption" class="shot-caption"></figcaption>
       </figure>
-      <pre id="plainReport" class="plain-report"></pre>
+      <!-- A29: the plain-English report, rendered as light HTML (headings,
+           bold, lists) rather than raw markdown text. -->
+      <div id="plainReport" class="plain-report"></div>
+      <!-- A29: the run's cost line, demoted out of the report body. -->
+      <div id="plainReportFooter" class="plain-report-footer" hidden></div>
 
       <div class="result-actions">
         <!-- A15: one file with everything in it, for whoever is going to fix it. -->

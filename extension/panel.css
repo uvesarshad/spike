@@ -672,13 +672,51 @@ body {
 .verdict-fail      { background: #FDE5E3; color: #C23A33; }
 .verdict-uncertain { background: #FCF1CF; color: #8A6A12; }
 
+/* A29: the plain-English report, rendered as light HTML. Headings read as
+   headings, bold reads as bold, the step list reads as a list — instead of the
+   literal "##" / "**" characters the markdown source carries. */
 .plain-report {
   margin: 0;
   font-family: inherit;
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--ink);
-  white-space: pre-wrap;
+  word-break: break-word;
+}
+.plain-report > *:first-child { margin-top: 0; }
+.plain-report > *:last-child  { margin-bottom: 0; }
+.plain-report h3 {
+  margin: 0 0 8px;
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+.plain-report h4 {
+  margin: 14px 0 5px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink);
+}
+.plain-report p { margin: 0 0 8px; }
+.plain-report strong { font-weight: 700; color: var(--ink); }
+.plain-report ol,
+.plain-report ul {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+.plain-report li { margin: 2px 0; }
+/* the step where it broke — called out without shouting */
+.plain-report li.step-bad { color: var(--red); }
+
+/* A29: the cost line, demoted to a quiet footer under the report body. */
+.plain-report-footer {
+  margin-top: -2px; /* the result card already gaps its children */
+  padding-top: 8px;
+  border-top: 1px solid var(--surface-line);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
   word-break: break-word;
 }
 

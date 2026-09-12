@@ -95,6 +95,7 @@ const feed = $('feed');
 const resultCard = $('resultCard');
 const verdictBadge = $('verdictBadge');
 const plainReport = $('plainReport');
+const plainReportFooter = $('plainReportFooter');
 const fixSection = $('fixSection');
 const fixPrompt = $('fixPrompt');
 const copyBtn = $('copyBtn');
@@ -1577,6 +1578,103 @@ function renderVerdictWhy(params) {
   renderAllowHostOffer(params, e);
 }
 
+/* ---- A29: the plain-English report, as light HTML --------------------------
+ * The report arrives as light markdown ("## Everything worked", "**What I
+ * did:**", "1. clicked …"). It used to be dropped into a <pre> verbatim, so
+ * readers saw the literal "##" and "**" characters. These two helpers turn it
+ * into real headings / bold / lists, building DOM nodes (never innerHTML) —
+ * every line of it contains text copied off the page under test.
+ */
+
+/** Append one line of text to `el`, turning **bold** runs into <strong>. */
+function appendInline(el, text) {
+  const parts = String(text).split(/\*\*/);
+  parts.forEach((part, i) => {
+    if (!part) return;
+    // odd indexes sat between a pair of ** markers
+    if (i % 2 === 1) {
+      const b = document.createElement('strong');
+      b.textContent = part;
+      el.appendChild(b);
+    } else {
+      el.appendChild(document.createTextNode(part));
+    }
+  });
+}
+
+/**
+ * Render the markdown-ish report into `host`, and put the trailing "Cost:"
+ * line (engine bookkeeping, not part of the story) into `footer` instead.
+ */
+function renderPlainReportHtml(text, host, footer) {
+  host.textContent = '';
+  footer.textContent = '';
+  footer.hidden = true;
+
+  const lines = String(text == null ? '' : text).split('\n');
+  let list = null; // the <ol>/<ul> currently being filled, if any
+
+  const closeList = () => { list = null; };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+
+    if (!line.trim()) { closeList(); continue; }
+
+    // the cost line is bookkeeping — it belongs in the muted footer
+    if (/^Cost:/i.test(line.trim())) {
+      closeList();
+      footer.textContent = line.trim();
+      footer.hidden = false;
+      continue;
+    }
+
+    // "## Everything worked" → the report's own heading
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    if (heading) {
+      closeList();
+      const h = document.createElement(heading[1].length <= 2 ? 'h3' : 'h4');
+      appendInline(h, heading[2]);
+      host.appendChild(h);
+      continue;
+    }
+
+    // "**What I did:**" on its own line → a sub-heading
+    const boldOnly = /^\*\*(.+?):?\*\*:?$/.exec(line.trim());
+    if (boldOnly) {
+      closeList();
+      const h = document.createElement('h4');
+      h.textContent = `${boldOnly[1]}:`;
+      host.appendChild(h);
+      continue;
+    }
+
+    // "1. clicked Place order" / "- GET /api/order returned 500"
+    const numbered = /^(\d+)\.\s+(.*)$/.exec(line.trim());
+    const bulleted = /^[-*]\s+(.*)$/.exec(line.trim());
+    if (numbered || bulleted) {
+      const want = numbered ? 'OL' : 'UL';
+      if (!list || list.tagName !== want) {
+        list = document.createElement(numbered ? 'ol' : 'ul');
+        if (numbered) list.start = Number(numbered[1]) || 1;
+        host.appendChild(list);
+      }
+      const li = document.createElement('li');
+      const body = numbered ? numbered[2] : bulleted[1];
+      // the step that broke is already marked in words; colour it too
+      if (/— this is where it broke$/.test(body)) li.className = 'step-bad';
+      appendInline(li, body);
+      list.appendChild(li);
+      continue;
+    }
+
+    closeList();
+    const p = document.createElement('p');
+    appendInline(p, line.trim());
+    host.appendChild(p);
+  }
+}
+
 function renderResult(params) {
   const verdict = String(params.verdict || 'uncertain').toLowerCase();
   verdictBadge.className = 'verdict-badge';
@@ -1620,7 +1718,7 @@ function renderResult(params) {
   resetBundleBtn();
 
   const reportText = params.plainReport || params.reason || '(no report)';
-  plainReport.textContent = reportText;
+  renderPlainReportHtml(reportText, plainReport, plainReportFooter);
 
   // a saved replay clip (clipPath in the done payload) → offer a download, but
   // ONLY while Spike Core is connected (clips are a daemon-only feature).
