@@ -68,13 +68,13 @@ Work the list **top to bottom** (severity order). For every task:
 - [x] **(A27, P1)** One canonical MCP registration form in README (`spike mcp` when installed globally; `node /path/dist/mcp-server.js` for a checkout) plus a Cursor `mcp.json` snippet and a Codex/Windsurf note; align `src/cli.ts:673`.
 - [x] **(A28, P2)** *(covered by A21 — strip `(A##)` tags from `--help`; tick when that lands).*
 - [x] **(A29, P2)** Render the plain report as light HTML in the panel (headings, bold, list) instead of raw markdown in a `<pre>` (`extension/panel.js:940`); move the "Cost:" line into a small muted footer; step collapsing is covered by A6.
-- [ ] **(A30, P2)** `spike run` prints `renderPlainReport(report)` plus the artifact path by default, and the JSON only with `--json` (`src/cli.ts:137-138`). Add `schemaVersion: 1` to `slimReport` (`src/report/report.ts:192`) and document the JSON contract in README.
+- [x] **(A30, P2)** `spike run` prints `renderPlainReport(report)` plus the artifact path by default, and the JSON only with `--json` (`src/cli.ts:137-138`). Add `schemaVersion: 1` to `slimReport` (`src/report/report.ts:192`) and document the JSON contract in README.
 - [x] **(A31, P2)** Date-stamp and test the model table (`src/vibe/settings-data.ts`): update OpenRouter defaults to the current Anthropic generation (`anthropic/claude-haiku-4-5`, `anthropic/claude-sonnet-5`), add a comment with the verification date, and a fast test that every default id passes `isSafeModelId`.
 - [ ] **(A32, P2)** Add a "Remove key" link under each saved key row in Settings wired to the existing `clear-key` SW message (`extension/sw.js:751-764`).
 - [ ] **(A33, P2)** Coverage attribution: derive discovery element names from the AX tree (crawl through the driver, A24) so both sides match; fold routes the run reached but the map never saw into the ledger instead of dropping them (`src/discovery/record-coverage.ts:28-33,118-121`). **Test:** fast suite — an unseen route is added.
 - [x] **(A34, P2)** Either wire or delete test-only capability: (default) delete `checkAxInvariants`, `checkPaginationUnion`, `compareEnvironments` and `DiffMask` plumbing stubs and their tests; render invariant violations into `formatHistory` (`src/driver/planner-prompt.ts:51-64`) and the fix prompt's evidence section; make `visibleErrorText` (`loop.ts:522-537`) language-agnostic by also matching `role="alert"`/`aria-invalid` nodes; fix the stale comments at `loop.ts:444-449`, `engine.ts:1022-1027`, `engine.ts:658-660`.
   <!-- note: checkAxInvariants/checkPaginationUnion/compareEnvironments deleted with their tests. DiffMask itself is real (used by diffAxStructure/diffNetworkShape/compareToBaseline) but nothing wires a masks source through the product (no config/CLI surface) — kept the type and corrected differential.ts's header comment to say so plainly instead of overstating it as configured, rather than building a whole config surface for a P2. formatHistory already showed invariants (A16 shipped it); added the same evidence to buildFixPrompt, which didn't. -->
-- [ ] **(A35, P2)** *(covered by A30 — `schemaVersion`; tick when that lands).*
+- [x] **(A35, P2)** *(covered by A30 — `schemaVersion`; tick when that lands).*
 - [ ] **(A36, P2)** Minor copy: "Open the page you want to test in this tab." → "Switch to the tab with your site, then come back here."; drop the amber styling on the third-party note (`extension/panel.js:742`); restricted pages (`sw.js:810`) → "Chrome doesn't allow testing on this page (browser pages, the Web Store, other extensions). Open your site in a tab."; add `--strict-oracles` to `config set` (covered by A21) and `perGoalMaxSteps` (covered by A8).
 
 ## Suggested enhancements
@@ -95,7 +95,7 @@ Work the list **top to bottom** (severity order). For every task:
 - [x] Reason translation layer — covered by A14; tick together. (E14)
 - [ ] Redaction pass incl. pixel-blur on password-field screenshots: after A5, blur the bounding box of any password-type input in step screenshots before writing them (CDP `DOM.getBoxModel` + canvas blur in the runner page, or skip the screenshot for that step). (E15)
 - [x] Reopenable history + Saved tests card — covered by A19; tick together. (E16)
-- [ ] CLI prints the plain report by default + `schemaVersion` — covered by A30; tick together. (E17)
+- [x] CLI prints the plain report by default + `schemaVersion` — covered by A30; tick together. (E17)
 - [x] One real inbox provider — covered by A9's second task; tick together. (E18)
 - [ ] Popup/OOPIF target attachment — covered by A9's first task + A23's second; tick when both land. (E19)
 <!-- note: A23's second (frames) is done; A9's first landed full popup-attach for the CDP transport only, with an SSO-detection fallback for the in-browser transports — not "both land" in full yet. -->
