@@ -13,6 +13,7 @@ import { attachCapture, type CaptureBuffers } from '../capture/console-network.j
 import { setLogpointByContent } from '../capture/logpoints.js';
 import { snapshotAxTree } from '../capture/axtree.js';
 import { INVARIANT_PROBE_JS } from '../assertions/invariants.js';
+import { withSecretFieldsHidden } from '../assertions/screenshot-redaction.js';
 import { buildCdpClient, type CdpShim, type CdpTransport } from '../bridge/cdp-shim.js';
 import type {
   AxNode,
@@ -462,10 +463,23 @@ export class LiteExtensionBrowser implements BrowserPort {
   }
 
   async screenshot(): Promise<Buffer> {
-    // A23 (P1): the whole page — see fullPageCaptureParams().
+    // A23 (P1): the whole page — see fullPageCaptureParams(). Measured BEFORE
+    // the E15 overlays go on, so a padded box near the bottom edge cannot grow
+    // the captured page.
     const params = await this.fullPageCaptureParams();
-    const { data } = await this.c.Page.captureScreenshot(params as never);
-    return Buffer.from(data, 'base64');
+    // E15: same password-field redaction the direct connection applies, over
+    // this transport — module-constant scripts plus a numbers-only builder,
+    // never caller- or page-supplied code.
+    return withSecretFieldsHidden(
+      async (expression) => {
+        const { result } = await this.c.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: false });
+        return result?.value;
+      },
+      async () => {
+        const { data } = await this.c.Page.captureScreenshot(params as never);
+        return Buffer.from(data, 'base64');
+      },
+    );
   }
 
   /** A17 (P1): the deterministic page checks, over this transport. Same single

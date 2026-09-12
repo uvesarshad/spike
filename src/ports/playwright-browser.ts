@@ -53,6 +53,7 @@ import { attachCapture, type CaptureBuffers } from '../capture/console-network.j
 import { setLogpointByContent } from '../capture/logpoints.js';
 import { snapshotAxTree } from '../capture/axtree.js';
 import { INVARIANT_PROBE_JS } from '../assertions/invariants.js';
+import { withSecretFieldsHidden } from '../assertions/screenshot-redaction.js';
 import {
   assertMutationHostAllowed,
   createNetworkIdleTracker,
@@ -654,8 +655,20 @@ export class PlaywrightBrowser implements BrowserPort {
   /* -------------------------- evidence -------------------------- */
 
   async screenshot(): Promise<Buffer> {
-    const { data } = await this.c.Page.captureScreenshot({ format: 'png' });
-    return Buffer.from(data, 'base64');
+    // E15: identical password-field redaction to the other transports —
+    // module-constant scripts plus a numbers-only builder, never caller- or
+    // page-supplied code. Leaving one transport out would mean the same login
+    // page is redacted or not depending on how the browser was reached.
+    return withSecretFieldsHidden(
+      async (expression) => {
+        const { result } = await this.c.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: false });
+        return result?.value;
+      },
+      async () => {
+        const { data } = await this.c.Page.captureScreenshot({ format: 'png' });
+        return Buffer.from(data, 'base64');
+      },
+    );
   }
 
   /** A24 Tier-0 oracle — identical to CdpBrowser's method: evaluates the ONE

@@ -9,6 +9,7 @@ import { attachCapture, type CaptureBuffers } from '../capture/console-network.j
 import { setLogpointByContent } from '../capture/logpoints.js';
 import { snapshotAxTree, TESTID_ATTRS, type AxChildFrame } from '../capture/axtree.js';
 import { INVARIANT_PROBE_JS } from '../assertions/invariants.js';
+import { withSecretFieldsHidden } from '../assertions/screenshot-redaction.js';
 import {
   assertMutationHostAllowed,
   createNetworkIdleTracker,
@@ -1012,10 +1013,28 @@ export class CdpBrowser implements BrowserPort {
   }
 
   async screenshot(): Promise<Buffer> {
-    // A23 (P1): the whole page — see fullPageCaptureParams().
+    // A23 (P1): the whole page — see fullPageCaptureParams(). Measured BEFORE
+    // the E15 overlays go on, so a padded box near the bottom edge cannot grow
+    // the captured page.
     const params = await this.fullPageCaptureParams();
-    const { data } = await this.c.Page.captureScreenshot(params as never);
-    return Buffer.from(data, 'base64');
+    // E15: obscure every password field for the duration of the capture. The
+    // scripts are module constants plus a numbers-only builder — never
+    // caller- or page-supplied code (see BrowserPort.probeInvariants).
+    return withSecretFieldsHidden(
+      (expression) => this.evaluateInPage(expression),
+      async () => {
+        const { data } = await this.c.Page.captureScreenshot(params as never);
+        return Buffer.from(data, 'base64');
+      },
+    );
+  }
+
+  /** E15 helper: run one of this project's own constant scripts in the page and
+   * hand back its value. Kept private and unexported — nothing routes
+   * caller-supplied source through it. */
+  private async evaluateInPage(expression: string): Promise<unknown> {
+    const { result } = await this.c.Runtime.evaluate({ expression, returnByValue: true, awaitPromise: false });
+    return result?.value;
   }
 
   /** A24 Tier-0 oracle. Evaluates the ONE compile-time constant probe — never
