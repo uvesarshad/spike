@@ -218,16 +218,18 @@
             <div id="connectApp" class="connect-app" hidden>
               <div id="connectAppTitle" class="connect-app-title">Connect Spike Core</div>
               <div id="connectAppSub" class="connect-app-sub">Run this once in a terminal — the daemon then auto-starts on every login and this panel connects on its own.</div>
-              <div class="connect-app-os">
-                <button class="connect-os-btn is-active" type="button" data-os="win">Windows</button>
-                <button class="connect-os-btn" type="button" data-os="mac">macOS</button>
-                <button class="connect-os-btn" type="button" data-os="linux">Linux</button>
+              <div id="connectAppInstallUi" hidden>
+                <div class="connect-app-os">
+                  <button class="connect-os-btn is-active" type="button" data-os="win">Windows</button>
+                  <button class="connect-os-btn" type="button" data-os="mac">macOS</button>
+                  <button class="connect-os-btn" type="button" data-os="linux">Linux</button>
+                </div>
+                <div class="connect-cmd-row">
+                  <code id="connectCmd" class="connect-cmd"></code>
+                  <button id="connectCopy" class="connect-copy" type="button">Copy</button>
+                </div>
+                <button id="connectNpmToggle" class="connect-alt" type="button">or install without a remote script (npm)</button>
               </div>
-              <div class="connect-cmd-row">
-                <code id="connectCmd" class="connect-cmd"></code>
-                <button id="connectCopy" class="connect-copy" type="button">Copy</button>
-              </div>
-              <button id="connectNpmToggle" class="connect-alt" type="button">or install without a remote script (npm)</button>
             </div>
 
             <div id="setDebugAgentRow" class="settings-agent-row" hidden>

@@ -146,6 +146,7 @@ const setAutoFixNoteText = $('setAutoFixNoteText');
 const connectApp = $('connectApp');
 const connectAppTitle = $('connectAppTitle');
 const connectAppSub = $('connectAppSub');
+const connectAppInstallUi = $('connectAppInstallUi');
 const connectCmd = $('connectCmd');
 const connectCopy = $('connectCopy');
 const connectNpmToggle = $('connectNpmToggle');
@@ -186,6 +187,23 @@ const CONNECT_APP_COPY = {
   },
 };
 function connectCmds() { return connectUseNpm ? INSTALL_CMDS_NPM : INSTALL_CMDS; }
+
+// A3 (P0): the repo isn't public / the package isn't published yet, so
+// INSTALL_BASE 404s today — showing a copyable one-liner that fails is worse
+// than showing nothing. Probe reachability once per panel session (cached;
+// never re-probed on every render) and gate the install command on it. Any
+// file under INSTALL_BASE would do — install.sh is the one every platform's
+// one-liner ultimately fetches (directly, or via install.ps1 alongside it).
+let installReachable = null; // null = not yet known, true/false once probed
+let installProbeStarted = false;
+function probeInstallReachable() {
+  if (installProbeStarted) return;
+  installProbeStarted = true;
+  fetch(`${INSTALL_BASE}/install.sh`, { method: 'HEAD' })
+    .then((res) => { installReachable = Boolean(res && res.ok); })
+    .catch(() => { installReachable = false; })
+    .then(() => refreshAutoFixGate());
+}
 
 // settings accordions: head button ↔ body element (+ optional summary chip)
 const ACCORDIONS = [
@@ -1316,10 +1334,23 @@ function refreshAutoFixGate() {
   if (connectApp) {
     connectApp.hidden = healthy;
     if (!healthy) {
-      const copy = outdated ? CONNECT_APP_COPY.update : CONNECT_APP_COPY.install;
-      if (connectAppTitle) connectAppTitle.textContent = copy.title;
-      if (connectAppSub) connectAppSub.textContent = copy.sub;
-      renderConnectCmd();
+      // A3: don't show the install command until we've confirmed it's
+      // actually reachable — kick off the (cached, once-per-session) probe
+      // if it hasn't run yet, and re-render when it resolves.
+      if (installReachable === null) probeInstallReachable();
+      if (installReachable === true) {
+        const copy = outdated ? CONNECT_APP_COPY.update : CONNECT_APP_COPY.install;
+        if (connectAppTitle) connectAppTitle.textContent = copy.title;
+        if (connectAppSub) connectAppSub.textContent = copy.sub;
+        if (connectAppInstallUi) connectAppInstallUi.hidden = false;
+        renderConnectCmd();
+      } else {
+        // unreachable (or still probing) — show a plain heads-up instead of
+        // a command that would 404.
+        if (connectAppTitle) connectAppTitle.textContent = 'Spike Core (optional desktop helper)';
+        if (connectAppSub) connectAppSub.textContent = "Spike Core isn't available to install yet — check back soon.";
+        if (connectAppInstallUi) connectAppInstallUi.hidden = true;
+      }
     }
   }
 }
@@ -1742,6 +1773,7 @@ function requestInitialState() {
 initTheme();
 loadActiveTab();
 requestInitialState();
+probeInstallReachable();
 void loadHistory().then(renderHistory);
 
 // poll the bridge connection so the dot stays accurate
