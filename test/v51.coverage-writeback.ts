@@ -81,17 +81,18 @@ console.log('\n=== v51 2/5: a FAILED step records nothing ===');
   check('no element marked from a failed step', r.elementsMarked === 0);
 }
 
-console.log('\n=== v51 3/5: a route the ledger never discovered is surfaced, not invented ===');
+console.log('\n=== v51 3/5: a route the ledger never discovered is folded in AND surfaced ===');
 {
-  // Growing "discovered" from whatever a run happened to reach would make the
-  // denominator mean two different things — and a run reaching surface the
-  // crawler could not IS the signal that interaction-gated exploration is
-  // needed, so it must be visible rather than silently absorbed.
+  // A33: dropping it made coverage report LESS than had demonstrably been
+  // tested, and hid the surface only a run can reach. It goes into the ledger
+  // tagged `source: 'run'` — still distinguishable from what the map found,
+  // which is the signal that interaction-gated exploration is needed.
   const m = modelWithRoute();
   const r = applyRunToModel(m, [step({ url: 'http://localhost:9401/secret-modal-route' })], 'flow-a');
-  check('unknown route reported', r.unknownRoutes.length === 1);
-  check('unknown route NOT added to the ledger', m.routes.length === 1);
-  check('no route marked exercised', r.routesMarked.length === 0);
+  check('unknown route still reported', r.unknownRoutes.length === 1);
+  check('unknown route added to the ledger', m.routes.length === 2);
+  check('added route is tagged as run-discovered', m.routes[1].source === 'run');
+  check('route marked exercised', r.routesMarked.includes('http://localhost:9401/secret-modal-route'));
 }
 
 console.log('\n=== v51 4/5: URL normalisation joins on the right route ===');

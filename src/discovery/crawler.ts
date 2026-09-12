@@ -37,6 +37,11 @@ export interface Fetched {
   pageErrors?: string[];
   /** Same-origin requests the page made that failed or returned 5xx. */
   failedRequests?: FailedRequest[];
+  /** A33: the page's controls, named off the accessibility tree — the same
+   * source a live run names what it clicks from. Only a browser-driven
+   * fetcher can supply these; without them the markup is read instead, which
+   * names controls from attributes and so rarely agrees with a run. */
+  interactiveElements?: InteractiveElement[];
 }
 
 /** Fetch-or-navigate seam: return `null` for a failed/errored fetch (the
@@ -182,7 +187,7 @@ export async function crawlSite(seedUrls: string[], fetcher: Fetcher, opts: Craw
       status: fetched.status,
       structuralSignature: structuralSignatureFromHtml(fetched.html),
       contentSignature: pageSignatureFromAx(fetched.html),
-      interactiveElements: extractInteractiveElements(fetched.html),
+      interactiveElements: fetched.interactiveElements ?? extractInteractiveElements(fetched.html),
       links,
       pageErrors: fetched.pageErrors ?? [],
       failedRequests: fetched.failedRequests ?? [],

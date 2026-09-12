@@ -23,6 +23,16 @@
  * enough to test it. */
 
 import type { FailedRequest, Fetched, Fetcher } from './crawler.js';
+import type { InteractiveElement } from './html.js';
+
+/** One node of the accessibility tree, taken structurally for the same reason
+ * the browser below is — the discovery layer never imports a port. Matches the
+ * shape `BrowserPort.axTree()` already returns. */
+export interface AxNodeLike {
+  role: string;
+  name?: string;
+  children?: AxNodeLike[];
+}
 
 /** What a crawl needs from whatever is driving Chrome. Every BrowserPort
  * implementation that exposes `cdpClient()` satisfies it as-is. */
@@ -33,6 +43,52 @@ export interface CrawlBrowser {
   drainNetwork(): Array<{ url: string; status?: number; failed?: boolean; errorText?: string }>;
   waitForIdle?(opts?: { quietMs?: number; timeoutMs?: number }): Promise<void>;
   cdpClient?(): unknown;
+  /** A33: the page's accessibility tree, when the driver can supply one. */
+  axTree?(): Promise<{ root: AxNodeLike }>;
+}
+
+/* A33 — naming the controls the way the run will name them.
+ *
+ * The map and a live run were reading the same page through two different
+ * lenses: the map extracted control names out of the markup (an `id`, a
+ * `name`, a placeholder), while a run names whatever it clicks the way the
+ * browser's accessibility tree does (from a `<label>`, an `aria-label`, the
+ * visible text). So the map would record `user_email` where the run reported
+ * "Email address", the two never matched, and every one of those controls
+ * looked untested forever — coverage under-reported by an unknown amount and
+ * there was no way to tell which part was real.
+ *
+ * Reading the names off the SAME accessibility tree the run uses removes the
+ * mismatch at the source. The markup-based extraction stays as the fallback
+ * for a plain HTTP map, which has no browser and therefore no tree. */
+
+/** Roles worth counting as a control someone can operate. Deliberately the
+ * same set the markup extractor uses (html.ts's INTERACTIVE_ROLES) plus the
+ * accessibility-tree spellings of the same things, so a browser-driven map and
+ * an HTTP one count comparable denominators. */
+const AX_INTERACTIVE_ROLES = new Set([
+  'link', 'button', 'checkbox', 'radio', 'combobox', 'textbox', 'searchbox', 'switch', 'menuitem', 'tab',
+]);
+
+/** Every operable control in an accessibility tree, deduplicated by role+name,
+ * in document order. Exported for testing without a browser. */
+export function interactiveElementsFromAx(root: AxNodeLike | undefined): InteractiveElement[] {
+  const out: InteractiveElement[] = [];
+  const seen = new Set<string>();
+  const walk = (node: AxNodeLike | undefined, depth: number): void => {
+    if (!node || depth > 200) return;
+    if (AX_INTERACTIVE_ROLES.has(node.role)) {
+      const name = (node.name ?? '').trim().replace(/\s+/g, ' ').slice(0, 120);
+      const key = `${node.role}|${name.toLowerCase()}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push({ role: node.role, ...(name && { name }) });
+      }
+    }
+    for (const child of node.children ?? []) walk(child, depth + 1);
+  };
+  walk(root, 0);
+  return out;
 }
 
 /** Minimal slice of the CDP client this module drives. */
@@ -110,6 +166,20 @@ export function browserFetcher(browser: CrawlBrowser, opts: BrowserCrawlOptions 
       /* keep the requested url */
     }
 
+    // A33: name the page's controls off the accessibility tree — the same
+    // source a run names what it clicks from — so the two sides can actually
+    // be matched up. A driver that cannot supply one leaves this absent and
+    // the crawler falls back to reading the markup.
+    let interactiveElements: InteractiveElement[] | undefined;
+    if (browser.axTree) {
+      try {
+        const snapshot = await browser.axTree();
+        interactiveElements = interactiveElementsFromAx(snapshot?.root);
+      } catch {
+        /* no tree for this page — the markup fallback still applies */
+      }
+    }
+
     const console_ = browser.drainConsole();
     const network = browser.drainNetwork();
     const sameOrigin = opts.sameOrigin ?? originOf(finalUrl);
@@ -131,6 +201,6 @@ export function browserFetcher(browser: CrawlBrowser, opts: BrowserCrawlOptions 
       failedRequests.push({ url: e.url, ...(e.status !== undefined && { status: e.status }), ...(e.errorText && { errorText: e.errorText }) });
     }
 
-    return { url: finalUrl, status, html, pageErrors, failedRequests };
+    return { url: finalUrl, status, html, pageErrors, failedRequests, ...(interactiveElements && { interactiveElements }) };
   };
 }

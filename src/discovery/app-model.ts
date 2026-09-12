@@ -45,7 +45,11 @@ export interface AppModelState {
 export interface AppModelRoute {
   /** Identity key — see file header. */
   route: string;
-  source: 'static' | 'crawl';
+  /** Where the ledger first heard about this route: declared somewhere static
+   * (sitemap/robots/route files), reached by the crawl, or — A33 — reached by
+   * a RUN and by nothing else, which is the interaction-gated surface the
+   * crawl structurally cannot see. */
+  source: 'static' | 'crawl' | 'run';
   /** Collapsed pattern for a crawl-discovered concrete page (see
    * `crawler.ts`'s `collapseParameterizedPath`); absent for static routes,
    * which are already patterns. */
@@ -235,6 +239,22 @@ export function upsertCrawledPage(model: AppModel, page: CrawledPage, now: strin
 export function upsertStaticRoute(model: AppModel, route: string, now: string = new Date().toISOString()): AppModel {
   if (findRoute(model, route)) return model;
   model.routes.push({ route, source: 'static', discoveredAt: now, exercised: false, states: [], coveredByScripts: [] });
+  return model;
+}
+
+/** A33: adds a route a RUN reached that no discovery pass ever found. These
+ * used to be counted, reported as "unknown", and then dropped on the floor —
+ * so the very surface a run had proven reachable (anything behind a click,
+ * a wizard step, a modal route) stayed permanently invisible to coverage, and
+ * the ledger's own totals disagreed with what had demonstrably been tested.
+ *
+ * Tagged `source: 'run'` so it stays distinguishable from what the crawl
+ * found: "discovered" still means what it meant, and the gap between the two
+ * is exactly the signal that the map is missing part of the app. A no-op when
+ * the route is already present under any source. */
+export function upsertRunRoute(model: AppModel, route: string, now: string = new Date().toISOString()): AppModel {
+  if (findRoute(model, route)) return model;
+  model.routes.push({ route, source: 'run', discoveredAt: now, exercised: false, states: [], coveredByScripts: [] });
   return model;
 }
 

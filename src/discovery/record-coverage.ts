@@ -11,25 +11,33 @@
  *
  * Deliberately best-effort and non-fatal. A missing ledger (nobody ran
  * `spike map`) is the COMMON case, not an error — coverage is opt-in, and a QA
- * run must never fail because a bookkeeping file is absent. Routes the model
- * has never seen are skipped rather than invented: the ledger's job is to
- * report coverage of a KNOWN surface, and silently growing it from whatever a
- * run happened to touch would make "discovered" mean two different things.
+ * run must never fail because a bookkeeping file is absent.
+ *
+ * A33: a route the run reached that the map never found used to be counted and
+ * then thrown away, which made the tested surface SMALLER than what had
+ * demonstrably been tested — and hid precisely the pages the crawl cannot see
+ * (anything behind a click, a wizard step, a modal route). Those now go into
+ * the ledger tagged `source: 'run'`, so "discovered by the map" and "reached
+ * by a run" stay tellable apart while neither is silently dropped. They are
+ * still reported in `unknownRoutes` too: the gap between the two is the signal
+ * that the map is missing part of the app (see discover.ts).
  */
 
 import { normalizeUrlForActionCache } from '../cache/action-cache.js';
 import type { StepRecord } from '../report/report.js';
-import { loadAppModel, markElementTouched, markRouteExercised, saveAppModel, type AppModel, type AppModelElement, type AppModelRoute, type AppModelState } from './app-model.js';
+import { loadAppModel, markElementTouched, markRouteExercised, saveAppModel, upsertRunRoute, type AppModel, type AppModelElement, type AppModelRoute, type AppModelState } from './app-model.js';
 
 export interface CoverageWriteResult {
   /** False when there is no ledger yet — the normal state before `spike map`. */
   ledgerPresent: boolean;
   routesMarked: string[];
   elementsMarked: number;
-  /** Routes the run visited that the ledger has never discovered. Surfaced
-   * rather than added: a run reaching surface the crawler could not (an
-   * interaction-gated route) is exactly the signal that the AI-exploration
-   * seam is needed — see discover.ts. */
+  /** Routes the run visited that no discovery pass had ever found. A33: these
+   * are now ADDED to the ledger (tagged `source: 'run'`) as well as reported
+   * here — a run reaching surface the crawler could not is exactly the signal
+   * that the AI-exploration seam is needed (see discover.ts), and dropping
+   * them made coverage report less than had actually been tested. They appear
+   * in `routesMarked` too, since the run exercised them. */
   unknownRoutes: string[];
 }
 
@@ -44,9 +52,13 @@ export interface CoverageWriteResult {
  * Case/whitespace-insensitive comparison closes that particular gap, and helps
  * generally since the two sources differ most often in casing. It does NOT fix
  * the underlying impedance mismatch — an input labelled "Email address" with
- * `id="user_email"` still will not match. Properly fixing it means teaching the
- * HTML extractor to compute accessible names (label association, aria-label,
- * placeholder fallback); tracked as a follow-up rather than papered over here. */
+ * `id="user_email"` still will not match.
+ *
+ * A33 fixes that mismatch at its source for a browser-driven map: the crawl
+ * now reads control names off the SAME accessibility tree a run does (see
+ * browser-crawl.ts's `interactiveElementsFromAx`), so both sides say "Email
+ * address". This comparison stays as the safety net for a ledger written by a
+ * plain HTTP map, which has no browser and therefore no tree to read. */
 function sameName(a: string | undefined, b: string | undefined): boolean {
   return (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase();
 }
@@ -116,8 +128,13 @@ export function applyRunToModel(model: AppModel, steps: StepRecord[], scriptName
     if (!step.url || !step.ok) continue; // a failed step touched nothing worth recording
     const route = normalizeUrlForActionCache(step.url);
     if (!known.has(route)) {
+      // A33: fold it in rather than dropping it. It carries no states (the run
+      // records what it touched, not the page's structure), so it counts as a
+      // route the run exercised and contributes no untouched elements — an
+      // honest floor, not an invented denominator.
       unknownRoutes.add(route);
-      continue;
+      upsertRunRoute(model, route);
+      known.add(route);
     }
     if (!routesMarked.has(route)) {
       markRouteExercised(model, route, scriptName);

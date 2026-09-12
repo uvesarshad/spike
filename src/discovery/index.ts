@@ -24,6 +24,7 @@ export {
   loadAppModel,
   saveAppModel,
   upsertCrawledPage,
+  upsertRunRoute,
   upsertStaticRoute,
   markRouteExercised,
   markElementTouched,
@@ -53,7 +54,7 @@ export {
   type FailedRequest,
 } from './crawler.js';
 
-export { browserFetcher, type CrawlBrowser, type BrowserCrawlOptions } from './browser-crawl.js';
+export { browserFetcher, interactiveElementsFromAx, type CrawlBrowser, type BrowserCrawlOptions, type AxNodeLike } from './browser-crawl.js';
 
 export {
   checkTargets,
@@ -87,3 +88,5 @@ export {
   htmlToStructuralNode,
   type InteractiveElement,
 } from './html.js';
+
+export { applyRunToModel, recordRunCoverage, type CoverageWriteResult } from './record-coverage.js';

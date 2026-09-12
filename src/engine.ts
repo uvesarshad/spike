@@ -1279,7 +1279,10 @@ async function runFreshAiPass(
         progress(`coverage: ${cov.routesMarked.length} route(s), ${cov.elementsMarked} element(s) marked exercised`);
       }
       if (cov.unknownRoutes.length) {
-        progress(`coverage: ${cov.unknownRoutes.length} route(s) reached that \`spike map\` never discovered — likely interaction-gated`);
+        // A33: these are now recorded as tested rather than dropped — say so,
+        // and keep naming them, because a page only a run can reach is the
+        // clearest sign the map is missing part of the app.
+        progress(`coverage: ${cov.unknownRoutes.length} page(s) this test reached had never been mapped — added to the list of what's been tested (likely only reachable by clicking through)`);
       }
     }
 

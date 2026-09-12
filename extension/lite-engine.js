@@ -6340,6 +6340,9 @@ init_buffer_shim();
 var LITE_CHECK_PAGES = 10;
 var LITE_CAP_NOTE = `Without the optional desktop helper a check looks at up to ${LITE_CHECK_PAGES} pages. Install it to check the whole site at once.`;
 
+// src/discovery/record-coverage.ts
+init_buffer_shim();
+
 // src/report/report.ts
 init_buffer_shim();
 function headlineScreenshot(r) {
