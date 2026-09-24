@@ -75,7 +75,7 @@ Work the list **top to bottom** (severity order). For every task:
 
 ## Suggested enhancements
 
-- [ ] **Navigator qualification bench** — `spike bench navigator <provider:model>` runs the fixture + a fixed set of public demo flows and reports success rate, steps, brain escalations and cost vs the current default; generalises `spikes/nano-nav/` GO/NO-GO so any new cheap model is a 10-minute decision. (E1)
+- [x] **Navigator qualification bench** — `spike bench navigator <provider:model>` runs the fixture + a fixed set of public demo flows and reports success rate, steps, brain escalations and cost vs the current default; generalises `spikes/nano-nav/` GO/NO-GO so any new cheap model is a 10-minute decision. (E1)
 - [ ] **Claude Code plugin** — package the skill + MCP registration as a plugin for plugin marketplaces. (E2)
 - [ ] **MCP registry listings** — `server.json` for the official MCP registry and common directories; ⛔ OWNER to submit after A3. (E3)
 - [ ] **"Did the agent actually check?" hook** — `spike setup --strict` installs an optional Claude Code Stop hook that nudges the agent to run Spike when it edited UI files and is about to finish without a verdict. (E4)
@@ -83,4 +83,4 @@ Work the list **top to bottom** (severity order). For every task:
 - [x] **Session capture helper** — `spike login <url>` opens a headed window, the human signs in any way (SSO, SMS, CAPTCHA), Spike saves the session for reuse. (E6)
 - [ ] **Change-scoped runs** — map a git diff to affected routes and run only those, for `watch` and `ci`. (E7)
 - [ ] **Spec-derived checks** — read an OpenAPI file and assert API responses seen during runs match it. (E8)
-- [ ] **Published result schema** — a small versioned JSON schema for the slim result shipped in the package for agent authors. (E9)
+- [x] **Published result schema** — a small versioned JSON schema for the slim result shipped in the package for agent authors. (E9)

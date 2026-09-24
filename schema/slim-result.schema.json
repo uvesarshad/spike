@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/uvesarshad/spike/schema/slim-result.schema.json",
+  "title": "Spike slim result",
+  "description": "What a coding agent reads back from `spike run --json` or the `qa_run` MCP tool. schemaVersion 1. New optional fields may appear without a version bump; a field being removed or changing meaning bumps schemaVersion. Extra fields (for example `script`, `healed`, `test`) may be present.",
+  "type": "object",
+  "required": ["schemaVersion", "verdict", "failing_step", "console_error", "evidence_paths", "reason"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "verdict": { "enum": ["pass", "fail", "uncertain"], "description": "pass: the flow worked. fail: something is broken, see failing_step. uncertain: could not decide; never treat as success." },
+    "failing_step": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["index"],
+          "properties": {
+            "index": { "type": "integer", "minimum": 0 },
+            "description": { "type": "string" },
+            "action": { "type": "object" }
+          }
+        }
+      ]
+    },
+    "console_error": { "type": ["string", "null"], "description": "First page error or failed request seen during the run, if any." },
+    "evidence_paths": { "type": "array", "items": { "type": "string" }, "description": "Screenshots and other files saved for this run." },
+    "reason": { "type": "string", "description": "One plain sentence saying why the verdict is what it is." },
+    "fix_hint": { "type": "string", "description": "Only on fail: a short pointer to what to change." },
+    "spendSummary": {
+      "type": "object",
+      "required": ["freeCalls", "paidCalls", "totalTokens", "estimatedUsd"],
+      "properties": {
+        "freeCalls": { "type": "integer", "minimum": 0 },
+        "paidCalls": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "number", "minimum": 0 },
+        "estimatedUsd": { "type": "number", "minimum": 0 },
+        "capUsd": { "type": "number", "minimum": 0 }
+      }
+    }
+  },
+  "additionalProperties": true
+}

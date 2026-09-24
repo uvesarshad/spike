@@ -37,6 +37,7 @@
     "dist",
     "extension",
     "install",
+    "schema",
     "README.md",
     "LICENSE"
   ],

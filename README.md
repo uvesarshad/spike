@@ -269,7 +269,7 @@ What each add-on unlocks:
 | `spike bench navigator <provider:model> [--baseline <provider:model>] [--repeats <n>] --yes` | Qualify a new cheap model for clicking through pages: runs a fixed set of flows (the demo shop plus a few public pages) with that model and with your current one, then prints pass rate, steps, how often the planner had to step in and cost, with a GO / NO-GO. Spends real money, so it refuses to start without `--yes` |
 | `spike mcp` | Start the MCP stdio server — register it as command `spike`, args `["mcp"]` (see [Registering as an MCP tool](#registering-as-an-mcp-tool)) |
 | `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
-| `spike dashboard [--port n] [--host addr]` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats. Listens on this machine only (127.0.0.1); `--host` with any other address exposes past reports to your network and prints a warning |
+| `spike dashboard [--port n] [--host addr] [--no-open]` | Open **Spike home** — past runs, saved tests, site map, schedules, setup. Spike Core (`spike daemon`) serves the same page on `http://127.0.0.1:9420`. Listens on this machine only; requests with an unexpected `Host` header get 403 (DNS-rebinding guard); `--host` with any other address exposes past reports to your network and prints a warning |
 
 ## The machine-readable output (`--json`)
 
@@ -304,6 +304,8 @@ Adding a field is not a breaking change, so read it defensively and ignore keys
 you don't know. `schemaVersion` goes up only when a field disappears or changes
 meaning. `evidence_paths[0]` is always the full report for the run, which has
 every step, screenshot and model call in it.
+
+A JSON Schema for this result ships in the package as `schema/slim-result.schema.json` (`node_modules/spike-agent/schema/`), for anyone building an agent or CI step on top of it.
 
 The exit code carries the verdict on its own, for a script that doesn't want to
 parse anything at all:
