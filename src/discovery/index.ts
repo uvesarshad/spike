@@ -110,3 +110,5 @@ export {
 } from './html.js';
 
 export { applyRunToModel, recordRunCoverage, type CoverageWriteResult } from './record-coverage.js';
+
+export { CONTROL_DENY_RE, SENSITIVE_FIELD_RE, filterSafeControls, isSafeControl, isSafeControlLabel, pressedForbiddenControl, tagCheckScripts, tryControlsInstruction } from './try-controls.js';

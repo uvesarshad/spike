@@ -13,6 +13,8 @@ import { exitCodeForVerdict, INFRA_ERROR_EXIT_CODE } from './cli-exit-codes.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { allocateIsolatedSession, createPlanningRouter, injectStorageState, isQuarantined, loadStorageStateFile, openBrowserSession, qaReplay, qaRun, type QaReplayResult } from './engine.js';
 import { decomposeSpec, flowsFromRoutes, renderFlowTable, runFanOut, runFlows } from './driver/spec-decompose.js';
+import { batchLoginOnce, runOptionsFromContext, type FanOutContext } from './orchestrator/fan-out.js';
+import { SpendBudget, parseBudgetFlag, resolveUnattendedBudget } from './orchestrator/budget.js';
 import { startDashboard, isLoopbackHost } from './dashboard/server.js';
 import { headlineScreenshot, slimReport, type Report } from './report/report.js';
 import { findChrome } from './chrome/launch.js';
@@ -96,6 +98,7 @@ function printSettings(s: QaSettings): void {
   console.log(`  drives Chrome by: ${cfg.via}`);
   console.log(`  sites allowed:    ${cfg.allowedHosts.join(', ') || '(none)'} — plus whatever host you name with --url`);
   console.log(`  strict checks:    ${cfg.strictOracles ? 'on — a failed check forces a fail verdict' : 'off — the model alone decides'}`);
+  console.log(`  email codes:      ${cfg.emailProvider === 'imap' ? `inbox at ${cfg.imapHost ?? '(no host set)'}` : cfg.emailProvider === 'none' ? 'off' : cfg.emailProvider}`);
   console.log('API keys (in encrypted vault):');
   for (const p of PROVIDERS) {
     const name = VAULT_KEY_NAMES[p];
@@ -256,8 +259,11 @@ program
   .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent for this non-interactive run', false)
   .option('--baseline', 'compare the finished page against this flow\'s stored baseline (the first run stores it); differences are reported as evidence, the verdict is unchanged', false)
   .option('--fail-on-regression', 'with --baseline: a difference from the accepted baseline turns a pass into a fail (accept intended changes with `spike bless`)', false)
+  .option('--budget <usd>', 'with --spec: stop once about this much has been spent (remaining flows are skipped and the result is "not sure"); each flow also gets the money left as its own limit')
+  .option('--stop-on-fail', 'with --spec: stop at the first flow that fails instead of testing them all', false)
+  .option('--steps-per-flow <n>', 'with --spec: how many steps each flow may take (default: --max-steps)', (v) => parseInt(v, 10))
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string | undefined, opts: { baseline: boolean; failOnRegression: boolean; url: string; spec?: string; maxSteps?: number; perGoalMaxSteps?: number; expect?: string; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; fixOnUncertain: boolean; rebuildTimeout?: number; waitForUrl?: string; yesAutoFix: boolean; json: boolean }) => {
+  .action(async (task: string | undefined, opts: { budget?: string; stopOnFail: boolean; stepsPerFlow?: number; baseline: boolean; failOnRegression: boolean; url: string; spec?: string; maxSteps?: number; perGoalMaxSteps?: number; expect?: string; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; fixOnUncertain: boolean; rebuildTimeout?: number; waitForUrl?: string; yesAutoFix: boolean; json: boolean }) => {
     // A7 (P0): exactly one input — a sentence or a document, never neither.
     if (!task && !opts.spec) {
       console.error('Tell me what to test: either a sentence in quotes, or --spec <file> with a document describing the flows.');
@@ -288,13 +294,25 @@ program
       onProgress,
     };
     /** One task → one run, with --fix applied the same way in both modes. */
-    const runOneTask = async (t: string) =>
-      opts.fix
+    const runOneTask = async (t: string, ctx?: FanOutContext) => {
+      // A8/A11: inside a batch, the run inherits the shared session, the money
+      // left in the batch budget, and the per-flow step limit.
+      const ctxOpts = ctx ? runOptionsFromContext(ctx) : {};
+      const runOpts = ctx
+        ? {
+            ...qaRunOpts,
+            ...(ctx.maxSteps !== undefined && { maxSteps: ctx.maxSteps }),
+            storageStatePath: ctxOpts.storageStatePath,
+            saveStorageStatePath: ctxOpts.saveStorageStatePath ?? (opts.storageState ? qaRunOpts.saveStorageStatePath : undefined),
+            ...((qaRunOpts.config || ctxOpts.config) && { config: { ...qaRunOpts.config, ...ctxOpts.config } }),
+          }
+        : qaRunOpts;
+      return opts.fix
         ? (await runWithAutoFix(t, opts.url, {
             maxAttempts: opts.maxFixAttempts ?? 2,
-            config: qaRunOpts.config,
+            config: runOpts.config,
             onProgress,
-            qaRunOpts,
+            qaRunOpts: runOpts,
             // A11: on the command line the directory the user typed the command
             // in IS the explicit choice of project, so it stands in for an
             // unset project folder. The panel gets no such fallback.
@@ -308,7 +326,8 @@ program
               onProgress,
             },
           })).finalReport
-        : await qaRun(t, opts.url, qaRunOpts);
+        : await qaRun(t, opts.url, runOpts);
+    };
 
     // A7 (P0): document mode — work out the flows once, then test each one as
     // its own run, sharing whatever sign-in state --storage-state supplies.
@@ -330,9 +349,23 @@ program
         flows.forEach((f, i) => console.log(`${String(i + 1).padStart(2)}. ${f.name} — ${f.task}`));
         console.log('');
       }
+      let budgetUsd: number | undefined;
+      try {
+        budgetUsd = parseBudgetFlag(opts.budget);
+      } catch (e) {
+        console.error(e instanceof Error ? e.message : String(e));
+        process.exit(INFRA_ERROR_EXIT_CODE);
+      }
+      // A11: log in once per batch — kept on disk only if --save-storage-state was given.
+      const loginOnce = opts.storageState ? undefined : batchLoginOnce(loadConfig().artifactsDir, opts.saveStorageState);
       const outcome = await runFlows(flows, {
-        runFlow: (flow) => runOneTask(flow.task),
+        runFlow: (flow, _i, ctx) => runOneTask(flow.task, ctx),
         onProgress,
+        ...(opts.storageState && { storageStatePath: opts.storageState }),
+        ...(loginOnce && { loginOnce }),
+        ...(budgetUsd !== undefined && { budgetUsd }),
+        ...(opts.stopOnFail && { stopOnFirstFailure: true }),
+        ...((opts.stepsPerFlow ?? opts.maxSteps) !== undefined && { maxStepsPerFlow: opts.stepsPerFlow ?? opts.maxSteps }),
       });
       if (opts.json) {
         console.log(JSON.stringify(outcome, null, 2));
@@ -799,6 +832,12 @@ program
       nano,
       roles,
       run: { readOnly: cfg.readOnly, via: cfg.via, allowedHosts: cfg.allowedHosts, strictOracles: cfg.strictOracles },
+      email: {
+        provider: cfg.emailProvider,
+        host: cfg.imapHost,
+        user: cfg.imapUser,
+        hasPassword: (() => { const v = new Vault(); return Boolean(v.get('imap') ?? v.get('SPIKE_IMAP_PASS') ?? process.env.SPIKE_IMAP_PASS); })(),
+      },
     });
     for (const line of renderDoctorReport(sections)) console.log(line);
     process.exit(doctorExitCode(sections));
@@ -815,9 +854,12 @@ program
   .option('--navigator-mode <m>', 'NAVIGATOR: api|cli|ondevice')
   .option('--navigator-model <m>', 'NAVIGATOR model id (blank = provider default)')
   .option('--strict-oracles <on|off>', 'on: a failed safety check forces a fail verdict whatever the model says')
+  .option('--email-provider <p>', 'where sign-in emails are read from: none | imap | fake-local (the password is never a flag — use `spike secret set SPIKE_IMAP_PASS`)')
+  .option('--imap-host <host>', 'mail server for --email-provider imap')
+  .option('--imap-user <user>', 'mail account for --email-provider imap (usually the full address)')
   .option('--debug-mode <d>', 'prompt|auto')
   .option('--debug-agent <a>', 'auto|claude|codex|gemini')
-  .action((action: string, opts: { provider?: string; mode?: string; model?: string; navigatorProvider?: string; navigatorMode?: string; navigatorModel?: string; strictOracles?: string; debugMode?: string; debugAgent?: string }) => {
+  .action((action: string, opts: { provider?: string; mode?: string; model?: string; navigatorProvider?: string; navigatorMode?: string; navigatorModel?: string; strictOracles?: string; emailProvider?: string; imapHost?: string; imapUser?: string; debugMode?: string; debugAgent?: string }) => {
     const store = new SettingsStore();
     if (action === 'show') {
       printSettings(store.read());
@@ -876,6 +918,15 @@ program
       }
       patch.strictOracles = on;
     }
+    if (opts.emailProvider !== undefined) {
+      if (!['none', 'imap', 'fake-local'].includes(opts.emailProvider)) {
+        console.error(`invalid --email-provider "${opts.emailProvider}" — choose one of: none, imap, fake-local`);
+        process.exit(2);
+      }
+      patch.emailProvider = opts.emailProvider as 'none' | 'imap' | 'fake-local';
+    }
+    if (opts.imapHost !== undefined) patch.imapHost = opts.imapHost.trim() || undefined;
+    if (opts.imapUser !== undefined) patch.imapUser = opts.imapUser.trim() || undefined;
     if (opts.debugMode !== undefined) {
       if (!DEBUG_MODES.includes(opts.debugMode as DebugMode)) {
         console.error(`invalid --debug-mode "${opts.debugMode}" — choose one of: ${DEBUG_MODES.join(', ')}`);
@@ -894,7 +945,7 @@ program
     if (Object.keys(navigator).length) patch.navigator = navigator as PlannerSelection;
     if (Object.keys(patch).length === 0) {
       console.error(
-        'nothing to set — pass at least one of: --provider --mode --model --navigator-provider --navigator-mode --navigator-model --strict-oracles --debug-mode --debug-agent',
+        'nothing to set — pass at least one of: --provider --mode --model --navigator-provider --navigator-mode --navigator-model --strict-oracles --email-provider --imap-host --imap-user --debug-mode --debug-agent',
       );
       process.exit(2);
     }

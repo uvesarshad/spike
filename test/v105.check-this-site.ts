@@ -185,7 +185,7 @@ function modelWith(routes: string[]): AppModel {
   // The check engine moved out of cli.ts into src/discovery/run-check.ts (shared with the MCP site_check tool).
   const checkSrc = fs.readFileSync(path.join(REPO_ROOT, 'src', 'discovery', 'run-check.ts'), 'utf8');
   check('`spike check` runs through the shared check engine', cliSrc.includes('runSiteCheck('));
-  check('`spike check` runs look-only', /readOnly: true, \/\/ a check nobody asked for/.test(checkSrc));
+  check('`spike check` runs look-only unless --try-controls', /readOnly: !o\.tryControls, \/\/ a check nobody asked for/.test(checkSrc));
   check('`spike check` aggregates through the orchestrator', checkSrc.includes('runFanOut(flows'));
   check('`spike check` can use a saved sign-in', cliSrc.includes("'--storage-state <path>', 'load a saved sign-in first"));
 }

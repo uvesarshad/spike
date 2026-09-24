@@ -8,6 +8,9 @@ import path from 'node:path';
 import {
   browserFetcher,
   checkInstruction,
+  tryControlsInstruction,
+  pressedForbiddenControl,
+  tagCheckScripts,
   checkTargets,
   coverageReport,
   DEFAULT_CHECK_PAGES,
@@ -22,6 +25,7 @@ import {
 } from './index.js';
 import { createPlanningRouter, injectStorageState, loadStorageStateFile, openBrowserSession, qaRun } from '../engine.js';
 import { flowsFromRoutes, runFanOut, type FanOutOutcome, type FlowRunResult } from '../driver/spec-decompose.js';
+import type { FanOutContext } from '../orchestrator/fan-out.js';
 import type { QaConfig } from '../config.js';
 
 export interface MapCrawlOptions {
@@ -134,15 +138,24 @@ export interface SiteCheckOptions {
   browser?: boolean;
   headless?: boolean;
   explore?: boolean;
-  /** Per-page spend cap in USD (passed to each page's run). */
+  /** A13: press ordinary controls too (trusted named target only; never spend/delete/sign-out). Passing pages are saved as tests tagged `check`. */
+  tryControls?: boolean;
+  /** A13: the terminal front door adds a 'looked without clicking' hint to a look-only summary. */
+  lookedHint?: boolean;
+  /** A8: cap for the WHOLE check in USD — once reached the remaining pages are
+   * skipped (the result is "not sure") and each page's run is capped at what is left. */
   budgetUsd?: number;
+  /** A10: stop at the first page that looks broken. */
+  stopOnFail?: boolean;
+  /** A10: how many steps one page's look may take. */
+  stepsPerPage?: number;
   progress?: (line: string) => void;
 }
 
 export interface SiteCheckDeps {
   buildMap?: (url: string, opts: MapCrawlOptions, progress?: (l: string) => void) => Promise<AppModel>;
   /** Looks at ONE page. Default: a look-only qaRun. */
-  runPage?: (task: string, address: string, opts: SiteCheckOptions) => Promise<FlowRunResult>;
+  runPage?: (task: string, address: string, opts: SiteCheckOptions, ctx?: FanOutContext) => Promise<FlowRunResult>;
   saveModel?: (model: AppModel) => void;
 }
 
@@ -165,16 +178,17 @@ export async function runSiteCheck(url: string, opts: SiteCheckOptions = {}, dep
   const buildMap = deps.buildMap ?? buildSiteMap;
   const runPage =
     deps.runPage ??
-    ((task, address, o): Promise<FlowRunResult> =>
+    ((task, address, o, ctx): Promise<FlowRunResult> =>
       qaRun(task, address, {
-        readOnly: true, // a check nobody asked for must never press anything
-        record: false,
+        ...(ctx?.maxSteps !== undefined && { maxSteps: ctx.maxSteps }),
+        readOnly: !o.tryControls, // a check nobody asked for must never press anything
+        record: o.tryControls === true,
         replay: false,
         headless: o.headless,
         storageStatePath: o.storageState,
         config: {
           ...(o.via && { via: o.via }),
-          ...(o.budgetUsd && { spendCapUsd: o.budgetUsd }),
+          ...(ctx?.spendCapUsd !== undefined && { spendCapUsd: Math.max(ctx.spendCapUsd, 0.01) }),
         } as Partial<QaConfig>,
       }));
 
@@ -204,11 +218,22 @@ export async function runSiteCheck(url: string, opts: SiteCheckOptions = {}, dep
 
   const flows = flowsFromRoutes(
     targets.map((t) => ({ url: t.url, name: t.name })),
-    { baseUrl: url, maxFlows: targets.length, instruction: (_r, address) => checkInstruction(address) },
+    { baseUrl: url, maxFlows: targets.length, instruction: (_r, address) => (opts.tryControls ? tryControlsInstruction(address) : checkInstruction(address)) },
   );
+  const savedScripts: string[] = [];
   const outcome = await runFanOut(flows, {
-    runFlow: (flow, i) => runPage(flow.task, targets[i]?.url ?? url, opts),
+    runFlow: async (flow, i, ctx) => {
+      const r = await runPage(flow.task, targets[i]?.url ?? url, opts, ctx);
+      if (opts.tryControls) {
+        const rec = (r as { recordedScript?: string }).recordedScript;
+        if (rec && r.verdict === 'pass' && !pressedForbiddenControl(r.steps)) savedScripts.push(rec);
+      }
+      return r;
+    },
     ...(opts.storageState && { storageStatePath: opts.storageState }),
+    ...(opts.budgetUsd && { budgetUsd: opts.budgetUsd }),
+    ...(opts.stopOnFail && { stopOnFirstFailure: true }),
+    ...(opts.stepsPerPage && { maxStepsPerFlow: opts.stepsPerPage }),
     onProgress: progress,
   });
 
@@ -220,7 +245,14 @@ export async function runSiteCheck(url: string, opts: SiteCheckOptions = {}, dep
     controlsFound: cov.interactiveElements.total,
     problems,
     capped,
+    transport: 'terminal',
+    maxPages,
+    looked: opts.lookedHint === true && !opts.tryControls,
   });
+  if (savedScripts.length) {
+    await tagCheckScripts(savedScripts).catch(() => {});
+    progress?.(`Saved ${savedScripts.length} passing page test${savedScripts.length === 1 ? '' : 's'} tagged "check" — re-run them free with: spike replay --all`);
+  }
   return { summary, outcome, model, findings, pagesChecked: outcome.coverage.flowsAttempted, problems, capped };
 }
 
