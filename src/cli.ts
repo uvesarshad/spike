@@ -861,6 +861,7 @@ program
     }
   });
 
+program
   .command('fixture')
   .description('start the dogfood fixture app (login → products → cart → checkout)')
   .option('--bug <mode>', 'on|off — toggle the intentional checkout bug', 'off')
