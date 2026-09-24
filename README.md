@@ -354,6 +354,10 @@ the file they go in.
 
 Either way the agent gets one tool, `qa_run`.
 
+## Testing pull requests
+
+`spike ci` and the `uvesarshad/spike` GitHub Action test each preview and keep one updating comment on the pull request. Copy-paste workflows for Vercel, Netlify and a local server: [docs/ci.md](docs/ci.md).
+
 ## Running a suite
 
 Write the tests down in `spike.suite.json` at the repo root and run `spike suite`:
