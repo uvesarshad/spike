@@ -9,6 +9,7 @@ import type { Action } from '../driver/actions.js';
 import type { ModelTraceEntry } from '../router/model-router.js';
 import type { AssertionTraceEntry } from '../assertions/policy.js';
 import type { RunDataState } from '../run-data/index.js';
+import { buildFixHint } from '../vibe/fix-prompt.js';
 
 export type RunVerdict = 'pass' | 'fail' | 'uncertain';
 
@@ -244,7 +245,9 @@ export const REPORT_SCHEMA_VERSION = 1;
 
 export function slimReport(
   r: Report,
-): Pick<Report, 'verdict' | 'failing_step' | 'console_error' | 'evidence_paths' | 'reason' | 'spendSummary'> & { schemaVersion: number } {
+): Pick<Report, 'verdict' | 'failing_step' | 'console_error' | 'evidence_paths' | 'reason' | 'spendSummary'> & { schemaVersion: number; fix_hint?: string } {
+  // A6: `fix_hint` is additive + optional (fail only), so no schemaVersion bump.
+  const fix_hint = buildFixHint(r);
   return {
     schemaVersion: REPORT_SCHEMA_VERSION,
     verdict: r.verdict,
@@ -253,6 +256,7 @@ export function slimReport(
     evidence_paths: r.evidence_paths,
     reason: r.reason,
     spendSummary: r.spendSummary,
+    ...(fix_hint && { fix_hint }),
   };
 }
 

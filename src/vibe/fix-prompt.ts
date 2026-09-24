@@ -99,13 +99,13 @@ function actionSteps(report: Report): StepRecord[] {
 /** Failed network calls recorded against a step, as plain words. */
 function failedCalls(step: StepRecord | undefined): NetworkEntry[] {
   if (!step) return [];
-  return step.network.filter((n) => n.failed || (typeof n.status === 'number' && n.status >= 400));
+  return (step.network ?? []).filter((n) => n.failed || (typeof n.status === 'number' && n.status >= 400));
 }
 
 /** Locate the full StepRecord behind the slim failing_step (by index). */
 function failingRecord(report: Report): StepRecord | undefined {
   if (!report.failing_step) return undefined;
-  return report.steps.find((s) => s.index === report.failing_step!.index);
+  return (report.steps ?? []).find((s) => s.index === report.failing_step!.index);
 }
 
 function describeCall(n: NetworkEntry): string {
@@ -430,6 +430,27 @@ export function buildFixPrompt(report: Report, opts: FixPromptOptions = {}): str
 
   lines.push('Fix the root cause; do not change unrelated files.');
   return lines.join('\n');
+}
+
+/** A6: the short form of the fix prompt, carried in the slim result so the
+ * calling agent does not have to re-derive the bug. `fail` only — a pass has
+ * nothing to fix and an `uncertain` run must not send anyone to edit code that
+ * may not be broken. Same sanitising as the full prompt (page-controlled text),
+ * hard-capped at MAX_FIX_HINT_CHARS (~300 tokens). */
+export const MAX_FIX_HINT_CHARS = 1200;
+
+export function buildFixHint(report: Report): string | undefined {
+  if (report.verdict !== 'fail') return undefined;
+  const failRec = failingRecord(report);
+  const calls = failedCalls(failRec);
+  const parts: string[] = [];
+  parts.push(`What happened: ${sanitizeForPrompt(plainReasonText(report.reason), 300)}`);
+  if (failRec) parts.push(`Failed while: ${sanitizeForPrompt(humanizeStep(failRec), 200)}`);
+  if (report.console_error) parts.push(`Console error: ${sanitizeForPrompt(report.console_error, 250)}`);
+  if (calls.length) parts.push(`Failed requests: ${calls.slice(0, 3).map((c) => sanitizeForPrompt(describeCall(c), 160)).join('; ')}`);
+  parts.push(`Likely cause: ${rootCauseLines(report.console_error, calls).slice(0, 2).map((l) => sanitizeForPrompt(l, 250)).join(' ')}`);
+  const text = parts.join('\n');
+  return text.length > MAX_FIX_HINT_CHARS ? `${text.slice(0, MAX_FIX_HINT_CHARS - 1)}…` : text;
 }
 
 function baseName(p: string): string {

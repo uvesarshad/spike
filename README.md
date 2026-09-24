@@ -261,6 +261,7 @@ be piped straight into `jq` or read by a script.
   "console_error": "TypeError: Cannot read properties of undefined (reading 'total')",
   "evidence_paths": ["artifacts/<runId>/report.json", "artifacts/<runId>/step-06.png"],
   "reason": "the order could not be placed",
+  "fix_hint": "What happened: ...", // only on "fail": a short, capped (1,200 chars) description of the likely cause
   "spendSummary": {            // absent on a run that spent nothing
     "freeCalls": 14,
     "paidCalls": 3,
