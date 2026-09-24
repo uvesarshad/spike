@@ -115,7 +115,22 @@ export interface CheckSummaryInput {
   problems: number;
   /** True when the page list was cut short. */
   capped?: boolean;
+  /** Where the check ran. The in-browser mode explains its shorter cap by the
+   * missing desktop helper; a terminal run explains its own cap and how to lift it. */
+  transport?: 'terminal' | 'lite';
+  /** The page limit that applied (terminal note). */
+  maxPages?: number;
+  /** A13: set when the check only looked, so the line says so and how to press too. */
+  looked?: boolean;
 }
+
+/** Terminal wording for a check that stopped at its page limit. */
+export function terminalCapNote(maxPages: number): string {
+  return `Stopped after ${maxPages} pages — raise it with --max-pages.`;
+}
+
+/** A13: the honest name for a check that never presses anything. */
+export const LOOKED_TAIL = 'Add --try-controls to press buttons too.';
 
 /** The one line a non-engineer reads. Deliberately counts controls FOUND, not
  * controls operated: a look-only check never presses anything, so "0 controls"
@@ -127,6 +142,10 @@ export function renderCheckSummary(s: CheckSummaryInput): string {
     s.problems === 0
       ? 'nothing looked broken'
       : `${word(s.problems, 'problem')} — ${s.problems === 1 ? 'it is' : 'they are'} listed below`;
-  const capped = s.capped ? ` ${LITE_CAP_NOTE}` : '';
+  const capNote = s.transport === 'terminal' ? terminalCapNote(s.maxPages ?? DEFAULT_CHECK_PAGES) : LITE_CAP_NOTE;
+  const capped = s.capped ? ` ${capNote}` : '';
+  if (s.looked) {
+    return `Looked at ${word(s.pagesChecked, 'page')} and ${word(s.controlsFound, 'control')} without clicking anything; ${found}.${capped} ${LOOKED_TAIL}`;
+  }
   return `Checked ${word(s.pagesChecked, 'page')} and ${word(s.controlsFound, 'control')} on them; ${found}.${capped}`;
 }
