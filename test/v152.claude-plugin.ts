@@ -11,7 +11,7 @@ const files = pluginFiles(version);
 for (const [rel, text] of Object.entries(files)) {
   let onDisk: string | null = null;
   try { onDisk = fs.readFileSync(new URL(rel, root), 'utf8'); } catch { /* missing */ }
-  check(`${rel} is up to date (run: npm run build:plugin)`, onDisk === text);
+  check(`${rel} is up to date (run: npm run build:plugin)`, onDisk !== null && onDisk.replace(/\r\n/g, '\n') === text.replace(/\r\n/g, '\n'));
 }
 check('the plugin skill is exactly the setup skill', files['plugin/skills/spike/SKILL.md'] === renderSkillMd());
 check('the plugin skill keeps the secrets rule', /\{\{secret:NAME\}\}/.test(files['plugin/skills/spike/SKILL.md']));

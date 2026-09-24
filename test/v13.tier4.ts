@@ -52,12 +52,9 @@ console.log('=== v13 1/3: vault roundtrip + at-rest encryption ===');
   const encPath = path.join(dir, 'secrets.enc');
   const raw = fs.readFileSync(encPath);
   check('secrets.enc exists', fs.existsSync(encPath));
-  // The default key backend is platform-dependent since #8: DPAPI on Windows
-  // (key.dpapi), key.bin elsewhere / for pre-existing vaults.
-  check(
-    'key file exists (key.dpapi on win32 / key.bin otherwise)',
-    fs.existsSync(path.join(dir, process.platform === 'win32' ? 'key.dpapi' : 'key.bin')),
-  );
+  // This vault is built with an explicit FileKeyProvider, so key.bin is used on
+  // every platform (only the DEFAULT backend switches to key.dpapi on Windows).
+  check('key file exists (key.bin via the explicit FileKeyProvider)', fs.existsSync(path.join(dir, 'key.bin')));
   check('raw file does NOT contain the plaintext (encrypted at rest)', !raw.toString('binary').includes(SECRET));
   check('raw file does NOT contain the secret name in plaintext', !raw.toString('binary').includes('LOGIN_PW'));
 

@@ -26,7 +26,7 @@ check('.codeium without windsurf is not windsurf', (() => { const h = mk(); fs.m
 
 const all = detectAgents({ home: '/h', hasBinary: () => false });
 check('claude supports skills, others do not', all.filter((a) => a.supportsSkills).map((a) => a.agent).join() === 'claude');
-check('user config paths live under the injected home', all.every((a) => a.userConfigPath.startsWith('/h')));
+check('user config paths live under the injected home', all.every((a) => a.userConfigPath.startsWith(path.join('/h'))));
 check('cursor and claude have project config paths', all.filter((a) => a.projectConfigPath).map((a) => a.agent).join() === 'claude,cursor');
 
 const failed = checks.filter(([, ok]) => !ok);

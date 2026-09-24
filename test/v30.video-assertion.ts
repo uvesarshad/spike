@@ -175,7 +175,18 @@ function fakeScreencastClient() {
       screencastFrame(h: (p: { data: string; sessionId: number }) => void) {
         handler = h;
         setTimeout(() => handler?.({ data: fakeJpegFrameBase64(), sessionId: 1 }), 20);
-        setTimeout(() => handler?.({ data: fakeJpegFrameBase64(), sessionId: 1 }), 320);
+        // The recorder throttles on Date.now(); a loaded CI runner can fire both
+        // timers back-to-back (gap < 250ms → frame dropped → no clip). Present the
+        // second frame at a deterministic +300ms wall-clock instead of trusting timers.
+        setTimeout(() => {
+          const realNow = Date.now;
+          Date.now = () => realNow() + 300;
+          try {
+            handler?.({ data: fakeJpegFrameBase64(), sessionId: 1 });
+          } finally {
+            Date.now = realNow;
+          }
+        }, 320);
       },
       async startScreencast() {},
       async stopScreencast() {},
