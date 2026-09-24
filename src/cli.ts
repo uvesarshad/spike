@@ -804,6 +804,29 @@ program
   });
 
 program
+program
+  .command('login')
+  .description('open a browser window on your site, sign in yourself (any way you like), and save the sign-in for later runs')
+  .argument('<url>', 'the sign-in page or your site address')
+  .option('--out <file>', 'where to save the sign-in (default: a per-site file under ~/.spike/sessions)')
+  .action(async (url: string, opts: { out?: string }) => {
+    const { runLogin, defaultSessionPath, createRealLoginBrowser, waitForEnter, LoginError } = await import('./login/login.js');
+    try {
+      const file = opts.out ?? defaultSessionPath(url);
+      const r = await runLogin(url, file, {
+        browser: await createRealLoginBrowser(),
+        waitForDone: async () => { console.error('When you are signed in, press Enter here.'); await waitForEnter(); },
+        progress: (l) => console.error(l),
+      });
+      console.log(`Saved your sign-in (${r.cookies} cookie${r.cookies === 1 ? '' : 's'}) to ${r.file}`);
+      console.log(`Use it with: spike run "<task>" --url ${url} --storage-state ${r.file}`);
+      process.exit(0);
+    } catch (e) {
+      console.error(e instanceof LoginError ? e.message : `Could not save a sign-in: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(e instanceof LoginError ? 2 : 3);
+    }
+  });
+
   .command('fixture')
   .description('start the dogfood fixture app (login → products → cart → checkout)')
   .option('--bug <mode>', 'on|off — toggle the intentional checkout bug', 'off')

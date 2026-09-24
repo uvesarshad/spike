@@ -80,7 +80,7 @@ Work the list **top to bottom** (severity order). For every task:
 - [ ] **MCP registry listings** — `server.json` for the official MCP registry and common directories; ⛔ OWNER to submit after A3. (E3)
 - [ ] **"Did the agent actually check?" hook** — `spike setup --strict` installs an optional Claude Code Stop hook that nudges the agent to run Spike when it edited UI files and is about to finish without a verdict. (E4)
 - [x] **Slack/Discord notifications** — formatted webhook payloads for schedule/CI status changes on top of A7's generic webhook. (E5)
-- [ ] **Session capture helper** — `spike login <url>` opens a headed window, the human signs in any way (SSO, SMS, CAPTCHA), Spike saves the session for reuse. (E6)
+- [x] **Session capture helper** — `spike login <url>` opens a headed window, the human signs in any way (SSO, SMS, CAPTCHA), Spike saves the session for reuse. (E6)
 - [ ] **Change-scoped runs** — map a git diff to affected routes and run only those, for `watch` and `ci`. (E7)
 - [ ] **Spec-derived checks** — read an OpenAPI file and assert API responses seen during runs match it. (E8)
 - [ ] **Published result schema** — a small versioned JSON schema for the slim result shipped in the package for agent authors. (E9)
