@@ -177,11 +177,20 @@ export interface QaConfig {
    * as a difference, so this must be opted into per project. Off = today's
    * behaviour exactly. */
   differential: boolean;
+  /** A10: with `differential`, a detected baseline regression forces a `fail` verdict (`--fail-on-regression` / SPIKE_FAIL_ON_REGRESSION). Default off — evidence only. */
+  failOnRegression: boolean;
   /** A5a (P1) safety: optional per-run spend cap in USD. undefined = no cap
    * (default). Precise USD isn't derivable (no per-adapter pricing table), so
    * the driver enforces this against a best-available proxy — see
    * driver/loop.ts's estimatedPaidSpendUsd. */
   spendCapUsd?: number;
+  /** A8 (P1): default spend cap in USD for anything unattended — a scheduled
+   * job or `spike watch` — per job per 24 hours. An explicit `--budget` wins.
+   * Interactive runs are never capped by this. */
+  unattendedBudgetUsd: number;
+  /** A8 (P1): default spend cap in USD for one `spike ci` run. An explicit
+   * `--budget` wins. */
+  ciBudgetUsd: number;
   /** Keep the FREE rung-1 Google CLI as the first planner even when a BYOK key is
    * present. Default false: providing a key IS the opt-in to spend it for ~3×
    * faster planning (rung-2 HTTP beats the CLI cold-spawn). Set true to keep free
@@ -299,7 +308,11 @@ const DEFAULTS: QaConfig = {
   // A5b: safe by default (mirrors DEFAULT_SETTINGS.readOnly).
   readOnly: true,
   differential: false,
+  failOnRegression: false,
   // spendCapUsd intentionally absent — undefined/OFF is the default.
+  // A8: unattended and CI runs are capped by default; interactive runs are not.
+  unattendedBudgetUsd: 1,
+  ciBudgetUsd: 2,
   preferFreePlanner: false,
   // BRAIN default: claude CLI — the daemon HAS cli rungs and the former gemini:cli
   // free tier is dead (see settings.ts). (This intentionally differs from
@@ -420,6 +433,7 @@ function fromEnv(): Partial<QaConfig> {
   }
   if (e.SPIKE_VIDEO_ASSERTIONS) out.videoAssertions = e.SPIKE_VIDEO_ASSERTIONS !== '0' && e.SPIKE_VIDEO_ASSERTIONS !== 'false';
   if (e.SPIKE_DIFFERENTIAL) out.differential = e.SPIKE_DIFFERENTIAL !== '0' && e.SPIKE_DIFFERENTIAL !== 'false';
+  if (e.SPIKE_FAIL_ON_REGRESSION) out.failOnRegression = e.SPIKE_FAIL_ON_REGRESSION !== '0' && e.SPIKE_FAIL_ON_REGRESSION !== 'false';
   if (e.SPIKE_READ_ONLY) out.readOnly = e.SPIKE_READ_ONLY !== '0' && e.SPIKE_READ_ONLY !== 'false';
   // A1: default is true (DEFAULTS.strictOracles) — only an explicit '0'/'false' opts out.
   if (e.SPIKE_STRICT_ORACLES) out.strictOracles = e.SPIKE_STRICT_ORACLES !== '0' && e.SPIKE_STRICT_ORACLES !== 'false';
@@ -432,6 +446,10 @@ function fromEnv(): Partial<QaConfig> {
   if (e.SPIKE_SPEND_CAP_USD) {
     const n = Number(e.SPIKE_SPEND_CAP_USD);
     if (Number.isFinite(n) && n > 0) out.spendCapUsd = n; // 0/garbage → leave unset (no cap)
+  }
+  for (const [envName, key] of [['SPIKE_UNATTENDED_BUDGET_USD', 'unattendedBudgetUsd'], ['SPIKE_CI_BUDGET_USD', 'ciBudgetUsd']] as const) {
+    const n = Number(e[envName]);
+    if (e[envName] && Number.isFinite(n) && n > 0) out[key] = n; // 0/garbage → keep the default
   }
   if (e.SPIKE_PREFER_FREE_PLANNER) out.preferFreePlanner = e.SPIKE_PREFER_FREE_PLANNER !== '0' && e.SPIKE_PREFER_FREE_PLANNER !== 'false';
   // planner (BRAIN) selection — env wins over the SettingsStore (power-users / tests).

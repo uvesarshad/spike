@@ -212,8 +212,13 @@ function mergeConfig(
   via: 'cdp' | 'extension' | 'playwright' | undefined,
   hosts: string[],
   actionCache?: boolean,
+  baseline?: { baseline?: boolean; failOnRegression?: boolean },
 ): Partial<QaConfig> | undefined {
   const config: Partial<QaConfig> = {};
+  // A10: --baseline turns the differential check on; --fail-on-regression
+  // needs it, so it implies it.
+  if (baseline?.baseline || baseline?.failOnRegression) config.differential = true;
+  if (baseline?.failOnRegression) config.failOnRegression = true;
   if (via) config.via = via;
   if (hosts.length) config.allowedHosts = [...loadConfig().allowedHosts, ...hosts];
   if (actionCache !== undefined) config.actionCache = actionCache;
@@ -249,8 +254,10 @@ program
   .option('--rebuild-timeout <seconds>', 'with --fix, a site that is not on localhost: how long to wait for your change to show up before re-testing (default 180)', (v) => parseInt(v, 10))
   .option('--wait-for-url <url>', 'with --fix: after your coding agent finishes, wait until this address answers before re-testing (e.g. a deploy health check)')
   .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent for this non-interactive run', false)
+  .option('--baseline', 'compare the finished page against this flow\'s stored baseline (the first run stores it); differences are reported as evidence, the verdict is unchanged', false)
+  .option('--fail-on-regression', 'with --baseline: a difference from the accepted baseline turns a pass into a fail (accept intended changes with `spike bless`)', false)
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string | undefined, opts: { url: string; spec?: string; maxSteps?: number; perGoalMaxSteps?: number; expect?: string; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; fixOnUncertain: boolean; rebuildTimeout?: number; waitForUrl?: string; yesAutoFix: boolean; json: boolean }) => {
+  .action(async (task: string | undefined, opts: { baseline: boolean; failOnRegression: boolean; url: string; spec?: string; maxSteps?: number; perGoalMaxSteps?: number; expect?: string; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; fixOnUncertain: boolean; rebuildTimeout?: number; waitForUrl?: string; yesAutoFix: boolean; json: boolean }) => {
     // A7 (P0): exactly one input — a sentence or a document, never neither.
     if (!task && !opts.spec) {
       console.error('Tell me what to test: either a sentence in quotes, or --spec <file> with a document describing the flows.');
@@ -261,7 +268,7 @@ program
       process.exit(INFRA_ERROR_EXIT_CODE);
     }
     const onProgress = opts.json ? undefined : (l: string) => console.log(l);
-    const config = mergeConfig(opts.via, opts.allowHost, opts.actionCache);
+    const config = mergeConfig(opts.via, opts.allowHost, opts.actionCache, opts);
     const qaRunOpts = {
       maxSteps: opts.maxSteps,
       perGoalMaxSteps: opts.perGoalMaxSteps,
@@ -636,7 +643,7 @@ program
  * than a second loop with its own aggregation rule. */
 program
   .command('check')
-  .description('check a whole site with no instructions: walk every page it can reach, look at each one, and say what is broken')
+  .description('page health scan with no instructions: walk every page it can reach, look at each one without clicking anything, and say what is broken (add --try-controls to press buttons too)')
   .argument('<url>', 'address to start from — the check stays on this site')
   .option('--max-pages <n>', `how many pages to look at (default ${DEFAULT_CHECK_PAGES})`, (v) => parseInt(v, 10))
   .option('--storage-state <path>', 'load a saved sign-in first, so the check sees the pages a signed-in person sees')
@@ -644,8 +651,9 @@ program
   .option('--no-browser', 'find the pages over the network instead of opening them in Chrome: faster, but it cannot sign in and cannot see a page that draws itself with JavaScript')
   .option('--headless', 'run Chrome without a window', false)
   .option('--explore', 'while finding the pages, also open pop-ups, tabs and "show more" sections so what is behind them gets checked too — this does press a few things on your site', false)
+  .option('--try-controls', 'also press ordinary buttons on each page so a button that does nothing shows up; never presses anything that buys, pays, deletes, cancels, sends or signs out, and never submits a form with a password or payment field. Pages that pass are saved as tests tagged "check"', false)
   .option('--json', 'machine-readable output', false)
-  .action(async (url: string, opts: { maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; json: boolean }) => {
+  .action(async (url: string, opts: { maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; tryControls: boolean; json: boolean }) => {
     const progress = opts.json ? undefined : (l: string) => console.error(l);
 
     // Same code path as the MCP `site_check` tool (src/discovery/run-check.ts).
@@ -658,6 +666,8 @@ program
         browser: opts.browser,
         headless: opts.headless,
         explore: opts.explore,
+        tryControls: opts.tryControls,
+        lookedHint: true,
         progress,
       });
     } catch (e) {
@@ -900,6 +910,8 @@ program
   .option('--read-only', 'look-only mode: refuse to run a saved test that clicks or types (it reports why instead of interacting)', false)
   .option('--via <transport>', 'cdp (default) | extension | playwright — how to drive Chrome')
   .option('--allow-host <host>', 'permit clicks/typing on an EXTRA host beyond the script\'s own (repeatable) — the recorded url\'s host is trusted automatically. Matches the exact host or its www. sibling only; prefix with "." (e.g. ".example.com") to also trust every subdomain', collectRepeatable, [])
+  .option('--baseline', 'compare the finished page against this flow\'s stored baseline (the first run stores it); differences are reported as evidence, the verdict is unchanged', false)
+  .option('--fail-on-regression', 'with --baseline: a difference from the accepted baseline turns a pass into a fail (accept intended changes with `spike bless`)', false)
   .option('--json', 'print slim JSON verdicts only', false)
   .option('--workers <n>', 'with --all: concurrent scripts in flight (default 1 — today\'s serial behaviour). With --via playwright this is the cheap path (one shared Chrome, one isolated BrowserContext per script); otherwise each concurrent script gets its OWN fully isolated Chrome', (v) => parseInt(v, 10))
   .option('--tag <tag>', 'with --all + spike.suite.json: run only entries tagged with this (repeatable, OR match)', collectRepeatable, [])
@@ -916,6 +928,8 @@ program
     async (
       name: string | undefined,
       opts: {
+        baseline: boolean;
+        failOnRegression: boolean;
         all: boolean;
         heal: boolean;
         readOnly: boolean;
@@ -935,7 +949,7 @@ program
         retries?: number;
       },
     ) => {
-      const config = mergeConfig(opts.via, opts.allowHost);
+      const config = mergeConfig(opts.via, opts.allowHost, undefined, opts);
 
       if (!opts.all) {
         // Single-script path — unchanged from before the suite runner existed.
@@ -1114,9 +1128,13 @@ program
   .option('--no-record', 'do not record a passing case to generated-tests/')
   .option('--headless', 'run Chrome headless', false)
   .option('--max-steps <n>', 'per-case driver step budget', (v) => parseInt(v, 10))
+  .option('--baseline', 'compare the finished page against this flow\'s stored baseline (the first run stores it); differences are reported as evidence, the verdict is unchanged', false)
+  .option('--fail-on-regression', 'with --baseline: a difference from the accepted baseline turns a pass into a fail (accept intended changes with `spike bless`)', false)
   .option('--json', 'print slim JSON verdicts only', false)
   .action(
     async (opts: {
+      baseline: boolean;
+      failOnRegression: boolean;
       storageState?: string;
       tag: string[];
       filter?: string;
@@ -1132,7 +1150,7 @@ program
       maxSteps?: number;
       json: boolean;
     }) => {
-      const config = mergeConfig(opts.via, opts.allowHost);
+      const config = mergeConfig(opts.via, opts.allowHost, undefined, opts);
       const say = (line: string) => { if (!opts.json) console.log(line); };
 
       let suiteConfig;

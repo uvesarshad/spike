@@ -28,7 +28,7 @@ import type { NanoPort } from './ports/nano-port.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { launchChromeWithExtension } from './chrome/extensions.js';
 import { cdpAlive, allocateFreePort } from './chrome/launch.js';
-import type { BrowserPort } from './ports/browser-port.js';
+import type { AxSnapshot, BrowserPort } from './ports/browser-port.js';
 import { ModelRouter } from './router/model-router.js';
 import type { ModelAdapter } from './router/adapter.js';
 import { NanoAdapter } from './router/adapters/nano.js';
@@ -1245,41 +1245,12 @@ async function runFreshAiPass(
       }
     }
 
-    // A30 (A24 Tier 1): capture or compare this flow's baseline. Opt-in
-    // (cfg.differential), because an unblessed baseline flags every intentional
-    // UI change. First run of a flow WRITES the baseline; later runs diff
-    // against it and attach the result as evidence — never as a verdict, for
-    // the same reason the Tier-0 invariants are non-fatal: nobody has measured
-    // its false-positive rate against real UI churn yet.
+    // A30 (A24 Tier 1) + A10: baseline capture/compare, opt-in (cfg.differential
+    // / --baseline). See runDifferential.
     if (cfg.differential) {
-      try {
-        const flow = report.recordedScript ?? report.task.slice(0, 80);
-        const finalAx = lastAxForOracles ?? (await browser.peekAxTree?.()) ?? (await browser.axTree());
-        const network = report.steps.flatMap((st) => st.network ?? []);
-        const existing = await loadBaseline(flow);
-        if (!existing) {
-          await saveBaseline({ flow, createdAt: new Date().toISOString(), ax: finalAx, network });
-          progress(`differential: baseline created for "${flow}" — future runs will diff against it`);
-        } else {
-          const d = compareToBaseline({ ax: finalAx, network }, existing);
-          report.differential = {
-            mode: d.mode,
-            clean: d.clean,
-            axChanges: d.axChanges.length,
-            networkChanges: d.network.addedRequests.length + d.network.removedRequests.length + d.network.statusClassChanges.length,
-            detail: [
-              ...d.axChanges.slice(0, 10).map((c) => `${c.kind}: ${c.path}`),
-              ...d.network.addedRequests.slice(0, 5).map((k) => `request added: ${k.method} ${k.path} (${k.statusClass})`),
-              ...d.network.removedRequests.slice(0, 5).map((k) => `request removed: ${k.method} ${k.path}`),
-              ...d.network.statusClassChanges.slice(0, 5).map((c) => `status changed: ${c.method} ${c.path} ${c.before} -> ${c.after}`),
-            ],
-          };
-          artifacts.saveReport(report);
-          progress(d.clean ? 'differential: clean vs baseline' : `differential: ${report.differential.axChanges} AX + ${report.differential.networkChanges} network change(s) vs baseline`);
-        }
-      } catch (e) {
-        progress(`differential skipped: ${e instanceof Error ? e.message : String(e)}`);
-      }
+      await runDifferential(browser, report, report.recordedScript ?? report.task.slice(0, 80), lastAxForOracles, artifacts, progress);
+      applyRegressionGate(report, cfg.failOnRegression);
+      artifacts.saveReport(report);
     }
 
     // A29: write the run back to the coverage ledger. Runs on EVERY verdict —
@@ -1543,6 +1514,11 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
       attemptReports.push(current);
     }
     report = resolveRetryOutcome(attemptReports);
+    // A10: `--baseline` on replay — same capture/compare + optional gate as qaRun.
+    if (session.cfg.differential) {
+      await runDifferential(session.browser, report, script.name, undefined, artifacts, progress);
+      if (applyRegressionGate(report, session.cfg.failOnRegression)) artifacts.saveReport(report);
+    }
     if (report.flaky) {
       progress(`flaky: failed ${report.flaky.failedAttempts.length} time(s) before passing on attempt ${report.flaky.attempts} of ${maxAttempts} — reported as flaky, not a clean pass`);
       replaySpan.addEvent('replay.flaky', { attempts: report.flaky.attempts });
@@ -1618,6 +1594,60 @@ export async function qaReplay(nameOrPath: string, opts: QaReplayOptions = {}): 
 
   replaySpan.end({ verdict: report.verdict, runId: report.runId });
   return report;
+}
+
+/** A30 (A24 Tier 1): capture or compare this flow's baseline. Opt-in
+ * (cfg.differential / `--baseline`), because an unblessed baseline flags every
+ * intentional UI change. First run of a flow WRITES the baseline; later runs
+ * diff against it and attach the result as evidence. Evidence only unless the
+ * caller ALSO opts into `failOnRegression` (see applyRegressionGate) — nobody
+ * has measured this oracle's false-positive rate against real UI churn yet.
+ * Shared by qaRun and qaReplay so `--baseline` means the same in both. */
+export async function runDifferential(
+  browser: BrowserPort,
+  report: Report,
+  flow: string,
+  lastAx: AxSnapshot | undefined,
+  artifacts: ArtifactStore,
+  progress: (l: string) => void,
+): Promise<void> {
+  try {
+    const finalAx = lastAx ?? (await browser.peekAxTree?.()) ?? (await browser.axTree());
+    const network = report.steps.flatMap((st) => st.network ?? []);
+    const existing = await loadBaseline(flow);
+    if (!existing) {
+      await saveBaseline({ flow, createdAt: new Date().toISOString(), ax: finalAx, network });
+      progress(`differential: baseline created for "${flow}" — future runs will diff against it`);
+      return;
+    }
+    const d = compareToBaseline({ ax: finalAx, network }, existing);
+    report.differential = {
+      mode: d.mode,
+      clean: d.clean,
+      axChanges: d.axChanges.length,
+      networkChanges: d.network.addedRequests.length + d.network.removedRequests.length + d.network.statusClassChanges.length,
+      detail: [
+        ...d.axChanges.slice(0, 10).map((c) => `${c.kind}: ${c.path}`),
+        ...d.network.addedRequests.slice(0, 5).map((k) => `request added: ${k.method} ${k.path} (${k.statusClass})`),
+        ...d.network.removedRequests.slice(0, 5).map((k) => `request removed: ${k.method} ${k.path}`),
+        ...d.network.statusClassChanges.slice(0, 5).map((c) => `status changed: ${c.method} ${c.path} ${c.before} -> ${c.after}`),
+      ],
+    };
+    artifacts.saveReport(report);
+    progress(d.clean ? 'differential: clean vs baseline' : `differential: ${report.differential.axChanges} AX + ${report.differential.networkChanges} network change(s) vs baseline`);
+  } catch (e) {
+    progress(`differential skipped: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/** A10: `--fail-on-regression` — a detected baseline regression forces `fail`.
+ * Off by default (evidence-only stays the default). Never turns a `fail` or
+ * `uncertain` into something else, only a `pass`; returns whether it flipped. */
+export function applyRegressionGate(report: Pick<Report, 'verdict' | 'reason' | 'differential'>, failOnRegression: boolean | undefined): boolean {
+  if (!failOnRegression || report.verdict !== 'pass' || !report.differential || report.differential.clean) return false;
+  report.verdict = 'fail';
+  report.reason = `differs from the accepted baseline (${report.differential.axChanges} page change(s), ${report.differential.networkChanges} request change(s)); accept it with \`spike bless\` if intended. ${report.reason ?? ''}`.trim();
+  return true;
 }
 
 /* ---------- A11 (P1): flake quarantine list ---------- */
