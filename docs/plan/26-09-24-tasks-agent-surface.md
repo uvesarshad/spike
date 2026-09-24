@@ -83,5 +83,5 @@ Work the list **top to bottom** (severity order). For every task:
 - [x] **Slack/Discord notifications** — formatted webhook payloads for schedule/CI status changes on top of A7's generic webhook. (E5)
 - [x] **Session capture helper** — `spike login <url>` opens a headed window, the human signs in any way (SSO, SMS, CAPTCHA), Spike saves the session for reuse. (E6)
 - [x] **Change-scoped runs** — map a git diff to affected routes and run only those, for `watch` and `ci`. (E7)
-- [ ] **Spec-derived checks** — read an OpenAPI file and assert API responses seen during runs match it. (E8)
+- [x] **Spec-derived checks** — read an OpenAPI file and assert API responses seen during runs match it. (E8)
 - [x] **Published result schema** — a small versioned JSON schema for the slim result shipped in the package for agent authors. (E9)

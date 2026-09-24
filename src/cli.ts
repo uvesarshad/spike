@@ -807,6 +807,33 @@ program
   });
 
 program
+  .command('api-check')
+  .description('compare the API calls a past run made with your OpenAPI description (a JSON file) and list the ones that do not match')
+  .argument('<spec>', 'your OpenAPI (or Swagger) description, as a .json file')
+  .argument('[runId]', 'which run to look at (default: the latest)')
+  .option('--json', 'machine-readable output', false)
+  .action(async (specPath: string, runId: string | undefined, opts: { json: boolean }) => {
+    const { parseOpenApi, checkApiCalls, OpenApiError } = await import('./openapi/check.js');
+    const { listRuns, loadRunReport } = await import('./report/run-store.js');
+    try {
+      const spec = parseOpenApi(fs.readFileSync(specPath, 'utf8'));
+      const dir = loadConfig().artifactsDir;
+      const id = runId ?? listRuns(dir, 1)[0]?.runId;
+      const report = id ? loadRunReport(dir, id) : undefined;
+      if (!report) { console.error(runId ? `No run named ${runId}.` : 'No runs yet — run a check first.'); process.exit(2); }
+      const result = checkApiCalls(spec, report.steps.flatMap((st) => st.network ?? []), { origin: report.url });
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(result.summary);
+        for (const m of result.mismatches) console.log(`  - ${m.what}`);
+      }
+      process.exit(result.mismatches.length ? 1 : 0);
+    } catch (e) {
+      console.error(e instanceof OpenApiError ? e.message : `Could not check the API calls: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(e instanceof OpenApiError ? 2 : 3);
+    }
+  });
+
 program
   .command('login')
   .description('open a browser window on your site, sign in yourself (any way you like), and save the sign-in for later runs')
@@ -1429,7 +1456,7 @@ program
     console.log(`vibe daemon listening on ws://localhost:${port} — open the extension side panel`);
     // A12: the daemon also serves Spike home (loopback only). A busy port just means one is already up.
     const homePort = Number(process.env.SPIKE_DASHBOARD_PORT ?? DASHBOARD_DEFAULT_PORT);
-    startDashboard(cfg.artifactsDir, homePort).then(
+    startDashboard(cfg.artifactsDir, homePort, { helperRunning: true, defaultBudgetUsd: cfg.unattendedBudgetUsd }).then(
       () => console.log(`Spike home: http://127.0.0.1:${homePort}/`),
       (e: unknown) => console.warn(`Spike home is not available (${e instanceof Error ? e.message : String(e)}).`),
     );
@@ -1768,7 +1795,7 @@ program
     if (opts.host && !isLoopbackHost(opts.host)) {
       console.warn(`warning: --host ${opts.host} lets other machines on your network read your past reports, including screenshots of pages you were logged in to.`);
     }
-    const server = await startDashboard(cfg.artifactsDir, port, { host: opts.host });
+    const server = await startDashboard(cfg.artifactsDir, port, { host: opts.host, defaultBudgetUsd: cfg.unattendedBudgetUsd });
     const addr = server.address();
     const bound = addr && typeof addr === 'object' ? `${addr.address.includes(':') ? `[${addr.address}]` : addr.address}:${addr.port}` : `${opts.host ?? '127.0.0.1'}:${port}`;
     console.log(`dashboard on http://${bound} — reading ${cfg.artifactsDir}`);
