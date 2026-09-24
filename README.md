@@ -240,7 +240,7 @@ What each add-on unlocks:
 | `spike secret` | Manage the local encrypted vault — secrets are typed via `{{secret:NAME}}`, never reach any model |
 | `spike mcp` | Start the MCP stdio server — register it as command `spike`, args `["mcp"]` (see [Registering as an MCP tool](#registering-as-an-mcp-tool)) |
 | `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
-| `spike dashboard` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats |
+| `spike dashboard [--port n] [--host addr]` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats. Listens on this machine only (127.0.0.1); `--host` with any other address exposes past reports to your network and prints a warning |
 
 ## The machine-readable output (`--json`)
 
