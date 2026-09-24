@@ -45,7 +45,7 @@ import { detectSsoPopupClick } from './sso-popup.js';
 import { runVisualAssertion, type AssertionPolicy, type AssertionResult, type AssertionTraceEntry } from '../assertions/policy.js';
 import { checkDrainInvariants, checkProbeInvariants, checkSubmitEffect, type InvariantConfig, type InvariantViolation } from '../assertions/invariants.js';
 import { evaluateAssertion, type AssertionSpec } from '../assertions/dom-assertions.js';
-import { axToObservation, checkRelation, countDeltaDirection, detectRelationCandidates } from '../assertions/metamorphic.js';
+import { axToObservation, checkRelation, countDeltaDirection, detectRelationCandidates, type Relation, type RelationParams, type RelationProposal } from '../assertions/metamorphic.js';
 import { validateScriptSteps, runScriptSteps } from './script-runner/index.js';
 import { createRunDataState, recordExtraction, resolveRunPlaceholders, RunDataNotFoundError } from '../run-data/index.js';
 import {
@@ -316,6 +316,10 @@ export interface LoopOptions {
    * default rather than silently falling back to pre-A1 evidence-only
    * behavior. */
   strictOracles?: boolean;
+  /** A10: relations saved from earlier PASSING runs of this host
+   * (assertions/relation-store.ts), checked in addition to the ones detected
+   * from the final page shape. Same evidence/gating rules as a detected one. */
+  persistedRelations?: { relation: Relation; params?: RelationParams }[];
   /** A17 (P1): the run's own "what should be true at the end?" text, in the
    * user's words. Both models are shown it as REQUIRED FINAL CHECKS, and the
    * navigator is told to prove each one with a precise assertion verb instead
@@ -2022,7 +2026,10 @@ export async function runDriverLoop(
     // applies at all, and supplies the pair of readings bracketing the action
     // it is about. Everything else still falls back to the run-start/run-end
     // pair below, where "no evidence either way" is the worst it can do.
-    const candidates = detectRelationCandidates(lastSnapshotAx, steps);
+    const candidates: RelationProposal[] = detectRelationCandidates(lastSnapshotAx, steps);
+    for (const p of opts.persistedRelations ?? []) {
+      if (!candidates.some((c) => c.relation.id === p.relation.id)) candidates.push({ relation: p.relation, reason: 'saved from an earlier passing run', ...(p.params && { params: p.params }) });
+    }
     if (candidates.length) {
       const runStart = axToObservation(firstSnapshotAx);
       const runEnd = axToObservation(lastSnapshotAx, url);

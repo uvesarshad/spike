@@ -47,6 +47,7 @@ import { FakeLocalEmailProvider, type EmailProvider } from './email/index.js';
 import type { Report, RunVerdict } from './report/report.js';
 import { recordRunCoverage } from './discovery/record-coverage.js';
 import { singleRunCoverage } from './orchestrator/fan-out.js';
+import { loadRelationsFor, savedRelationIds, saveRelationsFor } from './assertions/relation-store.js';
 import { compareToBaseline, loadBaseline, saveBaseline } from './assertions/differential.js';
 import { detectRelationCandidates } from './assertions/metamorphic.js';
 import { diffScripts, loadScript, saveScript, scriptFromReport, scriptsDir, type QaScript } from './recorder/script.js';
@@ -1194,6 +1195,7 @@ async function runFreshAiPass(
         readOnly,
         spendCapUsd: cfg.spendCapUsd,
         strictOracles: cfg.strictOracles,
+        persistedRelations: loadRelationsFor(url),
         // A17 (P1): what the caller said must be true at the end, and the
         // per-project tuning for the deterministic page checks (words that are
         // legitimate on THIS app, checks to skip). Both were readable from a
@@ -1240,8 +1242,19 @@ async function runFreshAiPass(
     // recorded for reuse, not to execute anything a second time.
     if (lastAxForOracles) {
       const proposals = detectRelationCandidates(lastAxForOracles);
-      if (proposals.length) {
-        report.metamorphicCandidates = proposals.map((p2) => ({ relation: p2.relation.id, reason: p2.reason }));
+      // A10: relations that held in a PASSING run are persisted per host and
+      // re-checked next time (assertions/relation-store.ts); only what could
+      // not be persisted (a non-passing run) is left as a "suggested" note.
+      const violated = new Set(report.steps.flatMap((st) => (st.invariants ?? []).map((v) => v.rule)));
+      const held = proposals.filter((p2) => !violated.has(`metamorphic:${p2.relation.id}`));
+      if (report.verdict === 'pass' && held.length) {
+        const saved = saveRelationsFor(url, held.map((p2) => ({ id: p2.relation.id, params: p2.params })));
+        if (saved.length) progress(`saved ${saved.length} page check(s) for this site — later runs re-check them`);
+      }
+      const already = savedRelationIds(url);
+      const suggestions = proposals.filter((p2) => !already.has(p2.relation.id));
+      if (suggestions.length) {
+        report.metamorphicCandidates = suggestions.map((p2) => ({ relation: p2.relation.id, reason: p2.reason }));
       }
     }
 
