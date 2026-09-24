@@ -118,6 +118,8 @@ function runSuite(name) {
       cwd: repoRoot,
       stdio: 'inherit',
       env: process.env,
+      // Node >=20.12 refuses to spawn .cmd files without a shell on Windows (EINVAL).
+      shell: process.platform === 'win32',
     });
     child.on('exit', (code) => {
       const ms = Date.now() - start;
