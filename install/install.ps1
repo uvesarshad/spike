@@ -76,6 +76,15 @@ if ($LASTEXITCODE -ne 0) {
   exit 1
 }
 
+Write-Step "Connecting your coding agents…"
+# Interactive only: skipped when there is no attached terminal (redirected input/output).
+if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+  & spike setup
+  if ($LASTEXITCODE -ne 0) { Write-Warn "Agent setup did not finish. Run  spike setup  any time to retry." }
+} else {
+  Write-Host "  Run ``spike setup`` to connect your coding agents"
+}
+
 Write-Host ""
 Write-Ok "Done. Spike is running and will start on every login."
 Write-Host "  Go back to the browser extension — the connection dot should turn green shortly."

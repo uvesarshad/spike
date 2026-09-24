@@ -55,6 +55,10 @@ if errorlevel 1 (
   goto :fail
 )
 
+echo [..] Connecting your coding agents...
+call spike setup
+if errorlevel 1 echo [!] Agent setup did not finish. Run  spike setup  any time to retry.
+
 echo.
 echo [OK] Done. Spike is running and will start on every login.
 echo     Go back to the browser extension - the connection dot should turn green shortly.

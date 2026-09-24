@@ -59,6 +59,15 @@ if ! spike daemon --install-service; then
   exit 1
 fi
 
+step 'Connecting your coding agents…'
+# Interactive only: read the confirmation from the terminal even when this script
+# itself is piped (curl | sh). With no terminal we skip and say how to do it later.
+if [ -t 1 ] && (: </dev/tty) 2>/dev/null; then
+  spike setup </dev/tty || warn 'Agent setup did not finish. Run  spike setup  any time to retry.'
+else
+  echo '  Run `spike setup` to connect your coding agents'
+fi
+
 echo ''
 ok 'Done. Spike is running and will start on every login.'
 echo '  Go back to the browser extension — the connection dot should turn green shortly.'
