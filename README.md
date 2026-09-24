@@ -236,6 +236,9 @@ What each add-on unlocks:
 | `spike suite` | Run the whole suite from `spike.suite.json` — plain-English cases plus recorded scripts, one exit code, optional `--reporter json\|junit --out <path>` |
 | `spike doctor` | Preflight: is Chrome there, are the configured models reachable, and what would a run actually be allowed to do |
 | `spike daemon` | Start the vibe-mode daemon: the bridge the extension side panel connects to |
+| `spike map <url> --diff [--run-changed]` | Compare against the last map; on a terminal it asks "Check the N changed pages now?", `--run-changed` does it without asking |
+| `spike schedule add "<when>" <suite\|tag:<t>\|check\|spec:<file>> --url <url> [--budget <$>] [--webhook <url>]` | Save a test to run on a timer (`every 30m`, `hourly`, `daily 09:00`, `weekdays 09:00`, local time). Also `schedule list`, `remove <id>`, `run-now <id>`. Runs while Spike Core (`spike daemon`) is running; a laptop that slept runs a missed test once, not a backlog. You are told only when a test starts or stops failing |
+| `spike watch --url <dev url> [--tag <t>] [--suite <file>] [--on save\|commit] [--paths <glob>]` | Stay in the foreground and re-run your saved tests when your code changes (3 s debounce; one run at a time) |
 | `spike fix <runId>` | Print the fix prompt for a finished run — or with `--apply`, hand it to your coding agent headlessly |
 | `spike secret` | Manage the local encrypted vault — secrets are typed via `{{secret:NAME}}`, never reach any model |
 | `spike mcp` | Start the MCP stdio server — register it as command `spike`, args `["mcp"]` (see [Registering as an MCP tool](#registering-as-an-mcp-tool)) |

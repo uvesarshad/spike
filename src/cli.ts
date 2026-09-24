@@ -23,6 +23,13 @@ import { applyExpectation, resolveSuite, skipsForMissingAuth, SUITE_CONFIG_FILEN
 import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type RunOneResult, type SuiteScriptResult } from './suite/runner.js';
 import { isSuiteReporter, writeSuiteReport, SUITE_REPORTERS } from './suite/reporters.js';
 import { DEFAULT_BASELINE_DIR, blessBaseline } from './assertions/differential.js';
+import { runChangedPages } from './discovery/run-changed.js';
+import { JobStore } from './schedule/store.js';
+import { isDue, nextDue } from './schedule/when.js';
+import { runJob, startScheduler } from './schedule/scheduler.js';
+import { childRunner } from './schedule/job-runner.js';
+import { notifyIfFlipped } from './schedule/notify.js';
+import { WatchController, startFsWatch } from './schedule/watch.js';
 import { browserFetcher, checkInstruction, checkTargets, coverageReport, DEFAULT_CHECK_PAGES, diffAppModel, discoverApp, emptyAppModel, explorationOptions, hasBlockingFindings, loadAppModel, renderCheckSummary, saveAppModel, type AppModel, type AppModelFinding, type Fetched } from './discovery/index.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
@@ -539,8 +546,9 @@ program
   .option('--headless', 'run Chrome without a window', false)
   .option('--no-explore', 'skip opening pop-ups, tabs and "show more" sections after the walk — faster and free, but the map then only covers what a link leads to')
   .option('--diff', 'compare against the stored map and print what changed', false)
+  .option('--run-changed', 'with --diff: check the pages that are new or changed, without asking', false)
   .option('--json', 'machine-readable output', false)
-  .action(async (url: string, opts: { maxDepth?: number; maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; diff: boolean; json: boolean }) => {
+  .action(async (url: string, opts: { maxDepth?: number; maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; diff: boolean; runChanged: boolean; json: boolean }) => {
     const root = process.cwd();
     const previousModel = loadAppModel(root);
     const progress = opts.json ? undefined : (l: string) => console.error(l);
@@ -578,6 +586,37 @@ program
         console.log(`mapped ${cov.routes.total} route(s) — ${d.newRoutes.length} new, ${d.changedRoutes.length} changed, ${d.removedRoutes.length} removed`);
         for (const e of d.prioritized.slice(0, 20)) console.log(`  ${e.kind.padEnd(9)} ${e.route}`);
         for (const line of renderFindings(findings)) console.log(line);
+      }
+      const changedCount = d.newRoutes.length + d.changedRoutes.length;
+      // A7: offer the next step instead of printing a list and stopping.
+      let runNow = opts.runChanged && changedCount > 0;
+      if (!runNow && changedCount > 0 && !opts.json && process.stdin.isTTY && process.stdout.isTTY) {
+        const answer = await new Promise<string>((resolve) => {
+          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+          rl.question(`Check the ${changedCount} changed page${changedCount === 1 ? '' : 's'} now? [y/N] `, (a) => { rl.close(); resolve(a); });
+        });
+        runNow = /^y/i.test(answer.trim());
+      }
+      if (runNow) {
+        const { targets, result } = await runChangedPages(model, d, url, (targets) =>
+          runFanOut(
+            flowsFromRoutes(targets.map((t) => ({ url: t.url, name: t.name })), { baseUrl: url, maxFlows: targets.length, instruction: (_r, address) => checkInstruction(address) }),
+            {
+              runFlow: (flow, i) => qaRun(flow.task, targets[i]?.url ?? url, {
+                readOnly: true, record: false, replay: false, headless: opts.headless,
+                storageStatePath: opts.storageState,
+                ...(opts.via && { config: { via: opts.via } }),
+              }),
+              ...(opts.storageState && { storageStatePath: opts.storageState }),
+              onProgress: progress,
+            },
+          ),
+        );
+        if (result) {
+          if (opts.json) console.log(JSON.stringify({ changedChecked: targets.map((t) => t.url), verdict: result.verdict, flows: result.flows }, null, 2));
+          else { console.log(''); console.log(renderFlowTable(result)); }
+          process.exit(broken ? 1 : exitCodeForVerdict(result.verdict));
+        }
       }
       process.exit(broken ? 1 : 0);
     }
@@ -1255,8 +1294,93 @@ program
     const bridge = new BridgeServer(port, cfg.bridgeHost);
     const vibe = new VibeService(bridge);
     vibe.start();
+    // A7: the daemon also owns the job list — tick every 60 s, one job at a time.
+    startScheduler({ store: new JobStore(), run: childRunner(process.argv[1]) });
     console.log(`vibe daemon listening on ws://localhost:${port} — open the extension side panel`);
     // stay alive; the bridge owns the WS server from here
+    return new Promise<void>(() => {});
+  });
+
+/* A7 — scheduled and watched runs. Jobs live in ~/.spike/jobs.json; the daemon runs them. */
+const schedule = program.command('schedule').description('run tests on a timer while Spike Core is running');
+schedule
+  .command('add')
+  .description('save a scheduled test: when is e.g. "every 30m", "hourly", "daily 09:00", "weekdays 09:00" (local time)')
+  .argument('<when>', 'every <N>m|h | hourly | daily HH:MM | weekdays HH:MM')
+  .argument('<what>', 'suite | tag:<name> | check | spec:<file>')
+  .requiredOption('--url <url>', 'the site to test')
+  .option('--budget <usd>', 'stop for the day once this much has been spent', (v) => parseFloat(v))
+  .option('--webhook <url>', 'also POST here when a test starts or stops failing')
+  .action((when: string, what: string, opts: { url: string; budget?: number; webhook?: string }) => {
+    try {
+      const job = new JobStore().add({ target: what, url: opts.url, when, budgetUsd: opts.budget, webhook: opts.webhook });
+      console.log(`Scheduled ${what} ${when} (id ${job.id}).`);
+      console.log('Scheduled tests run while Spike Core is running — start it with `spike daemon --install-service`');
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(2);
+    }
+  });
+schedule
+  .command('list')
+  .description('show scheduled tests and how the last one went')
+  .action(() => {
+    const jobs = new JobStore().list();
+    if (!jobs.length) { console.log('Nothing scheduled.'); return; }
+    for (const j of jobs) {
+      let nextTxt = '?';
+      try { nextTxt = isDue(j, Date.now()) ? 'due now' : new Date(nextDue(j, Date.now())).toLocaleString(); } catch { /* keep ? */ }
+      console.log(`${j.id}  ${j.when.padEnd(14)} ${j.kind}${j.target ? ':' + j.target : ''}  ${j.url}  last: ${j.lastVerdict ?? 'never run'}  next: ${nextTxt}`);
+    }
+  });
+schedule
+  .command('remove')
+  .argument('<id>')
+  .description('stop a scheduled test')
+  .action((id: string) => {
+    if (!new JobStore().remove(id)) { console.error(`No scheduled test with id ${id}.`); process.exit(2); }
+    console.log(`Removed ${id}.`);
+  });
+schedule
+  .command('run-now')
+  .argument('<id>')
+  .description('run a scheduled test right now and record the result')
+  .action(async (id: string) => {
+    const store = new JobStore();
+    const job = store.get(id);
+    if (!job) { console.error(`No scheduled test with id ${id}.`); process.exit(2); }
+    const r = await runJob(job, { store, run: childRunner(process.argv[1]) });
+    console.log(`${id}: ${r.verdict}${r.summary ? ' — ' + r.summary : ''}`);
+    process.exit(exitCodeForVerdict(r.verdict));
+  });
+
+program
+  .command('watch')
+  .description('re-run your saved tests whenever your code changes (stays in the foreground)')
+  .requiredOption('--url <url>', 'your dev server address')
+  .option('--tag <tag>', 'run only tests with this tag')
+  .option('--suite <file>', 'run the suite in this file (spike.suite.json) instead of the one in this folder')
+  .option('--on <when>', 'save (default) | commit', 'save')
+  .option('--paths <glob>', 'only react to changes to files matching this pattern')
+  .option('--webhook <url>', 'also POST here when a test starts or stops failing')
+  .action((opts: { url: string; tag?: string; suite?: string; on: string; paths?: string; webhook?: string }) => {
+    if (opts.on !== 'save' && opts.on !== 'commit') { console.error('--on must be save or commit'); process.exit(2); }
+    const cli = process.argv[1];
+    // the suite command reads spike.suite.json from its working directory
+    const suiteDir = opts.suite ? path.dirname(path.resolve(opts.suite)) : undefined;
+    let last: 'pass' | 'fail' | 'uncertain' | null = null;
+    const controller = new WatchController({
+      run: async () => {
+        console.log('Change noticed — running your tests…');
+        const job = { id: 'watch', kind: opts.tag ? 'tag' : 'suite', target: opts.tag ?? '', url: opts.url, when: 'watch', createdAt: 0, lastRunAt: null, lastVerdict: null, spentTodayUsd: 0 } as const;
+        const r = await childRunner(cli, suiteDir)(job);
+        console.log(`Result: ${r.verdict}`);
+        await notifyIfFlipped(last, { job: 'watch', verdict: r.verdict, url: opts.url, summary: r.summary ?? r.verdict }, opts.webhook);
+        last = r.verdict;
+      },
+    });
+    console.log(`Watching for ${opts.on === 'commit' ? 'commits' : 'changes'} in ${process.cwd()} — press Ctrl-C to stop.`);
+    startFsWatch({ root: process.cwd(), on: opts.on, paths: opts.paths, onChange: () => controller.event() });
     return new Promise<void>(() => {});
   });
 
