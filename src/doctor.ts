@@ -65,6 +65,8 @@ export interface DoctorInput {
     allowedHosts: string[];
     strictOracles: boolean;
   };
+  /** A10: inbox status for one line ("email codes: off / connected to <host>"). Optional so older callers still work. */
+  email?: { provider: 'none' | 'fake-local' | 'imap'; host?: string; user?: string; hasPassword?: boolean };
 }
 
 const ROLE_LABEL: Record<DoctorRoleProbe['role'], string> = {
@@ -184,6 +186,20 @@ function runSection(input: DoctorInput): DoctorSection {
           hint: 'turn them back on with `spike config set --strict-oracles on`',
         },
   ];
+  const em = input.email;
+  if (em) {
+    checks.push(
+      em.provider === 'none'
+        ? { label: 'Email codes', status: 'ok', detail: 'off — email codes are not read (a test that waits for a sign-in email will stop)', hint: 'to turn on: `spike config set --email-provider imap --imap-host <host> --imap-user <user>`, then `spike secret set SPIKE_IMAP_PASS`' }
+        : em.provider === 'fake-local'
+          ? { label: 'Email codes', status: 'ok', detail: 'local test inbox (fake-local)' }
+          : !em.host || !em.user
+            ? { label: 'Email codes', status: 'warn', detail: 'inbox chosen but no host/user set', hint: 'run `spike config set --imap-host <host> --imap-user <user>`' }
+            : !em.hasPassword
+              ? { label: 'Email codes', status: 'warn', detail: `connected to ${em.host} as ${em.user}, but no password saved`, hint: 'run `spike secret set SPIKE_IMAP_PASS`' }
+              : { label: 'Email codes', status: 'ok', detail: `connected to ${em.host}` },
+    );
+  }
   return { title: 'What a run would do right now', checks };
 }
 

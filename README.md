@@ -249,7 +249,7 @@ What each add-on unlocks:
 | `spike map <url>` | Discover the app — routes, states, interactive elements — into `.spike/app-model.json` ($0, no browser) |
 | `spike coverage` | Report what has and hasn't been tested yet, from `.spike/app-model.json` |
 | `spike fixture --bug on\|off` | Start the dogfood fixture app (login → products → cart → checkout) |
-| `spike config` | View or change the browsing-control AI + debugging settings (shared with the extension panel) |
+| `spike config` | View or change the browsing-control AI + debugging settings (shared with the extension panel) |; also `--email-provider none|imap|fake-local --imap-host <h> --imap-user <u>` to let tests read sign-in emails (password via `spike secret set SPIKE_IMAP_PASS`, never a flag; `spike doctor` shows inbox status)
 | `spike replay [name\|--all]` | Replay recorded scripts deterministically — no planner, $0 |
 | `spike suite` | Run the whole suite from `spike.suite.json` — plain-English cases plus recorded scripts, one exit code, optional `--reporter json\|junit --out <path>` |
 | `spike doctor` | Preflight: is Chrome there, are the configured models reachable, and what would a run actually be allowed to do |

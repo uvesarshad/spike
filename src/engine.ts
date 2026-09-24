@@ -733,7 +733,7 @@ async function buildEmailProvider(
 ): Promise<EmailProvider | undefined> {
   if (cfg.emailProvider === 'fake-local') return new FakeLocalEmailProvider();
   if (cfg.emailProvider !== 'imap') return undefined;
-  const pass = vault.get('imap') ?? process.env.SPIKE_IMAP_PASS;
+  const pass = vault.get('imap') ?? vault.get('SPIKE_IMAP_PASS') ?? process.env.SPIKE_IMAP_PASS;
   if (!cfg.imapHost || !cfg.imapUser || !pass) {
     progress('email checks are off: the mailbox needs a server, an account and a password before it can be read');
     return undefined;

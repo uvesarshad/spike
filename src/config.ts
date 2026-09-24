@@ -506,6 +506,10 @@ function fromSettings(): Partial<QaConfig> {
     // A11: the project folder auto-fix edits. Same "only when the user actually
     // saved it" rule — there is no default to fall back to (see QaSettings).
     if (typeof raw.fixAgentCwd === 'string' && raw.fixAgentCwd.trim()) out.fixAgentCwd = raw.fixAgentCwd.trim();
+    // A10: inbox settings saved by `spike config set --email-provider …`.
+    if (raw.emailProvider === 'none' || raw.emailProvider === 'fake-local' || raw.emailProvider === 'imap') out.emailProvider = raw.emailProvider;
+    if (typeof raw.imapHost === 'string' && raw.imapHost.trim()) out.imapHost = raw.imapHost.trim();
+    if (typeof raw.imapUser === 'string' && raw.imapUser.trim()) out.imapUser = raw.imapUser.trim();
     return out;
   } catch {
     return {};

@@ -65,6 +65,12 @@ export interface QaSettings {
    * Unset → dispatchFix refuses and the panel asks for it. Mirrors
    * config.fixAgentCwd; env still wins. */
   fixAgentCwd?: string;
+  /** A10: which inbox the `wait_for_email` action reads (`spike config set --email-provider`).
+   * Mirrors config.emailProvider; env still wins. The IMAP password is NEVER stored here — vault only. */
+  emailProvider?: 'none' | 'fake-local' | 'imap';
+  /** A10: IMAP server / account for emailProvider:'imap'. Mirrors config.imapHost / imapUser. */
+  imapHost?: string;
+  imapUser?: string;
   /** A1 (P0) headline "deterministic verdicts" feature: when true, a Tier-0
    * invariant violation, a failed assert_* step, or a metamorphic-relation
    * violation forces the final verdict to 'fail' regardless of what the model

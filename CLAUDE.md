@@ -29,6 +29,7 @@ node dist/cli.js schedule add "<when>" <suite|tag:<t>|check|spec:<file>> --url <
 node dist/cli.js watch --url <dev url> [--tag <t>] [--on save|commit]   # A7: foreground re-run on file change / commit
 node dist/cli.js map <url> --diff [--run-changed]   # A7: offer to check just the changed pages
 node dist/cli.js run|suite|replay … --baseline [--fail-on-regression]   # A10: differential baseline (config `differential`/`failOnRegression`); engine.ts `runDifferential` + `applyRegressionGate`, evidence-only unless the gate flag is set
+node dist/cli.js config set --email-provider none|imap|fake-local --imap-host <h> --imap-user <u>   # A10: inbox for wait_for_email, stored in SettingsStore (never the password — vault `imap`/`SPIKE_IMAP_PASS`); `spike doctor` prints an "Email codes" line
 node dist/cli.js tests list|quarantine <name>|release <name>   # A10: saved tests + last result; park/un-park a flaky one (src/recorder/tests-admin.ts wraps engine.ts's quarantine list)
 node dist/cli.js tests review|accept <name>|reject <name>   # A10: held-back heal candidates (generated-tests/<name>.candidate.json) — accept re-emits script + .spec.ts, reject discards
 node dist/cli.js fix <runId>           # print the paste-ready fix prompt for a past run
