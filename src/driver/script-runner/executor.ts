@@ -8,6 +8,7 @@
 import type { AxNode, BrowserPort } from '../../ports/browser-port.js';
 import type { SecretsSource } from '../loop.js';
 import { recordExtraction, resolveRunPlaceholders, type RunDataState } from '../../run-data/index.js';
+import { resolveTotpPlaceholders } from '../../auth/totp.js';
 import { SCRIPT_MAX_WALL_MS, type ScriptRunnerStep } from './schema.js';
 
 const SECRET_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
@@ -15,6 +16,7 @@ const SECRET_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
 /** Mirrors loop.ts's resolveSecrets: {{secret:NAME}} resolved AT EXECUTE TIME
  * ONLY. Throws when the vault doesn't hold the named secret. */
 function resolveSecrets(text: string, vault: SecretsSource | undefined): string {
+  text = resolveTotpPlaceholders(text, vault);
   if (!SECRET_RE.test(text)) return text;
   SECRET_RE.lastIndex = 0;
   return text.replace(SECRET_RE, (_m, name: string) => {

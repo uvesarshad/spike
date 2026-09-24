@@ -115,6 +115,7 @@ export const ACTION_RULES_AND_VOCABULARY = `- Interact via nodeIds from the tree
 - When the task is demonstrably complete, action finish with verdict "pass". If the app is broken such that the task cannot complete, finish with verdict "fail" and a precise reason.
 - Do not repeat an action that already failed twice.
 - If the task references a stored secret like {{secret:NAME}}, pass that placeholder VERBATIM as the text of a type action — never invent its value.
+- If the task references an authenticator code like {{totp:NAME}}, pass that placeholder VERBATIM as the text of a type action into the code field; the current code is filled in for you.
 - Return goalComplete: true (INSTEAD of actions) when the CURRENT GOAL is already satisfied by the page — the planner then advances you to the next goal.
 - Return blocked: "<reason>" (INSTEAD of actions) when the page shows an error that stops progress or you cannot proceed — do NOT repeat a failed action; the planner will re-plan.
 

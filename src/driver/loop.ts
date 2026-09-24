@@ -27,6 +27,7 @@ import type { ModelRouter } from '../router/model-router.js';
 import type { ArtifactStore } from '../report/artifacts.js';
 import { describeAction, slimReport, type FailingStep, type Report, type SpendSummary, type StepRecord, type RunVerdict } from '../report/report.js';
 import { isSecretTarget, redactSecretText } from '../report/redact.js';
+import { hasTotpPlaceholder, resolveTotpPlaceholders } from '../auth/totp.js';
 import {
   buildExtractPrompt,
   EXTRACT_JSON_SCHEMA,
@@ -67,6 +68,8 @@ import { startClipRecorder, type CdpClientLike } from '../clip/screencast.js';
  * one-method shape is what lets the browser build stay free of Node code. */
 export interface SecretsSource {
   get(name: string): string | undefined;
+  /** A14: set by transports that cannot make authenticator codes; shown instead of the vault hint. */
+  totpUnavailable?: string;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -136,6 +139,7 @@ class SecretNotFoundError extends Error {}
  * SecretNotFoundError (with the qa-cli hint) when a referenced secret is missing.
  * Returns the original string unchanged when there are no placeholders. */
 function resolveSecrets(text: string, vault: SecretsSource | undefined): string {
+  text = resolveTotpPlaceholders(text, vault); // A14: {{totp:NAME}} → current authenticator code
   if (!SECRET_RE.test(text)) return text;
   SECRET_RE.lastIndex = 0;
   return text.replace(SECRET_RE, (_m, name: string) => {
@@ -1428,6 +1432,10 @@ export async function runDriverLoop(
         // pushed, so every downstream surface (report.json, the recorded
         // script, the plain-English report, the fix prompt) inherits it.
         // `action` itself is untouched: the browser still types the real value.
+        if (record.action.type === 'type' && hasTotpPlaceholder(record.action.text)) {
+          // A14: the placeholder stays (replayable, holds no code); the readable line hides it.
+          record.description = describeAction({ ...record.action, text: '•••' });
+        }
         if (record.action.type === 'type' && isSecretTarget({ ...record.target, testId: t?.testId })) {
           const hidden = redactSecretText(record.action.text);
           if (hidden !== record.action.text) {

@@ -30,6 +30,8 @@ export interface ReplaySecretsSource {
   get(name: string): string | undefined;
 }
 
+import { resolveTotpPlaceholders } from '../auth/totp.js';
+
 /** {{secret:NAME}} — NAME is [a-zA-Z0-9_-]+. Mirrors driver/loop.ts's SECRET_RE. */
 const SECRET_PLACEHOLDER_RE = /\{\{secret:([a-zA-Z0-9_-]+)\}\}/g;
 
@@ -52,6 +54,7 @@ export class MissingSecretError extends Error {
  * the vault doesn't hold NAME). Returns `text` unchanged when it has no
  * placeholders — the common case, and the only one that doesn't need a vault. */
 function resolveReplaySecrets(text: string, vault: ReplaySecretsSource | undefined): string {
+  text = resolveTotpPlaceholders(text, vault);
   if (!SECRET_PLACEHOLDER_RE.test(text)) return text;
   SECRET_PLACEHOLDER_RE.lastIndex = 0;
   return text.replace(SECRET_PLACEHOLDER_RE, (_m, name: string) => {

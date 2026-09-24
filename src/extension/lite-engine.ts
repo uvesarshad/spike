@@ -343,7 +343,10 @@ export async function runLite(opts: LiteRunOptions): Promise<LiteRunResult> {
       // A5 — the panel's saved test login, if any. Same contract as the desktop
       // helper's encrypted store: read-only, looked up by name, resolved at the
       // moment of typing and never written anywhere.
-      ...(opts.secrets && { vault: { get: (name: string) => opts.secrets?.[name] || undefined } }),
+      ...(opts.secrets && { vault: {
+          get: (name: string) => opts.secrets?.[name] || undefined,
+          totpUnavailable: 'authenticator codes need the desktop helper — this browser-only mode cannot make them',
+        } }),
     });
     progress(
       `Done — ${report.verdict} after ${report.steps.length} steps ` +
