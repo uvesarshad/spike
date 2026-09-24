@@ -209,6 +209,7 @@ async function loopTests(): Promise<void> {
   const result = await runWithAutoFix('Test the checkout flow', 'http://localhost:9401/checkout', {
     maxAttempts: 2,
     runFn: fakeRun,
+    rebuild: { graceMs: 0 }, // local target: skip the 3s hot-reload grace in tests
     config: { fixAgentBin: 'node', fixAgentArgs: [stubPath, '{prompt}'], fixAgentCwd: work },
     confirmed: true, settingsStore, // A16: test exercises the automated loop directly, not the consent gate
     onProgress: (l) => progress.push(l),
@@ -231,6 +232,7 @@ async function loopTests(): Promise<void> {
   const stuck = await runWithAutoFix('x', 'http://localhost:9401/checkout', {
     maxAttempts: 2,
     runFn: alwaysFail,
+    rebuild: { graceMs: 0 },
     config: { fixAgentBin: 'node', fixAgentArgs: [stubPath, '{prompt}'], fixAgentCwd: work },
     confirmed: true, settingsStore, // A16: test exercises the automated loop directly, not the consent gate
   });

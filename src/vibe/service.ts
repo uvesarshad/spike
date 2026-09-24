@@ -47,7 +47,9 @@
  *                      plainReport, fixPrompt, durationMs}
  *   vibe.error        {message}
  *   vibe.fix-progress {line}
- *   vibe.fix-done     {ok, agent?} | {ok:false, message}
+ *   vibe.fix-done     {ok, agent?} | {ok:false, message} | (after the automatic re-test)
+ *                     {ok, verdict, attempts, note?} — the re-test's verdict, how many
+ *                     test runs it took, and a note when the rebuild was not confirmed
  *
  * Single-run invariant: only one QA run at a time (one attached Chrome, one tab).
  * A second vibe.run while busy is rejected with an error result, not queued.
@@ -70,7 +72,7 @@ import { headlineScreenshot, slimReport, type Report } from '../report/report.js
 import { makeZip, type ZipEntry } from '../report/zip.js';
 import { renderPlainReport, buildFixPrompt, dataUri, MAX_FIX_PROMPT_IMAGE_BYTES } from './fix-prompt.js';
 import { explainReason } from './reason-text.js';
-import { dispatchFix, isAutoFixAcceptedFor, detectFixAgent, NO_PROJECT_FOLDER_MESSAGE } from './auto-fix.js';
+import { dispatchFix, isAutoFixAcceptedFor, detectFixAgent, runWithAutoFix, NO_PROJECT_FOLDER_MESSAGE, type RunFn, type RunWithAutoFixOptions } from './auto-fix.js';
 import {
   loadAppModel,
   saveAppModel,
@@ -230,6 +232,11 @@ export class VibeService {
   private lastFailedReport: Report | null = null;
   /** Guards against overlapping fix dispatches. */
   private fixing = false;
+  /** A6: what it takes to re-test the run that just failed — the same task, url
+   * and run options — so an auto-fix can dispatch → wait → re-run like the CLI. */
+  private lastRerun: { task: string; url: string; runOpts: QaRunOptions } | null = null;
+  /** TEST SEAM ONLY: stand-ins for the real coding agent and the real run. */
+  private fixLoopOverrides: { runFn?: RunFn; dispatchFn?: RunWithAutoFixOptions['dispatchFn']; rebuild?: RunWithAutoFixOptions['rebuild'] } = {};
   /** Aborts the active qaRun (vibe.cancel). Null when no run is in flight. */
   private activeRun: AbortController | null = null;
   /** tabId the active run is driving, when known (undefined for a create-a-tab
@@ -266,6 +273,12 @@ export class VibeService {
    * execute() when a run comes back failed. */
   noteFailedReportForTest(report: Report): void {
     this.lastFailedReport = report;
+  }
+
+  /** TEST SEAM ONLY (A6): give vibe.fix a run to re-test, and stub agent/run. */
+  noteRerunForTest(task: string, url: string, overrides: VibeService['fixLoopOverrides'] = {}): void {
+    this.lastRerun = { task, url, runOpts: {} };
+    this.fixLoopOverrides = overrides;
   }
 
   /** The project directory an auto-fix would edit, or undefined when the user
@@ -386,8 +399,15 @@ export class VibeService {
       if (!confirmed && !isAutoFixAcceptedFor(projectDir)) {
         return { needsConfirmation: true, projectDir };
       }
+      // A6: fix a confirmed failure only. An uncertain run may not be a bug at
+      // all, and editing code that was not broken is worse than doing nothing.
+      if (report.verdict !== 'fail') {
+        throw new Error('vibe.fix: the result was not a confirmed failure, so there is nothing to fix');
+      }
+      const rawMax = (params as { maxFixAttempts?: unknown } | undefined)?.maxFixAttempts;
+      const maxFixAttempts = typeof rawMax === 'number' && Number.isFinite(rawMax) ? Math.min(5, Math.max(1, Math.floor(rawMax))) : 2;
       this.fixing = true;
-      void this.dispatch(report, ctx?.clientId, confirmed);
+      void this.dispatch(report, ctx?.clientId, confirmed, maxFixAttempts);
       return { accepted: true };
     });
 
@@ -1040,6 +1060,7 @@ export class VibeService {
         onStep: (info) => this.bridge.sendEvent('vibe.step', info as unknown as Record<string, unknown>, target),
         signal: controller.signal,
       } as QaRunOptions & { signal?: AbortSignal };
+      this.lastRerun = { task, url, runOpts: { ...runOpts, signal: undefined } as QaRunOptions };
       const report = await qaRun(task, url, runOpts);
 
       // Stop recording and persist the webm (failure-tolerant — a missing clip
@@ -1130,11 +1151,57 @@ export class VibeService {
     }
   }
 
-  private async dispatch(report: Report, clientId?: number, confirmed?: boolean): Promise<void> {
+  private async dispatch(report: Report, clientId?: number, confirmed?: boolean, maxAttempts = 2): Promise<void> {
     const target = clientId !== undefined ? { clientId } : undefined;
+    const onProgress = (line: string) => this.bridge.sendEvent('vibe.fix-progress', { line }, target);
     try {
+      const rerun = this.lastRerun;
+      if (rerun) {
+        // A6: the SAME loop as `spike run --fix` — dispatch, wait for the change
+        // to show up, re-run — capped by maxAttempts, and the panel is told what
+        // the re-test said.
+        this.busy = true;
+        const controller = new AbortController();
+        this.activeRun = controller;
+        let dispatchFailure: string | undefined;
+        const loopProgress = (line: string) => {
+          const m = /fix dispatch failed: (.*)$/.exec(line);
+          if (m) dispatchFailure = m[1];
+          onProgress(line);
+        };
+        try {
+          const result = await runWithAutoFix(rerun.task, rerun.url, {
+            maxAttempts: Math.max(2, maxAttempts),
+            initialReport: report as never,
+            qaRunOpts: { ...rerun.runOpts, signal: controller.signal } as QaRunOptions,
+            runFn: this.fixLoopOverrides.runFn ?? qaRun,
+            ...(this.fixLoopOverrides.dispatchFn && { dispatchFn: this.fixLoopOverrides.dispatchFn }),
+            ...(this.fixLoopOverrides.rebuild && { rebuild: this.fixLoopOverrides.rebuild }),
+            onProgress: loopProgress,
+            confirmed,
+            // A11: no terminal behind a bridge request — see the comment below.
+            interactive: false,
+          });
+          const final = result.finalReport;
+          this.lastFailedReport = final.verdict === 'pass' ? null : final;
+          this.lastEvidencePaths = new Set(final.evidence_paths ?? []);
+          this.lastRunDir = final.evidence_paths?.[0] ? path.dirname(final.evidence_paths[0]) : null;
+          const fixed = result.attempts.some((a) => a.fixed);
+          this.bridge.sendEvent('vibe.fix-done', {
+            ok: fixed,
+            verdict: final.verdict,
+            attempts: result.attempts.length,
+            ...(result.rebuildNote && { note: result.rebuildNote }),
+            ...(!fixed && { message: dispatchFailure ?? 'The coding agent could not be started, so nothing was changed.' }),
+          }, target);
+        } finally {
+          this.busy = false;
+          this.activeRun = null;
+        }
+        return;
+      }
       const res = await dispatchFix(report, {
-        onProgress: (line) => this.bridge.sendEvent('vibe.fix-progress', { line }, target),
+        onProgress,
         confirmed,
         // A11: the request came over the bridge, so there is no terminal to ask
         // in — force the non-interactive branch of the consent gate regardless

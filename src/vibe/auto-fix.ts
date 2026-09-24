@@ -27,6 +27,7 @@ import type { QaConfig } from '../config.js';
 import { loadConfig } from '../config.js';
 import { qaRun, type QaRunOptions, type QaRunResult } from '../engine.js';
 import { buildFixPrompt } from './fix-prompt.js';
+import { captureBeforeFix, waitForRebuild, type RebuildWaitOptions } from './rebuild-wait.js';
 import { SettingsStore, type QaSettings } from './settings.js';
 import type { Report } from '../report/report.js';
 
@@ -474,6 +475,17 @@ export interface RunWithAutoFixOptions {
   interactive?: boolean;
   /** A11: command-line fallback project folder — see DispatchOptions.defaultCwd. */
   defaultCwd?: string;
+  /** A6: also dispatch a fix when the result is `uncertain`. Default false —
+   * an uncertain run may not be a bug at all, and "fixing" code that wasn't
+   * broken is worse than doing nothing. CLI: `--fix-on-uncertain`. */
+  fixOnUncertain?: boolean;
+  /** A6: how to wait for the fix to show up before re-testing. */
+  rebuild?: RebuildWaitOptions;
+  /** A6: skip the first run — the caller already has a failing report (the
+   * panel's "Auto-fix" button re-tests the run it just showed). */
+  initialReport?: QaRunResult;
+  /** Injectable dispatcher — defaults to the real dispatchFix. */
+  dispatchFn?: (report: QaRunResult, opts: DispatchOptions) => Promise<{ ok: boolean; agent: string }>;
 }
 
 export interface AutoFixAttempt {
@@ -485,6 +497,9 @@ export interface AutoFixAttempt {
 export interface RunWithAutoFixResult {
   finalReport: QaRunResult;
   attempts: AutoFixAttempt[];
+  /** A6: set when the final result was produced after a wait that could not
+   * confirm the page rebuilt (it is also appended to finalReport.reason). */
+  rebuildNote?: string;
 }
 
 /**
@@ -502,11 +517,23 @@ export async function runWithAutoFix(
   const run = opts.runFn ?? qaRun;
   const baseOpts: QaRunOptions = { config: opts.config, ...opts.qaRunOpts };
 
+  const dispatch = opts.dispatchFn ?? dispatchFix;
   const attempts: AutoFixAttempt[] = [];
   let finalReport: QaRunResult | undefined;
+  let staleNote: string | undefined;
+  let appliedNote: string | undefined;
+  let pending: QaRunResult | undefined = opts.initialReport;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const report = await run(task, url, baseOpts);
+    let report = pending ?? (await run(task, url, baseOpts));
+    pending = undefined;
+    // A6: a re-test that ran after a wait we could not confirm may be for the
+    // old version — say so on the report itself, not just in the progress log.
+    appliedNote = undefined;
+    if (staleNote && attempt > 1) {
+      appliedNote = staleNote;
+      report = { ...report, reason: report.reason ? `${report.reason} (${staleNote})` : staleNote };
+    }
     finalReport = report;
 
     if (report.verdict === 'pass') {
@@ -522,11 +549,19 @@ export async function runWithAutoFix(
       break;
     }
 
+    // A6: only a `fail` is a bug worth editing code for.
+    if (report.verdict !== 'fail' && !opts.fixOnUncertain) {
+      onProgress(`attempt ${attempt}: ${report.verdict} — not a confirmed failure, so no fix was dispatched (--fix-on-uncertain changes that)`);
+      attempts.push({ verdict: report.verdict, fixed: false });
+      break;
+    }
+
     // failed and attempts remain → dispatch a fix, then loop to re-run.
     let agentLabel = 'fix agent';
     try {
       onProgress(`attempt ${attempt}: ${report.verdict} → dispatching fix…`);
-      const res = await dispatchFix(report, {
+      const before = await captureBeforeFix(url, opts.rebuild);
+      const res = await dispatch(report, {
         config: opts.config,
         onProgress,
         defaultCwd: opts.defaultCwd,
@@ -537,7 +572,11 @@ export async function runWithAutoFix(
         interactive: opts.interactive,
       });
       agentLabel = res.agent;
-      onProgress(`attempt ${attempt}: ${agentLabel} ${res.ok ? 'finished' : 'exited non-zero'} — re-running test`);
+      onProgress(`attempt ${attempt}: ${agentLabel} ${res.ok ? 'finished' : 'exited non-zero'} — waiting for the change to show up`);
+      const waited = await waitForRebuild(url, before, { onProgress, ...opts.rebuild });
+      staleNote = waited.confirmed ? undefined : waited.note;
+      if (staleNote) onProgress(`attempt ${attempt}: ${staleNote}`);
+      onProgress(`attempt ${attempt}: re-running test`);
       attempts.push({ verdict: report.verdict, fixed: true });
     } catch (e) {
       onProgress(`attempt ${attempt}: fix dispatch failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -546,5 +585,5 @@ export async function runWithAutoFix(
     }
   }
 
-  return { finalReport: finalReport!, attempts };
+  return { finalReport: finalReport!, attempts, ...(appliedNote && { rebuildNote: appliedNote }) };
 }

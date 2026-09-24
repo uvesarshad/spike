@@ -31,6 +31,8 @@ import { childRunner } from './schedule/job-runner.js';
 import { notifyIfFlipped } from './schedule/notify.js';
 import { WatchController, startFsWatch } from './schedule/watch.js';
 import { browserFetcher, checkInstruction, checkTargets, coverageReport, DEFAULT_CHECK_PAGES, diffAppModel, discoverApp, emptyAppModel, explorationOptions, hasBlockingFindings, loadAppModel, renderCheckSummary, saveAppModel, type AppModel, type AppModelFinding, type Fetched } from './discovery/index.js';
+import { labelSuiteItems } from './suite/run-tests.js';
+import { buildSiteMap, runSiteCheck, SiteCheckError } from './discovery/run-check.js';
 import { BridgeServer } from './bridge/bridge-server.js';
 import { VibeService } from './vibe/service.js';
 import { installService, uninstallService } from './service/install-service.js';
@@ -242,9 +244,12 @@ program
   .option('--save-storage-state <path>', 'on a PASSING run, save cookies + localStorage to this file')
   .option('--fix', 'on failure, hand the fix prompt to your coding agent (claude/codex/gemini) and re-test', false)
   .option('--max-fix-attempts <n>', 'test→fix→retest rounds with --fix (default 2)', (v) => parseInt(v, 10))
+  .option('--fix-on-uncertain', 'with --fix: also hand the fix prompt over when the result is "uncertain" (default: only when the test failed)', false)
+  .option('--rebuild-timeout <seconds>', 'with --fix, a site that is not on localhost: how long to wait for your change to show up before re-testing (default 180)', (v) => parseInt(v, 10))
+  .option('--wait-for-url <url>', 'with --fix: after your coding agent finishes, wait until this address answers before re-testing (e.g. a deploy health check)')
   .option('--yes-auto-fix', 'pre-accept the one-time per-project auto-fix consent for this non-interactive run', false)
   .option('--json', 'print the slim JSON verdict only', false)
-  .action(async (task: string | undefined, opts: { url: string; spec?: string; maxSteps?: number; perGoalMaxSteps?: number; expect?: string; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; yesAutoFix: boolean; json: boolean }) => {
+  .action(async (task: string | undefined, opts: { url: string; spec?: string; maxSteps?: number; perGoalMaxSteps?: number; expect?: string; via?: 'cdp' | 'extension' | 'playwright'; allowHost: string[]; actionCache?: boolean; readOnly: boolean; record: boolean; replay: boolean; headless: boolean; storageState?: string; saveStorageState?: string; fix: boolean; maxFixAttempts?: number; fixOnUncertain: boolean; rebuildTimeout?: number; waitForUrl?: string; yesAutoFix: boolean; json: boolean }) => {
     // A7 (P0): exactly one input — a sentence or a document, never neither.
     if (!task && !opts.spec) {
       console.error('Tell me what to test: either a sentence in quotes, or --spec <file> with a document describing the flows.');
@@ -287,6 +292,13 @@ program
             // unset project folder. The panel gets no such fallback.
             defaultCwd: process.cwd(),
             yesAutoFix: opts.yesAutoFix,
+            // A6: fix a confirmed failure only; wait for the change to show up.
+            fixOnUncertain: opts.fixOnUncertain,
+            rebuild: {
+              ...(opts.rebuildTimeout && opts.rebuildTimeout > 0 && { timeoutMs: opts.rebuildTimeout * 1000 }),
+              ...(opts.waitForUrl && { waitForUrl: opts.waitForUrl }),
+              onProgress,
+            },
           })).finalReport
         : await qaRun(t, opts.url, qaRunOpts);
 
@@ -347,47 +359,6 @@ program
  * Interaction-gated state (modals, wizards) is deliberately NOT reached this
  * way — discoverApp exposes a seam for an AI exploration pass, which is a
  * separate, budgeted concern. */
-const httpFetcher = async (url: string): Promise<Fetched | null> => {
-  try {
-    const res = await fetch(url, { redirect: 'follow' });
-    const ct = res.headers.get('content-type') ?? '';
-    if (!ct.includes('html')) return { url: res.url || url, status: res.status, html: '' };
-    return { url: res.url || url, status: res.status, html: await res.text() };
-  } catch {
-    return null; // a dead end, not a crash — the crawler moves on
-  }
-};
-
-/** A24: reads a static asset (a JavaScript bundle) as text. Separate from
- * httpFetcher, which deliberately discards non-HTML bodies. */
-const httpTextFetcher = async (url: string): Promise<string | null> => {
-  try {
-    const res = await fetch(url, { redirect: 'follow' });
-    if (!res.ok) return null;
-    return await res.text();
-  } catch {
-    return null;
-  }
-};
-
-function collectAppDirFiles(root: string): { files: string[]; routerKind: 'app' | 'pages' } | undefined {
-  for (const [dir, routerKind] of [['app', 'app'], ['src/app', 'app'], ['pages', 'pages'], ['src/pages', 'pages']] as const) {
-    const abs = path.resolve(root, dir);
-    if (!fs.existsSync(abs)) continue;
-    const files: string[] = [];
-    const walk = (d: string) => {
-      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
-        const p2 = path.join(d, e.name);
-        if (e.isDirectory()) walk(p2);
-        else files.push(path.relative(abs, p2));
-      }
-    };
-    walk(abs);
-    if (files.length) return { files, routerKind };
-  }
-  return undefined;
-}
-
 /* A30: the blessing half of the differential oracle. A baseline diff is only
  * meaningful if someone can say "yes, that change was intentional" — otherwise
  * every deliberate UI edit reads as a regression forever and the signal is
@@ -433,84 +404,6 @@ program
     }
     process.exit(0);
   });
-
-/* A24: mapping now happens in a REAL browser by default.
- *
- * A plain HTTP crawl carries no sign-in, so everything behind a login came
- * back as the login page, and it reads only the served markup, so an app that
- * draws itself in the browser produced exactly one route and no controls. Both
- * are the normal shape of the apps this tool exists for. `--no-browser` keeps
- * the old fast path for a plain server-rendered public site. */
-interface MapCrawlOptions {
-  maxDepth?: number;
-  maxPages?: number;
-  browser: boolean;
-  via?: 'cdp' | 'extension' | 'playwright';
-  storageState?: string;
-  headless?: boolean;
-  /** E7: after the walk, open a few of the things the walk could not follow —
-   * a pop-up, a "show more" section, a tab, the next step of a form — and add
-   * whatever appears to the map. Needs a real Chrome (there is nothing to
-   * click in a plain network fetch) and costs a small, capped number of calls
-   * to the cheap model, so it is `map`'s default and `check`'s opt-in. */
-  explore?: boolean;
-}
-
-/** Build the model for a site, opening (and closing) a browser when the crawl
- * is a browsing one. Shared by `spike map` and `spike check`. */
-async function buildSiteMap(url: string, opts: MapCrawlOptions, progress?: (line: string) => void): Promise<AppModel> {
-  const root = process.cwd();
-  const previousModel = loadAppModel(root);
-  const src = collectAppDirFiles(root);
-  const crawl = {
-    ...(opts.maxDepth !== undefined && { maxDepth: opts.maxDepth }),
-    ...(opts.maxPages !== undefined && { maxPages: opts.maxPages }),
-  };
-  const common = {
-    baseUrl: url,
-    ...(src && { appDirFiles: src.files, routerKind: src.routerKind }),
-    previousModel,
-    crawl,
-    // Route tables live inside the app's own JavaScript; those files are plain
-    // static assets, so they are always read over HTTP even when the pages
-    // themselves are visited in the browser.
-    bundleFetcher: httpTextFetcher,
-  };
-
-  if (!opts.browser) {
-    progress?.('Looking at the site over the network (no sign-in, no JavaScript)…');
-    return discoverApp({ ...common, fetcher: httpFetcher });
-  }
-
-  progress?.('Opening the site in Chrome…');
-  const session = await openBrowserSession({
-    ...(opts.via && { via: opts.via }),
-    ...(opts.headless !== undefined && { headless: opts.headless }),
-  });
-  try {
-    if (opts.storageState) {
-      await injectStorageState(session.browser, loadStorageStateFile(opts.storageState));
-      progress?.('Signed in using the saved session.');
-    }
-    progress?.('Walking the site…');
-    // E7: the walk itself only ever follows links. Everything that appears
-    // after a click — a pop-up, an expander, a tab, step 2 of a form — is added
-    // afterwards by the exploration pass, under its own small fixed budget.
-    return await discoverApp({
-      ...common,
-      fetcher: browserFetcher(session.browser, { sameOrigin: new URL(url).origin }),
-      ...explorationOptions({
-        enabled: opts.explore === true,
-        browser: session.browser,
-        planner: createPlanningRouter(),
-        allowedOrigin: new URL(url).origin,
-        ...(progress && { onProgress: progress }),
-      }),
-    });
-  } finally {
-    await session.close().catch(() => {});
-  }
-}
 
 /** The findings block a person reads after a map. Problems first, then
  * warnings, capped so one broken page does not bury the summary. */
@@ -649,72 +542,26 @@ program
   .option('--explore', 'while finding the pages, also open pop-ups, tabs and "show more" sections so what is behind them gets checked too — this does press a few things on your site', false)
   .option('--json', 'machine-readable output', false)
   .action(async (url: string, opts: { maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; json: boolean }) => {
-    const root = process.cwd();
-    const maxPages = opts.maxPages && opts.maxPages > 0 ? opts.maxPages : DEFAULT_CHECK_PAGES;
     const progress = opts.json ? undefined : (l: string) => console.error(l);
 
-    let model: AppModel;
+    // Same code path as the MCP `site_check` tool (src/discovery/run-check.ts).
+    let checked;
     try {
-      model = await buildSiteMap(
-        url,
-        {
-          // Find a few more pages than we will look at, so the page list is a
-          // choice rather than whatever the crawl happened to stop on.
-          maxPages: maxPages * 2,
-          browser: opts.browser,
-          via: opts.via,
-          storageState: opts.storageState,
-          headless: opts.headless,
-          // E7: opt-in here, unlike `map`. A check nobody typed a word for is
-          // look-only on purpose, and opening things means pressing them.
-          explore: opts.explore === true && opts.browser,
-        },
+      checked = await runSiteCheck(url, {
+        maxPages: opts.maxPages,
+        storageState: opts.storageState,
+        via: opts.via,
+        browser: opts.browser,
+        headless: opts.headless,
+        explore: opts.explore,
         progress,
-      );
+      });
     } catch (e) {
-      console.error(`I could not walk that site: ${e instanceof Error ? e.message : String(e)}`);
+      if (!(e instanceof SiteCheckError)) throw e;
+      console.error(e.message);
       process.exit(INFRA_ERROR_EXIT_CODE);
     }
-    saveAppModel(model, root);
-
-    const targets = checkTargets(model, url, maxPages);
-    if (!targets.length) {
-      console.error('I could not find any pages to look at on that site.');
-      process.exit(INFRA_ERROR_EXIT_CODE);
-    }
-    const capped = targets.length < countVisitableRoutes(model, url);
-    progress?.(`Found ${targets.length} page${targets.length === 1 ? '' : 's'}. Looking at each one…`);
-
-    // The orchestrator maps units to flows 1:1 in order, so the address for
-    // flow i is the target at i — which is how each run knows where to start.
-    const flows = flowsFromRoutes(
-      targets.map((t) => ({ url: t.url, name: t.name })),
-      { baseUrl: url, maxFlows: targets.length, instruction: (_r, address) => checkInstruction(address) },
-    );
-
-    const outcome = await runFanOut(flows, {
-      runFlow: (flow, i) =>
-        qaRun(flow.task, targets[i]?.url ?? url, {
-          readOnly: true, // a check nobody asked for must never press anything
-          record: false,
-          replay: false,
-          headless: opts.headless,
-          storageStatePath: opts.storageState,
-          ...(opts.via && { config: { via: opts.via } }),
-        }),
-      ...(opts.storageState && { storageStatePath: opts.storageState }),
-      onProgress: progress,
-    });
-
-    const findings = model.findings ?? [];
-    const cov = coverageReport(model);
-    const problems = outcome.flows.filter((f) => f.verdict === 'fail').length;
-    const summary = renderCheckSummary({
-      pagesChecked: outcome.coverage.flowsAttempted,
-      controlsFound: cov.interactiveElements.total,
-      problems,
-      capped,
-    });
+    const { outcome, findings, summary } = checked;
 
     if (opts.json) {
       console.log(JSON.stringify({ summary, verdict: outcome.verdict, flows: outcome.flows, coverage: outcome.coverage, findings }, null, 2));
@@ -727,12 +574,6 @@ program
     }
     process.exit(hasBlockingFindings(findings) ? 1 : exitCodeForVerdict(outcome.verdict));
   });
-
-/** How many mapped routes could have been looked at, so the summary can say
- * honestly whether the page cap cut the check short. */
-function countVisitableRoutes(model: AppModel, baseUrl: string): number {
-  return checkTargets(model, baseUrl, Number.MAX_SAFE_INTEGER).length;
-}
 
 program
   .command('coverage')
@@ -1109,28 +950,6 @@ program
  * alongside the existing `entries`, which still run through deterministic $0
  * replay. One ordered list, one storage state, one exit code.
  * ------------------------------------------------------------------------ */
-
-type SuiteItem = { kind: 'case'; value: SuiteCase } | { kind: 'entry'; value: SuiteEntry };
-
-/** Give every case and entry a unique display label — this is what the
- * runner, the reporters and the exit-code roll-up all key on. A case whose
- * name collides with a recorded script's gets a `case: ` prefix rather than
- * silently shadowing it. */
-function labelSuiteItems(cases: SuiteCase[], entries: SuiteEntry[]): Map<string, SuiteItem> {
-  const items = new Map<string, SuiteItem>();
-  const scriptNames = new Set(entries.map((e) => e.script));
-  for (const c of cases) {
-    let label = scriptNames.has(c.name) || items.has(c.name) ? `case: ${c.name}` : c.name;
-    while (items.has(label)) label = `${label}'`;
-    items.set(label, { kind: 'case', value: c });
-  }
-  for (const e of entries) {
-    let label = e.script;
-    while (items.has(label)) label = `${label}'`;
-    items.set(label, { kind: 'entry', value: e });
-  }
-  return items;
-}
 
 program
   .command('suite')

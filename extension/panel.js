@@ -1916,7 +1916,8 @@ function renderResult(params) {
     // auto-fix is only meaningful on a non-pass verdict that produced a fix
     // prompt AND the user opted into auto-fix in Settings (else paste-a-prompt).
     resetFixUi();
-    autoFixBtn.hidden = (verdict === 'pass') || debugMode !== 'auto';
+    // A6: only a confirmed failure is worth editing code for — never an uncertain result.
+    autoFixBtn.hidden = (verdict !== 'fail') || debugMode !== 'auto';
     // A11: no coding agent on this computer → no button at all, just the reason.
     if (!autoFixBtn.hidden && fixAgentAvailable() === false) {
       autoFixBtn.hidden = true;
@@ -2201,8 +2202,21 @@ function onFixDone(msg) {
     autoFixBtn.hidden = true;
     fixStatus.hidden = true;
     fixNote.hidden = false;
-    fixNote.textContent = `Fix applied by ${agent} — run the test again to verify`;
-    addFixLine(`Fix applied by ${agent}.`);
+    // A6: Spike Core re-checks after the fix and tells us what it found.
+    let line;
+    if (msg.verdict === 'pass') {
+      line = 'Fixed and re-checked: passed';
+    } else if (msg.verdict === 'uncertain') {
+      line = "Re-checked after the fix, but couldn't tell if it worked";
+    } else if (msg.verdict) {
+      const n = msg.attempts ? String(msg.attempts) : 'a few';
+      line = `Still failing after ${n} tries`;
+    } else {
+      line = `Fix applied by ${agent} — run the test again to verify`;
+    }
+    if (msg.note) line += ` (${String(msg.note)})`;
+    fixNote.textContent = line;
+    addFixLine(msg.verdict ? line + '.' : `Fix applied by ${agent}.`);
   } else {
     // failure → error banner with the message; re-enable the button to retry
     autoFixBtn.disabled = false;
