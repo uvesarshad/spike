@@ -50,6 +50,52 @@ const defaultRunner: NotifyRunner = (file, args) => {
   execFile(file, args, { timeout: 10_000 }, () => { /* unavailable notifier is fine */ });
 };
 
+export type WebhookKind = 'slack' | 'discord' | 'generic';
+
+/** Which chat service a webhook address belongs to (by host/path), else generic. */
+export function webhookKind(url: string): WebhookKind {
+  try {
+    const u = new URL(url);
+    if (u.hostname === 'hooks.slack.com' || (u.hostname.endsWith('.slack.com') && u.pathname.startsWith('/services/'))) return 'slack';
+    if (/(^|\.)(discord|discordapp)\.com$/.test(u.hostname) && u.pathname.startsWith('/api/webhooks/')) return 'discord';
+  } catch { /* not a URL: treat as generic */ }
+  return 'generic';
+}
+
+/** The JSON body to POST for this webhook. Slack and Discord get a readable
+ * message; anything else gets the raw status-change object (unchanged). */
+export function webhookPayload(url: string, c: StatusChange): unknown {
+  const kind = webhookKind(url);
+  if (kind === 'generic') return c;
+  const failing = c.verdict === 'fail';
+  const { title, body } = notifyMessage(c);
+  const link = c.runId ? `\nRun: ${c.runId}` : '';
+  if (kind === 'slack') {
+    return {
+      text: `${title}: ${c.job}`,
+      attachments: [{ color: failing ? '#d93025' : '#188038', text: `${body}\n${c.url}${link}`.slice(0, 2900) }],
+    };
+  }
+  return {
+    content: title,
+    embeds: [{ title: c.job.slice(0, 250), description: `${c.summary}\n${c.url}${link}`.slice(0, 3900), color: failing ? 0xd93025 : 0x188038 }],
+  };
+}
+
+/** A pull-request run result as a status change, for `spike ci --webhook`. */
+export function ciStatusChange(r: { url: string; verdict: Verdict; error?: string; suite?: { summary: string }; check?: { summary: string } }): StatusChange {
+  const summary = r.error ?? [r.suite?.summary, r.check?.summary].filter(Boolean).join(' ');
+  return { job: 'ci', verdict: r.verdict, url: r.url, summary: summary || r.verdict };
+}
+
+/** POST a status change to a webhook in the right shape. Never throws. */
+export async function postWebhook(webhook: string, change: StatusChange, fetchFn?: NotifyDeps['fetchFn']): Promise<void> {
+  try {
+    const f = fetchFn ?? ((u: string, i: { method: string; headers: Record<string, string>; body: string }) => fetch(u, i));
+    await f(webhook, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(webhookPayload(webhook, change)) });
+  } catch { /* a dead webhook must not break the run loop */ }
+}
+
 export interface NotifyDeps {
   platform?: NodeJS.Platform;
   runner?: NotifyRunner;
@@ -67,11 +113,6 @@ export async function notifyIfFlipped(prev: Verdict | null | undefined, change: 
       if (cmd) (deps.runner ?? defaultRunner)(cmd.file, cmd.args);
     } catch { /* silently skipped if unavailable */ }
   }
-  if (webhook) {
-    try {
-      const f = deps.fetchFn ?? ((u: string, i: { method: string; headers: Record<string, string>; body: string }) => fetch(u, i));
-      await f(webhook, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(change) });
-    } catch { /* a dead webhook must not break the run loop */ }
-  }
+  if (webhook) await postWebhook(webhook, change, deps.fetchFn);
   return true;
 }

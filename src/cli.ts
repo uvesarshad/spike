@@ -747,8 +747,9 @@ program
   .option('--summary <file>', 'write the Markdown summary here')
   .option('--junit <file>', 'write a JUnit XML report here')
   .option('--comment <file>', 'write the pull-request comment body here')
+  .option('--webhook <url>', 'also post the result to this Slack, Discord or other web address')
   .option('--json', 'machine-readable output', false)
-  .action(async (opts: { url: string; suite: boolean; check: boolean; maxPages?: number; budget?: number; storageState?: string; waitForUrl?: string; wait?: number; summary?: string; junit?: string; comment?: string; json: boolean }) => {
+  .action(async (opts: { url: string; suite: boolean; check: boolean; maxPages?: number; budget?: number; storageState?: string; waitForUrl?: string; wait?: number; summary?: string; junit?: string; comment?: string; webhook?: string; json: boolean }) => {
     const { runCi, writeCiOutputs, renderCiSummary } = await import('./ci/ci.js');
     const { buildPrComment } = await import('./ci/pr-comment.js');
     const result = await runCi({
@@ -767,6 +768,10 @@ program
     if (opts.comment) {
       fs.mkdirSync(path.dirname(path.resolve(opts.comment)), { recursive: true });
       fs.writeFileSync(opts.comment, buildPrComment(renderCiSummary(result), { runUrl: process.env.SPIKE_CI_RUN_URL }));
+    }
+    if (opts.webhook) {
+      const { postWebhook, ciStatusChange } = await import('./schedule/notify.js');
+      await postWebhook(opts.webhook, { ...ciStatusChange(result), ...(process.env.SPIKE_CI_RUN_URL && { runId: process.env.SPIKE_CI_RUN_URL }) });
     }
     console.log(opts.json ? JSON.stringify(result, null, 2) : renderCiSummary(result));
     process.exit(result.exitCode);
