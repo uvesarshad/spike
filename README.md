@@ -132,7 +132,21 @@ claude mcp add spike -- node /path/to/repo/dist/mcp-server.js
 …then any agent in that session can call `qa_run(task, url)` — or, for several
 things at once, `qa_run({ url, flows: [...] })` with instructions it split
 itself, or `qa_run({ url, spec: "<document text>" })` to have them worked out
-from a spec/PRD/story list.
+from a spec/PRD/story list. Give it `storageState` (a saved signed-in session)
+and `allowHosts` (extra hosts it may click/type on) when a flow needs them.
+Store passwords with `spike secret set` and write `{{secret:NAME}}` in the task,
+never the password itself.
+
+The server exposes exactly five tools (each schema costs the agent context, so
+the set stays small):
+
+| Tool | What it does |
+|---|---|
+| `qa_run` | One test, several `flows`, or a whole `spec`; returns the slim verdict (plus `fix_hint` on `fail`) |
+| `site_check` | `spike check` for an agent: `{url, maxPages?, storageState?, budgetUsd?}` → verdict, pages checked, up to 20 problems |
+| `tests_run` | Re-run saved tests: exactly one of `name` / `tag` / `all`, optional `url`, `heal`, `budgetUsd` → per-test verdicts + aggregate |
+| `runs_list` | Recent runs (`limit` 1–20, default 10), newest first |
+| `run_get` | The slim result of one past run by `runId` |
 
 <details>
 <summary>Windows (PowerShell)</summary>
@@ -241,6 +255,7 @@ What each add-on unlocks:
 | `spike watch --url <dev url> [--tag <t>] [--suite <file>] [--on save\|commit] [--paths <glob>]` | Stay in the foreground and re-run your saved tests when your code changes (3 s debounce; one run at a time) |
 | `spike fix <runId>` | Print the fix prompt for a finished run — or with `--apply`, hand it to your coding agent headlessly |
 | `spike secret` | Manage the local encrypted vault — secrets are typed via `{{secret:NAME}}`, never reach any model |
+| `spike setup [--dry-run] [--project] [--only <agents>] [--yes] [--force] [--no-verify] [--uninstall]` | Connect Spike to the coding agents on this machine (Claude Code, Cursor, Windsurf, Codex, Gemini): shows exactly which files change, asks once, backs up anything it edits, adds a short skill/rule so the agent knows when to call Spike, then checks the connection. Never overwrites your other entries; `--uninstall` removes only what it added. Without a terminal it prints the plan and writes nothing unless you pass `--yes` |
 | `spike mcp` | Start the MCP stdio server — register it as command `spike`, args `["mcp"]` (see [Registering as an MCP tool](#registering-as-an-mcp-tool)) |
 | `spike nano --check\|--download` | Check or set up the on-device Gemini Nano model (rung 0) |
 | `spike dashboard [--port n] [--host addr]` | Serve a local read-only dashboard over run reports — model_trace, token accounting, cache/replay stats. Listens on this machine only (127.0.0.1); `--host` with any other address exposes past reports to your network and prints a warning |

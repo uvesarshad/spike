@@ -1530,6 +1530,50 @@ program
   });
 
 program
+  .command('setup')
+  .description('connect Spike to the coding agents on this machine (Claude Code, Cursor, Windsurf, Codex, Gemini) so they can call it; shows what changes and asks once')
+  .option('--yes', 'apply without asking', false)
+  .option('--dry-run', 'show what would change and write nothing', false)
+  .option('--project', 'write into the current project folder instead of your user account', false)
+  .option('--only <agents>', 'comma-separated: claude,cursor,codex,windsurf,gemini')
+  .option('--force', 'replace a different existing "spike" entry', false)
+  .option('--uninstall', 'remove exactly what setup added (backups are kept)', false)
+  .option('--no-verify', 'skip the quick health check at the end')
+  .action(async (opts: { yes: boolean; dryRun: boolean; project: boolean; only?: string; force: boolean; uninstall: boolean; verify: boolean }) => {
+    const { runSetup, defaultSetupEnv, probeMcpTools } = await import('./setup/command.js');
+    const code = await runSetup(opts, {
+      env: defaultSetupEnv(),
+      isTTY: Boolean(process.stdin.isTTY && process.stdout.isTTY),
+      confirm: () => new Promise<boolean>((resolve) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        rl.question('Apply these changes? [y/N] ', (a) => { rl.close(); resolve(/^y(es)?$/i.test(a.trim())); });
+      }),
+      out: (l) => console.log(l),
+      verify: async () => {
+        const cfg = loadConfig();
+        const lines: string[] = [];
+        let ok = true;
+        try { lines.push(`  ok  Chrome found (${findChrome(cfg.chromePath)})`); }
+        catch { ok = false; lines.push('  !!  Chrome was not found: install Chrome or set SPIKE_CHROME_PATH'); }
+        try {
+          const ladder = await createPlanningRouter().probeLadder();
+          const roles = buildRoleProbes(cfg, ladder, false).filter((r) => r.role !== 'visual');
+          for (const r of roles) {
+            const name = r.role === 'navigator' ? 'the model that clicks' : 'the model that plans';
+            if (r.available || r.fallback) lines.push(`  ok  ${name} is reachable`);
+            else { ok = false; lines.push(`  !!  ${name} is not reachable: add an AI key or sign in to your AI CLI (see: spike doctor)`); }
+          }
+        } catch (e) { ok = false; lines.push(`  !!  could not check models: ${e instanceof Error ? e.message : String(e)}`); }
+        const mcp = await probeMcpTools(process.argv[1]);
+        if (mcp.ok) lines.push(`  ok  the agent connection answers (${mcp.tools} tool${mcp.tools === 1 ? '' : 's'})`);
+        else { ok = false; lines.push(`  !!  the agent connection did not answer${mcp.error ? `: ${mcp.error}` : ''}`); }
+        return { ok, lines };
+      },
+    });
+    process.exit(code);
+  });
+
+program
   .command('nano')
   .description('check or set up the on-device Gemini Nano model (rung 0)')
   .option('--check', 'report availability', false)
