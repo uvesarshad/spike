@@ -23,14 +23,18 @@ export interface Job {
   lastVerdict: 'pass' | 'fail' | 'uncertain' | null;
   lastRunId?: string;
   lastSummary?: string;
+  /** Estimated dollars spent since `spendWindowStart` (a 24 h window). Kept under
+   * its old name; the window is rolling, not a calendar day. */
   spentTodayUsd: number;
-  /** Local YYYY-MM-DD the spentTodayUsd figure belongs to. */
-  spendDay?: string;
+  /** When the current 24 h spend window began (ms). Absent = no spend yet. */
+  spendWindowStart?: number;
 }
 
-export function localDay(ms: number): string {
-  const d = new Date(ms);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+export const SPEND_WINDOW_MS = 24 * 60 * 60_000;
+
+/** Dollars spent in the current 24 h window as of `now`. */
+export function spentInWindow(job: Pick<Job, 'spentTodayUsd' | 'spendWindowStart'>, now: number): number {
+  return job.spendWindowStart !== undefined && now - job.spendWindowStart < SPEND_WINDOW_MS ? job.spentTodayUsd : 0;
 }
 
 /** `suite` | `tag:<t>` | `check` | `spec:<file>` → kind + target. */

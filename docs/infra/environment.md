@@ -155,6 +155,8 @@ SPIKE_READ_ONLY - Boolean ('0'/'false' → off, any other value present → on).
 Consumed by: src/config.ts, src/driver/loop.ts.
 
 SPIKE_SPEND_CAP_USD - Number (positive USD figure). Optional per-run spend cap. Default: unset (no cap). 0 or a non-finite value is ignored (leaves the cap unset). When set, the driver aborts the run once its best-available spend proxy (paid model-call token total, priced via SPEND_PROXY_USD_PER_MILLION_TOKENS — precise USD isn't derivable without a per-adapter pricing table) reaches this figure, ending with verdict 'uncertain'. Also exposed as a panel setting (non-secret, persisted in SettingsStore as `spendCapUsd`).
+SPIKE_UNATTENDED_BUDGET_USD - Number (positive USD figure). Default spend cap for anything nobody is watching: each scheduled job (`spike schedule`) and `spike watch`, counted per job per 24 hours (a window that starts at the job's first spend, tracked in ~/.spike/jobs.json as `spentTodayUsd`/`spendWindowStart`). Default: 1.00. Config key `unattendedBudgetUsd`. An explicit `--budget` (or the job's own budget) overrides it; interactive runs are never capped by it. A job at its cap is skipped with "stopped: spending limit reached ($X of $Y in the last 24 hours)" until the window passes. 0 or a non-number is ignored (keeps the default). What a job spent is read from the reports its run wrote, so the figure is an estimate (same token-based proxy as SPIKE_SPEND_CAP_USD).
+SPIKE_CI_BUDGET_USD - Number (positive USD figure). Default spend cap for one `spike ci` run. Default: 2.00. Config key `ciBudgetUsd`. An explicit `--budget` overrides it. 0 or a non-number is ignored.
 Consumed by: src/config.ts, src/driver/loop.ts.
 
 ## Artifact Output

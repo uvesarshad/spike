@@ -13,8 +13,8 @@ import { exitCodeForVerdict, INFRA_ERROR_EXIT_CODE } from './cli-exit-codes.js';
 import { NanoRunnerPage } from './ports/nano-runner-page.js';
 import { allocateIsolatedSession, createPlanningRouter, injectStorageState, isQuarantined, loadStorageStateFile, openBrowserSession, qaReplay, qaRun, type QaReplayResult } from './engine.js';
 import { decomposeSpec, flowsFromRoutes, renderFlowTable, runFanOut, runFlows } from './driver/spec-decompose.js';
-import { batchLoginOnce, runOptionsFromContext, type FanOutContext } from './orchestrator/fan-out.js';
-import { SpendBudget, parseBudgetFlag, resolveUnattendedBudget } from './orchestrator/budget.js';
+import { batchLoginOnce, renderSpendLine, runOptionsFromContext, type FanOutContext } from './orchestrator/fan-out.js';
+import { SpendBudget, formatUsd, guardRuns, parseBudgetFlag, resolveCiBudget, resolveUnattendedBudget, withSpendCap } from './orchestrator/budget.js';
 import { startDashboard, isLoopbackHost } from './dashboard/server.js';
 import { headlineScreenshot, slimReport, type Report } from './report/report.js';
 import { findChrome } from './chrome/launch.js';
@@ -685,14 +685,20 @@ program
   .option('--headless', 'run Chrome without a window', false)
   .option('--explore', 'while finding the pages, also open pop-ups, tabs and "show more" sections so what is behind them gets checked too — this does press a few things on your site', false)
   .option('--try-controls', 'also press ordinary buttons on each page so a button that does nothing shows up; never presses anything that buys, pays, deletes, cancels, sends or signs out, and never submits a form with a password or payment field. Pages that pass are saved as tests tagged "check"', false)
+  .option('--budget <usd>', 'stop once about this much has been spent: the pages not yet looked at are skipped and the result is "not sure"')
+  .option('--stop-on-fail', 'stop at the first page that looks broken', false)
+  .option('--steps-per-flow <n>', 'how many steps looking at one page may take', (v) => parseInt(v, 10))
   .option('--json', 'machine-readable output', false)
-  .action(async (url: string, opts: { maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; tryControls: boolean; json: boolean }) => {
+  .action(async (url: string, opts: { budget?: string; stopOnFail: boolean; stepsPerFlow?: number; maxPages?: number; storageState?: string; via?: 'cdp' | 'extension' | 'playwright'; browser: boolean; headless: boolean; explore: boolean; tryControls: boolean; json: boolean }) => {
     const progress = opts.json ? undefined : (l: string) => console.error(l);
 
     // Same code path as the MCP `site_check` tool (src/discovery/run-check.ts).
     let checked;
     try {
       checked = await runSiteCheck(url, {
+        budgetUsd: parseBudgetFlag(opts.budget),
+        stopOnFail: opts.stopOnFail,
+        stepsPerPage: opts.stepsPerFlow,
         maxPages: opts.maxPages,
         storageState: opts.storageState,
         via: opts.via,
@@ -704,6 +710,7 @@ program
         progress,
       });
     } catch (e) {
+      if (e instanceof Error && /^--budget /.test(e.message)) { console.error(e.message); process.exit(INFRA_ERROR_EXIT_CODE); }
       if (!(e instanceof SiteCheckError)) throw e;
       console.error(e.message);
       process.exit(INFRA_ERROR_EXIT_CODE);
@@ -711,7 +718,7 @@ program
     const { outcome, findings, summary } = checked;
 
     if (opts.json) {
-      console.log(JSON.stringify({ summary, verdict: outcome.verdict, flows: outcome.flows, coverage: outcome.coverage, findings }, null, 2));
+      console.log(JSON.stringify({ summary, verdict: outcome.verdict, flows: outcome.flows, coverage: outcome.coverage, ...(outcome.spend && { spend: outcome.spend }), findings }, null, 2));
     } else {
       console.log('');
       console.log(renderFlowTable(outcome));
@@ -733,7 +740,7 @@ program
   .option('--suite', 'run every saved test', false)
   .option('--check', 'also walk the site and look at each page', false)
   .option('--max-pages <n>', 'how many pages the site check looks at', (v) => parseInt(v, 10))
-  .option('--budget <usd>', 'stop once about this much has been spent (default 2)', (v) => parseFloat(v))
+  .option('--budget <usd>', 'stop once about this much has been spent (default $2, or ciBudgetUsd / SPIKE_CI_BUDGET_USD)', (v) => parseFloat(v))
   .option('--storage-state <path>', 'load a saved sign-in first')
   .option('--wait-for-url <url>', 'wait for this address to answer before starting (default: the preview address)')
   .option('--wait <seconds>', 'how long to wait for the address (default 180)', (v) => parseInt(v, 10))
@@ -749,7 +756,7 @@ program
       suite: opts.suite,
       check: opts.check,
       maxPages: opts.maxPages,
-      budgetUsd: opts.budget && opts.budget > 0 ? opts.budget : 2,
+      budgetUsd: resolveCiBudget(opts.budget && opts.budget > 0 ? opts.budget : undefined, loadConfig()),
       storageState: opts.storageState,
       waitForUrl: opts.waitForUrl,
       ...(opts.wait && { waitMs: opts.wait * 1000 }),
@@ -974,6 +981,7 @@ program
   .option('--headless', 'run Chrome headless — a script needing assert_visual still gets Nano on its own split-off headed Chrome', false)
   .option('--storage-state <path>', 'load cookies + localStorage from this file before replaying (auth reuse)')
   .option('--save-storage-state <path>', 'single-script replay only: on a PASSING replay, save storage state to this file (with --all, use --auth-fixture instead)')
+  .option('--budget <usd>', 'with --all: stop once about this much has been spent (only re-engaged --heal runs cost money); the tests not yet run are skipped and the result is "not sure"')
   .option('--auth-fixture', 'with --all + a configured suite setup script: run setup once, capture the storage state it produces, and inject it into every entry — "log in once, reuse everywhere"', false)
   .action(
     async (
@@ -998,9 +1006,13 @@ program
         saveStorageState?: string;
         authFixture: boolean;
         retries?: number;
+        budget?: string;
       },
     ) => {
       const config = mergeConfig(opts.via, opts.allowHost, undefined, opts);
+      let replayBudgetUsd: number | undefined;
+      try { replayBudgetUsd = parseBudgetFlag(opts.budget); } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(2); }
+      const replayBudget = new SpendBudget(replayBudgetUsd);
 
       if (!opts.all) {
         // Single-script path — unchanged from before the suite runner existed.
@@ -1106,7 +1118,7 @@ program
         // (the default) never allocates anything extra, so this is a no-op
         // for every existing caller.
         const isolation = parallel && resolvedVia !== 'playwright' ? await allocateIsolatedSession(baseProfileDir) : undefined;
-        const perCallConfig = isolation ? { ...config, ...isolation } : config;
+        const perCallConfig = withSpendCap(isolation ? { ...config, ...isolation } : config, replayBudget);
         const report = await qaReplay(scriptId, {
           heal: opts.heal,
           ...(opts.readOnly && { readOnly: true }), // A1 (P0): look-only mode, suite-wide
@@ -1129,7 +1141,7 @@ program
       };
 
       if (suiteSetup) console.error(`setup: ${suiteSetup}`);
-      const outcome = await runSuite(entries, runOne, {
+      const outcome = await runSuite(entries, guardRuns(runOne, { budget: replayBudget, log: (l) => console.error(l) }), {
         workers: opts.workers,
         setup: suiteSetup,
         teardown: suiteConfig.teardown,
@@ -1179,6 +1191,9 @@ program
   .option('--no-record', 'do not record a passing case to generated-tests/')
   .option('--headless', 'run Chrome headless', false)
   .option('--max-steps <n>', 'per-case driver step budget', (v) => parseInt(v, 10))
+  .option('--steps-per-flow <n>', 'same as --max-steps: how many steps one test may take', (v) => parseInt(v, 10))
+  .option('--budget <usd>', 'stop once about this much has been spent: the tests not yet run are skipped and the result is "not sure"')
+  .option('--stop-on-fail', 'stop at the first test that fails instead of running them all', false)
   .option('--baseline', 'compare the finished page against this flow\'s stored baseline (the first run stores it); differences are reported as evidence, the verdict is unchanged', false)
   .option('--fail-on-regression', 'with --baseline: a difference from the accepted baseline turns a pass into a fail (accept intended changes with `spike bless`)', false)
   .option('--json', 'print slim JSON verdicts only', false)
@@ -1199,10 +1214,16 @@ program
       record: boolean;
       headless: boolean;
       maxSteps?: number;
+      stepsPerFlow?: number;
+      budget?: string;
+      stopOnFail: boolean;
       json: boolean;
     }) => {
       const config = mergeConfig(opts.via, opts.allowHost, undefined, opts);
       const say = (line: string) => { if (!opts.json) console.log(line); };
+      let suiteBudgetUsd: number | undefined;
+      try { suiteBudgetUsd = parseBudgetFlag(opts.budget); } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(2); }
+      const suiteBudget = new SpendBudget(suiteBudgetUsd);
 
       let suiteConfig;
       try {
@@ -1257,7 +1278,7 @@ program
           const report = await qaReplay(item ? (item.value as SuiteEntry).script : label, {
             heal: false,
             ...(opts.readOnly && { readOnly: true }),
-            ...(config && { config }),
+            ...(withSpendCap(config, suiteBudget) && { config: withSpendCap(config, suiteBudget) }),
             onProgress: opts.json ? undefined : (l) => console.log(l),
             headless: opts.headless,
             storageStatePath: opts.storageState,
@@ -1266,12 +1287,12 @@ program
         }
         const c = item.value;
         const report = await qaRun(c.task, c.url, {
-          maxSteps: opts.maxSteps,
+          maxSteps: opts.stepsPerFlow ?? opts.maxSteps,
           ...(opts.readOnly && { readOnly: true }),
           record: opts.record,
           headless: opts.headless,
           storageStatePath: opts.storageState,
-          ...(config && { config }),
+          ...(withSpendCap(config, suiteBudget) && { config: withSpendCap(config, suiteBudget) }),
           onProgress: opts.json ? undefined : (l) => console.log(l),
         });
         // `expect: 'fail'` flips the polarity — see applyExpectation.
@@ -1285,7 +1306,7 @@ program
         else console.log(JSON.stringify(out, null, 2));
       };
 
-      const outcome = await runSuite(list, runOne, {
+      const outcome = await runSuite(list, guardRuns(runOne, { budget: suiteBudget, stopOnFail: opts.stopOnFail, log: (l) => console.error(l) }), {
         workers: opts.workers,
         setup: suiteConfig.setup,
         teardown: suiteConfig.teardown,
@@ -1299,6 +1320,7 @@ program
       else {
         const failedTests = outcome.results.filter((r) => r.verdict !== 'pass');
         say(`\n${outcome.results.length - failedTests.length}/${outcome.results.length} passed${failedTests.length ? ` — ${failedTests.map((r) => r.script).join(', ')}` : ''}`);
+        if (suiteBudget.capUsd !== undefined) say(renderSpendLine(suiteBudget.totals()).trim());
       }
 
       emitSuiteReport(outcome, opts.reporter, opts.out, 'spike suite');
@@ -1330,7 +1352,7 @@ program
     const vibe = new VibeService(bridge);
     vibe.start();
     // A7: the daemon also owns the job list — tick every 60 s, one job at a time.
-    startScheduler({ store: new JobStore(), run: childRunner(process.argv[1]) });
+    startScheduler({ store: new JobStore(), run: childRunner(process.argv[1]), defaultBudgetUsd: loadConfig().unattendedBudgetUsd });
     console.log(`vibe daemon listening on ws://localhost:${port} — open the extension side panel`);
     // stay alive; the bridge owns the WS server from here
     return new Promise<void>(() => {});
@@ -1344,12 +1366,13 @@ schedule
   .argument('<when>', 'every <N>m|h | hourly | daily HH:MM | weekdays HH:MM')
   .argument('<what>', 'suite | tag:<name> | check | spec:<file>')
   .requiredOption('--url <url>', 'the site to test')
-  .option('--budget <usd>', 'stop for the day once this much has been spent', (v) => parseFloat(v))
+  .option('--budget <usd>', 'most this test may spend in 24 hours; once reached it pauses until the window passes (default: the unattended limit, $1 unless you changed it)', (v) => parseFloat(v))
   .option('--webhook <url>', 'also POST here when a test starts or stops failing')
   .action((when: string, what: string, opts: { url: string; budget?: number; webhook?: string }) => {
     try {
       const job = new JobStore().add({ target: what, url: opts.url, when, budgetUsd: opts.budget, webhook: opts.webhook });
       console.log(`Scheduled ${what} ${when} (id ${job.id}).`);
+      console.log(`It will spend at most ${formatUsd(job.budgetUsd ?? loadConfig().unattendedBudgetUsd)} in any 24 hours.`);
       console.log('Scheduled tests run while Spike Core is running — start it with `spike daemon --install-service`');
     } catch (e) {
       console.error(e instanceof Error ? e.message : String(e));
@@ -1384,7 +1407,7 @@ schedule
     const store = new JobStore();
     const job = store.get(id);
     if (!job) { console.error(`No scheduled test with id ${id}.`); process.exit(2); }
-    const r = await runJob(job, { store, run: childRunner(process.argv[1]) });
+    const r = await runJob(job, { store, run: childRunner(process.argv[1]), defaultBudgetUsd: loadConfig().unattendedBudgetUsd });
     console.log(`${id}: ${r.verdict}${r.summary ? ' — ' + r.summary : ''}`);
     process.exit(exitCodeForVerdict(r.verdict));
   });
@@ -1398,7 +1421,11 @@ program
   .option('--on <when>', 'save (default) | commit', 'save')
   .option('--paths <glob>', 'only react to changes to files matching this pattern')
   .option('--webhook <url>', 'also POST here when a test starts or stops failing')
-  .action((opts: { url: string; tag?: string; suite?: string; on: string; paths?: string; webhook?: string }) => {
+  .option('--budget <usd>', 'most the watched runs may spend in 24 hours (default: the unattended limit, $1 unless you changed it)')
+  .action((opts: { url: string; tag?: string; suite?: string; on: string; paths?: string; webhook?: string; budget?: string }) => {
+    let watchCap: number;
+    try { watchCap = resolveUnattendedBudget(parseBudgetFlag(opts.budget), loadConfig()) ?? Infinity; } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(2); }
+    const spendLog: Array<{ at: number; usd: number }> = [];
     if (opts.on !== 'save' && opts.on !== 'commit') { console.error('--on must be save or commit'); process.exit(2); }
     const cli = process.argv[1];
     // the suite command reads spike.suite.json from its working directory
@@ -1408,7 +1435,15 @@ program
       run: async () => {
         console.log('Change noticed — running your tests…');
         const job = { id: 'watch', kind: opts.tag ? 'tag' : 'suite', target: opts.tag ?? '', url: opts.url, when: 'watch', createdAt: 0, lastRunAt: null, lastVerdict: null, spentTodayUsd: 0 } as const;
-        const r = await childRunner(cli, suiteDir)(job);
+        const nowMs = Date.now();
+        while (spendLog.length && nowMs - spendLog[0].at >= 24 * 3_600_000) spendLog.shift();
+        const spent = spendLog.reduce((a, e) => a + e.usd, 0);
+        if (spent >= watchCap) {
+          console.log(`Skipped: spending limit reached (${formatUsd(spent)} of ${formatUsd(watchCap)} in the last 24 hours). Raise it with --budget.`);
+          return;
+        }
+        const r = await childRunner(cli, suiteDir)(job, { budgetUsd: Number.isFinite(watchCap) ? watchCap - spent : undefined });
+        spendLog.push({ at: nowMs, usd: r.costUsd ?? 0 });
         console.log(`Result: ${r.verdict}`);
         await notifyIfFlipped(last, { job: 'watch', verdict: r.verdict, url: opts.url, summary: r.summary ?? r.verdict }, opts.webhook);
         last = r.verdict;

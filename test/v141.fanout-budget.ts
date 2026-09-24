@@ -90,4 +90,61 @@ const costly = (usd: number, ctxs?: FanOutContext[]) => async (_f: unknown, _i: 
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// --- A8: unattended defaults, in the job store and scheduler
+{
+  const { JobStore } = await import('../src/schedule/store.js');
+  const { runJob } = await import('../src/schedule/scheduler.js');
+  const { jobArgs } = await import('../src/schedule/job-runner.js');
+  const { loadConfig } = await import('../src/config.js');
+  check('config defaults: $1 unattended, $2 CI', loadConfig().unattendedBudgetUsd === 1 && loadConfig().ciBudgetUsd === 2);
+  process.env.SPIKE_UNATTENDED_BUDGET_USD = '3.5';
+  process.env.SPIKE_CI_BUDGET_USD = 'garbage';
+  const c = loadConfig();
+  check('env overrides unattended cap; garbage ignored', c.unattendedBudgetUsd === 3.5 && c.ciBudgetUsd === 2);
+  delete process.env.SPIKE_UNATTENDED_BUDGET_USD; delete process.env.SPIKE_CI_BUDGET_USD;
+
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'spike-cap-'));
+  try {
+    const store = new JobStore({ home });
+    let clock = Date.UTC(2026, 8, 24, 12, 0);
+    const job = store.add({ target: 'suite', url: 'http://x.test', when: 'hourly' }, clock); // no budget of its own
+    const budgets: Array<number | undefined> = [];
+    const deps = { store, now: () => clock, defaultBudgetUsd: 1, notify: async () => {}, run: async (_j: unknown, ctx?: { budgetUsd?: number }) => { budgets.push(ctx?.budgetUsd); return { verdict: 'pass' as const, costUsd: 0.6 }; } };
+    await runJob(store.get(job.id)!, deps);
+    check('first run gets the whole default cap', budgets[0] === 1);
+    clock += 3_600_000;
+    await runJob(store.get(job.id)!, deps);
+    check('second run gets what is left', Math.abs((budgets[1] ?? 0) - 0.4) < 1e-9 && Math.abs(store.get(job.id)!.spentTodayUsd - 1.2) < 1e-9);
+    clock += 3_600_000;
+    const r = await runJob(store.get(job.id)!, deps);
+    check('job at its daily cap is skipped with a plain reason', budgets.length === 2 && r.verdict === 'uncertain' && /spending limit reached/.test(r.summary ?? ''));
+    clock += 24 * 3_600_000;
+    await runJob(store.get(job.id)!, deps);
+    check('cap resets after 24 hours', budgets.length === 3 && budgets[2] === 1);
+    const own = store.add({ target: 'check', url: 'http://y.test', when: 'hourly', budgetUsd: 5 }, clock);
+    await runJob(store.get(own.id)!, deps);
+    check('explicit job budget beats the default', budgets[3] === 5);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+  check('job argv carries the remaining budget', jobArgs({ kind: 'suite', target: '', url: '' } as never, 0.4).join(' ').endsWith('--budget 0.40') && !jobArgs({ kind: 'suite', target: '', url: '' } as never).includes('--budget'));
+}
+
+// --- A10: the check's fan-out controls reach the fan-out
+{
+  const { runSiteCheck } = await import('../src/discovery/run-check.js');
+  const { emptyAppModel, upsertStaticRoute } = await import('../src/discovery/index.js');
+  const model = emptyAppModel('https://shop.example/');
+  for (const r of ['/a', '/b', '/c', '/d']) upsertStaticRoute(model, r);
+  const seen: FanOutContext[] = [];
+  const r = await runSiteCheck('https://shop.example/', { budgetUsd: 1, stopOnFail: true, stepsPerPage: 7 }, {
+    buildMap: async () => model,
+    saveModel: () => {},
+    runPage: async (_t, _a, _o, ctx) => { seen.push(ctx!); return { verdict: 'fail' as const, spendSummary: { estimatedUsd: 0.3, paidCalls: 1 } }; },
+  });
+  check('--steps-per-flow reaches each page run', seen.length > 0 && seen.every((c) => c.maxSteps === 7));
+  check('--stop-on-fail stops after the first failing page', seen.length === 1 && r.outcome.verdict === 'fail');
+  check('--budget reaches the check as the batch cap', seen[0].spendCapUsd === 1 && r.outcome.spend?.budgetUsd === 1);
+}
+
 process.exit(failed ? 1 : 0);

@@ -15,6 +15,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { createPlanningRouter, qaReplay, qaRun } from './engine.js';
+import { batchLoginOnce, runOptionsFromContext } from './orchestrator/fan-out.js';
 import { decomposeSpec, normalizeFlows, runFlows, MAX_FLOWS, type SpecFlow } from './driver/spec-decompose.js';
 import { slimReport, type Report } from './report/report.js';
 import { buildFixHint } from './vibe/fix-prompt.js';
@@ -96,8 +97,13 @@ export function createMcpServer(deps: McpDeps = { qaRun, artifactsDir: () => loa
         .array(z.string())
         .optional()
         .describe('extra hosts the run may click/type on beyond the url host (OAuth or checkout domains).'),
+      budgetUsd: z
+        .number()
+        .positive()
+        .optional()
+        .describe('with flows or spec: stop once this much is spent; remaining flows are skipped (result uncertain).'),
     },
-    async ({ task, url, flows, spec, maxSteps, readOnly, expect, storageState, allowHosts }) => {
+    async ({ task, url, flows, spec, maxSteps, readOnly, expect, storageState, allowHosts, budgetUsd }) => {
       const config = withAllowHosts(allowHosts);
       const runOpts = {
         maxSteps,
@@ -126,8 +132,21 @@ export function createMcpServer(deps: McpDeps = { qaRun, artifactsDir: () => loa
             url,
           });
         }
+        // A11: log in once per batch when the caller supplied no session.
+        const loginOnce = storageState?.trim() ? undefined : batchLoginOnce(deps.artifactsDir());
         const outcome = await runFlows(list, {
-          runFlow: (flow) => deps.qaRun(flow.task, url, runOpts),
+          runFlow: (flow, _i, ctx) => {
+            const c = runOptionsFromContext(ctx);
+            return deps.qaRun(flow.task, url, {
+              ...runOpts,
+              ...(c.storageStatePath && { storageStatePath: c.storageStatePath }),
+              ...(c.saveStorageStatePath && { saveStorageStatePath: c.saveStorageStatePath }),
+              ...(c.config && { config: { ...runOpts.config, ...c.config } }),
+            });
+          },
+          ...(storageState?.trim() && { storageStatePath: storageState.trim() }),
+          ...(loginOnce && { loginOnce }),
+          ...(budgetUsd !== undefined && { budgetUsd }),
         });
         return text(outcome); // a failing TEST is a successful TOOL call
       }
@@ -145,7 +164,7 @@ export function createMcpServer(deps: McpDeps = { qaRun, artifactsDir: () => loa
       url: z.string().url().describe('address to start from; the check stays on this site'),
       maxPages: z.number().int().min(1).max(50).optional().describe('how many pages to look at (default 20)'),
       storageState: z.string().optional().describe('path to a saved signed-in session, so signed-in pages are checked'),
-      budgetUsd: z.number().positive().optional().describe('spend cap in USD applied to each page looked at'),
+      budgetUsd: z.number().positive().optional().describe('spend cap in USD for the whole check; remaining pages are skipped once it is reached'),
     },
     async ({ url, maxPages, storageState, budgetUsd }) => {
       try {

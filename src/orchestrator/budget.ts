@@ -111,3 +111,35 @@ export function spendSince(artifactsDir: string, sinceMs: number): SpendTotals {
   }
   return t;
 }
+
+/** A run's config with the batch's remaining money as its own spend cap, so a
+ * single runaway run also stops. No cap → the config untouched. */
+export function withSpendCap<C extends object>(config: C | undefined, budget: SpendBudget): (C & { spendCapUsd?: number }) | undefined {
+  const rem = budget.remaining();
+  if (rem === undefined) return config as (C & { spendCapUsd?: number }) | undefined;
+  return { ...(config ?? ({} as C)), spendCapUsd: Math.max(rem, 0.01) };
+}
+
+/** Wrap a suite's per-test runner: count each finished test's spend, skip the
+ * rest once the budget is reached (or, with `stopOnFail`, after a failure).
+ * Skipped tests come back `uncertain` and the reason is printed once. */
+export function guardRuns<R extends { verdict: 'pass' | 'fail' | 'uncertain'; report?: unknown }>(
+  run: (label: string) => Promise<R>,
+  o: { budget: SpendBudget; stopOnFail?: boolean; log?: (line: string) => void },
+): (label: string) => Promise<R> {
+  let stopped: string | undefined;
+  return async (label) => {
+    if (!stopped && o.budget.exhausted()) {
+      stopped = o.budget.stopReason();
+      o.log?.(stopped);
+    }
+    if (stopped) return { verdict: 'uncertain' } as R;
+    const r = await run(label);
+    o.budget.add((r.report as { spendSummary?: SpendLike } | undefined)?.spendSummary);
+    if (o.stopOnFail && r.verdict === 'fail') {
+      stopped = 'stopped: an earlier test failed';
+      o.log?.(`${stopped} — the remaining tests were not run`);
+    }
+    return r;
+  };
+}

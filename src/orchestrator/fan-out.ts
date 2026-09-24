@@ -22,6 +22,7 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 import type { RunCoverage, RunVerdict, StepRecord } from '../report/report.js';
 import { SpendBudget, formatUsd, type SpendLike, type SpendTotals } from './budget.js';
 
@@ -285,7 +286,25 @@ export interface FanOutOptions {
   /** A11: log in once per batch. Used only when no `storageStatePath` was
    * supplied. `path` is where the first passing login's session is saved
    * (0600); it is deleted at the end unless `keep` (the user asked to keep it). */
-  loginOnce?: { path: string; keep?: boolean; pattern?: RegExp };
+  loginOnce?: LoginOnce;
+}
+
+export interface LoginOnce {
+  path: string;
+  keep?: boolean;
+  pattern?: RegExp;
+  /** Scratch folder to remove with the session file at batch end. */
+  dir?: string;
+}
+
+/** The session-sharing setup for one batch: the session file lives in
+ * `artifacts/<batchId>/session.json` and is deleted at the end, unless the user
+ * named a file with --save-storage-state (then that file is the session, kept). */
+export function batchLoginOnce(artifactsDir: string, saveTo?: string): LoginOnce {
+  if (saveTo) return { path: path.resolve(saveTo), keep: true };
+  const dir = path.join(artifactsDir, `batch-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+  fs.mkdirSync(dir, { recursive: true });
+  return { path: path.join(dir, 'session.json'), dir };
 }
 
 /** Run every unit in order, one budgeted run each, and aggregate. A unit that
@@ -377,6 +396,7 @@ export async function runFanOut(flows: FlowUnit[], opts: FanOutOptions): Promise
   } finally {
     if (login && !login.keep) {
       try { fs.rmSync(login.path, { force: true }); } catch { /* best effort */ }
+      if (login.dir) { try { fs.rmSync(login.dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     }
   }
 

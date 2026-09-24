@@ -68,7 +68,7 @@ try {
   void c; void order;
 
   // budget cap stops the job as uncertain
-  store.update(j.id, { spentTodayUsd: 1, spendDay: '2026-09-25', lastRunAt: at(2026, 9, 25, 0, 0) });
+  store.update(j.id, { spentTodayUsd: 1, spendWindowStart: at(2026, 9, 25, 0, 0), lastRunAt: at(2026, 9, 25, 0, 0) });
   clock = at(2026, 9, 25, 1, 0);
   const before = order.length;
   await tick(deps);

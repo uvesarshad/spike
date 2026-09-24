@@ -1,7 +1,8 @@
 /* A7 — the daemon's scheduler. tick() runs every due job, one at a time.
  * The runner, clock and notifier are injected so tests use fakes. */
 
-import { JobStore, localDay, type Job } from './store.js';
+import { JobStore, spentInWindow, SPEND_WINDOW_MS, type Job } from './store.js';
+import { formatUsd } from '../orchestrator/budget.js';
 import { isDue } from './when.js';
 import { notifyIfFlipped, type StatusChange, type Verdict } from './notify.js';
 
@@ -12,7 +13,9 @@ export interface JobResult {
   summary?: string;
 }
 
-export type JobRunner = (job: Job) => Promise<JobResult>;
+/** `budgetUsd` is what the job may still spend in this run (its cap minus what
+ * it already spent in the last 24 h); undefined = uncapped. */
+export type JobRunner = (job: Job, ctx?: { budgetUsd?: number }) => Promise<JobResult>;
 export type StatusNotifier = (prev: Verdict | null, change: StatusChange, webhook?: string) => Promise<unknown>;
 
 export interface SchedulerDeps {
@@ -20,30 +23,34 @@ export interface SchedulerDeps {
   run: JobRunner;
   now?: () => number;
   notify?: StatusNotifier;
+  /** A8: the cap for a job that has no `budgetUsd` of its own (config
+   * `unattendedBudgetUsd`). Undefined = such jobs are uncapped. */
+  defaultBudgetUsd?: number;
 }
 
 /** Run one job now (used by tick and `schedule run-now`); records the result. */
 export async function runJob(job: Job, deps: SchedulerDeps): Promise<JobResult> {
   const now = (deps.now ?? Date.now)();
-  const today = localDay(now);
-  const spentBefore = job.spendDay === today ? job.spentTodayUsd : 0;
+  const spentBefore = spentInWindow(job, now);
+  const cap = job.budgetUsd ?? deps.defaultBudgetUsd;
   let result: JobResult;
-  if (job.budgetUsd !== undefined && spentBefore >= job.budgetUsd) {
-    result = { verdict: 'uncertain', summary: 'stopped: budget reached for today' };
+  if (cap !== undefined && spentBefore >= cap) {
+    result = { verdict: 'uncertain', summary: `stopped: spending limit reached (${formatUsd(spentBefore)} of ${formatUsd(cap)} in the last 24 hours) — it will run again once that window passes` };
   } else {
     try {
-      result = await deps.run(job);
+      result = await deps.run(job, { ...(cap !== undefined && { budgetUsd: cap - spentBefore }) });
     } catch (e) {
       result = { verdict: 'uncertain', summary: `could not run: ${e instanceof Error ? e.message : String(e)}` };
     }
   }
   const finished = (deps.now ?? Date.now)();
+  const windowStart = job.spendWindowStart !== undefined && now - job.spendWindowStart < SPEND_WINDOW_MS ? job.spendWindowStart : now;
   deps.store.update(job.id, {
     lastRunAt: finished,
     lastVerdict: result.verdict,
     lastRunId: result.runId,
     lastSummary: result.summary,
-    spendDay: today,
+    spendWindowStart: windowStart,
     spentTodayUsd: spentBefore + (result.costUsd ?? 0),
   });
   const notify: StatusNotifier = deps.notify ?? ((p, c, w) => notifyIfFlipped(p, c, w));
