@@ -28,7 +28,7 @@ const r = checkApiCalls(parsed, [
   call('GET', 'https://shop.test/api/v1/products', 200),
 ]);
 const kinds = r.mismatches.map((m) => m.kind).sort().join();
-check('finds each kind of mismatch', kinds === 'method-not-allowed,undocumented-path,undocumented-status', kinds);
+check('finds each kind of mismatch', kinds === 'method-not-allowed,undocumented-path,undocumented-status');
 check('default / 2XX documented statuses accepted', !r.mismatches.some((m) => m.method === 'DELETE'));
 check('duplicates counted once per distinct call, summary plain', r.summary.startsWith('3 of'));
 check('other origins and assets ignored', checkApiCalls(parsed, [call('GET', 'https://cdn.other/x.js', 200), call('GET', 'https://shop.test/logo.png', 200)]).checked === 0);
