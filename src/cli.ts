@@ -17,6 +17,7 @@ import { batchLoginOnce, renderSpendLine, runOptionsFromContext, type FanOutCont
 import { SpendBudget, formatUsd, guardRuns, parseBudgetFlag, resolveCiBudget, resolveUnattendedBudget, withSpendCap } from './orchestrator/budget.js';
 import { startDashboard, isLoopbackHost, DASHBOARD_DEFAULT_PORT } from './dashboard/server.js';
 import { openInBrowser } from './dashboard/open.js';
+import { detailsLine, noArgEntry } from './dashboard/entry.js';
 import { headlineScreenshot, slimReport, type Report } from './report/report.js';
 import { findChrome } from './chrome/launch.js';
 import { buildDoctorReport, doctorExitCode, renderDoctorReport, type DoctorRoleProbe } from './doctor.js';
@@ -386,6 +387,9 @@ program
     } else {
       console.log(`\n${renderPlainReport(report)}`);
       console.log(`full report: ${report.evidence_paths[0]}`);
+      // A12: link the page when Spike Core is serving it (never in --json: stdout stays pure JSON).
+      const details = await detailsLine(report.runId);
+      if (details) console.log(details);
     }
     // A47 (P2): 0 pass / 1 verdict fail / 2 uncertain — see cli-exit-codes.ts.
     process.exit(exitCodeForVerdict(report.verdict));
@@ -1822,7 +1826,8 @@ program
     return new Promise<void>(() => {});
   });
 
-program.parseAsync().catch((e) => {
+// A12: bare `spike` opens Spike home when it is up (else help + a tip) instead of only printing help.
+(process.argv.length <= 2 ? noArgEntry({ help: () => program.outputHelp() }) : program.parseAsync()).catch((e) => {
   console.error(e instanceof Error ? e.message : e);
   // A47 (P2): anything that escapes an action handler unhandled here is an
   // infra/tool failure (Chrome didn't launch, a config file was unreadable, a
