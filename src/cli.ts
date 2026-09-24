@@ -817,6 +817,48 @@ program
   });
 
 program
+  .command('bench <what> <model>')
+  .description('compare a model for clicking through pages against your current one on a fixed set of flows (spends real money; needs --yes). Example: spike bench navigator gemini:gemini-3-flash')
+  .option('--baseline <model>', 'model to compare against, as provider:model (default: your current one)')
+  .option('--repeats <n>', 'times to run each flow per model', (v) => parseInt(v, 10), 1)
+  .option('--yes', 'confirm that this uses real models and real money', false)
+  .option('--json', 'machine-readable output', false)
+  .action(async (what: string, model: string, opts: { baseline?: string; repeats: number; yes: boolean; json: boolean }) => {
+    const b = await import('./bench/navigator.js');
+    if (what !== 'navigator') { console.error('only "navigator" is supported: spike bench navigator <provider:model>'); process.exit(2); }
+    const candidate = b.parseModelPin(model);
+    if (!candidate) { console.error(`unknown model "${model}" - use provider:model, for example gemini:gemini-3-flash`); process.exit(2); }
+    const cfg = loadConfig();
+    const cur = cfg.navigator;
+    const baseline = opts.baseline
+      ? b.parseModelPin(opts.baseline)
+      : { provider: cur.provider, mode: cur.mode, ...(cur.model && { model: cur.model }), label: `${cur.provider}${cur.model ? `:${cur.model}` : ''}` };
+    if (!baseline) { console.error(`unknown baseline "${opts.baseline}"`); process.exit(2); }
+    if (!opts.yes) {
+      console.error('This runs every bench flow with both models in a real browser and spends real money. Re-run with --yes to go ahead.');
+      process.exit(2);
+    }
+    const fixture = startFixture(cfg.fixturePort, false);
+    try {
+      const result = await b.runNavigatorBench({
+        candidate, baseline: baseline as import('./bench/navigator.js').ModelPin,
+        repeats: opts.repeats,
+        progress: (l) => console.error(l),
+        runFlow: async (flow, pin) => {
+          const url = flow.url.replace('{fixture}', `http://localhost:${cfg.fixturePort}`);
+          const r = await qaRun(flow.task, url, {
+            record: false, replay: false, headless: true,
+            config: { navigator: { provider: pin.provider, mode: pin.mode, model: pin.model ?? '' } as QaConfig['navigator'] },
+          });
+          return b.outcomeFromReport(r);
+        },
+      });
+      console.log(opts.json ? JSON.stringify(result, null, 2) : b.renderBenchReport(result));
+      process.exit(result.decision.decision === 'GO' ? 0 : 1);
+    } finally { fixture.close(); }
+  });
+
+program
   .command('doctor')
   .description('preflight this machine: is Chrome there, are the configured models reachable, and what would a run actually be allowed to do')
   .option('--skip-nano', 'skip the on-device model probe (it launches Chrome and can take a few seconds)', false)
