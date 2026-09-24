@@ -1,0 +1,115 @@
+name: 'Spike QA'
+description: 'Run your saved Spike tests and/or a site check against a preview URL and post one updating pull-request comment.'
+author: 'uvesarshad'
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  url:
+    description: 'Preview address to test (for example the deployment environment_url).'
+    required: true
+  suite:
+    description: 'Run every saved test ("true" or "false").'
+    required: false
+    default: 'true'
+  check:
+    description: 'Also walk the site and look at each page ("true" or "false").'
+    required: false
+    default: 'false'
+  budget:
+    description: 'Spend cap in USD for the whole run.'
+    required: false
+    default: '2'
+  wait-for-url:
+    description: 'Wait for this address to answer before starting (default: url).'
+    required: false
+    default: ''
+  version:
+    description: 'spike-agent version to run.'
+    required: false
+    default: 'latest'
+
+outputs:
+  exit-code:
+    description: '0 passed, 1 failed, 2 not sure, 3 could not run.'
+    value: ${{ steps.spike.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    # Keys (GEMINI_API_KEY, ANTHROPIC_API_KEY, ...) come from the caller's `env`.
+    - name: Run Spike
+      id: spike
+      shell: bash
+      env:
+        SPIKE_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        SPIKE_URL: ${{ inputs.url }}
+        SPIKE_SUITE: ${{ inputs.suite }}
+        SPIKE_CHECK: ${{ inputs.check }}
+        SPIKE_BUDGET: ${{ inputs.budget }}
+        SPIKE_WAIT_FOR_URL: ${{ inputs.wait-for-url }}
+        SPIKE_VERSION: ${{ inputs.version }}
+      run: |
+        args=(--url "$SPIKE_URL" --summary artifacts/spike-summary.md --junit artifacts/spike-junit.xml --comment artifacts/spike-comment.md)
+        [ "$SPIKE_SUITE" = "true" ] && args+=(--suite)
+        [ "$SPIKE_CHECK" = "true" ] && args+=(--check)
+        [ -n "$SPIKE_BUDGET" ] && args+=(--budget "$SPIKE_BUDGET")
+        [ -n "$SPIKE_WAIT_FOR_URL" ] && args+=(--wait-for-url "$SPIKE_WAIT_FOR_URL")
+        set +e
+        npx --yes "spike-agent@${SPIKE_VERSION}" ci "${args[@]}"
+        code=$?
+        set -e
+        echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+        exit 0   # the verdict is applied by the last step, after the comment is posted
+
+    - name: Upload artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: spike-artifacts
+        path: |
+          artifacts/
+        if-no-files-found: ignore
+
+    # One comment, updated in place. Needs `pull-requests: write`; skipped
+    # silently outside pull requests, or when there is no comment file.
+    - name: Comment on the pull request
+      if: always()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_PATH: ${{ github.event_path }}
+        SHA: ${{ github.sha }}
+      run: |
+        [ -f artifacts/spike-comment.md ] || exit 0
+        pr=""
+        if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "pull_request_target" ]; then
+          pr=$(jq -r '.pull_request.number // empty' "$EVENT_PATH")
+        else
+          # deployment_status and other events: find the PR for this commit
+          pr=$(gh api "repos/$REPO/commits/$SHA/pulls" --jq '.[0].number // empty' 2>/dev/null || true)
+        fi
+        [ -n "$pr" ] || exit 0
+        id=$(gh api "repos/$REPO/issues/$pr/comments" --paginate --jq '[.[] | select(.body | contains("<!-- spike-ci -->"))][0].id // empty' 2>/dev/null || true)
+        if [ -n "$id" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@artifacts/spike-comment.md >/dev/null || echo "Could not update the comment (needs pull-requests: write)."
+        else
+          gh api -X POST "repos/$REPO/issues/$pr/comments" -F body=@artifacts/spike-comment.md >/dev/null || echo "Could not post the comment (needs pull-requests: write)."
+        fi
+        exit 0
+
+    - name: Apply the result
+      if: always()
+      shell: bash
+      env:
+        CODE: ${{ steps.spike.outputs.exit-code }}
+      run: |
+        # 0 = pass; anything else fails the check
+        [ "${CODE:-3}" = "0" ] || { echo "Spike finished with result code ${CODE:-3}."; exit "${CODE:-3}"; }
