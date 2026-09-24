@@ -5,7 +5,12 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Report } from '../report/report.js';
 import { isSafeRunId, listRunSummaries } from '../report/run-store.js';
+import { loadAppModel } from '../discovery/app-model.js';
+import { listHealCandidates, listSavedTests } from '../recorder/tests-admin.js';
+import { JobStore } from '../schedule/store.js';
 import { layout, renderRunDetail, renderRunsTable } from './pages.js';
+import { renderSchedulesPage, renderSetupPage, renderSitePage, renderTestsPage, type SetupData } from './read-pages.js';
+import { realSetupData } from './setup-info.js';
 
 /* ---------------------------------------------------------------------------
  * Spike home (A12) — a $0, no-backend localhost page over artifacts/<runId>
@@ -28,6 +33,16 @@ export interface DashboardOptions {
   host?: string;
   /** Per-process POST token; random by default. */
   token?: string;
+  /** Project folder holding generated-tests/ and .spike/ (default: cwd). */
+  root?: string;
+  /** Scheduled-job store (default: the real ~/.spike one). */
+  jobStore?: Pick<JobStore, 'list' | 'get' | 'remove'>;
+  /** Cap for a job with no limit of its own (config unattendedBudgetUsd). */
+  defaultBudgetUsd?: number;
+  /** Setup page data (default: detect agents / read config / list key names). */
+  setup?: () => SetupData;
+  /** True when Spike Core is the one serving this page (default false). */
+  helperRunning?: boolean;
 }
 
 export const DASHBOARD_DEFAULT_HOST = '127.0.0.1';
@@ -55,6 +70,9 @@ function send(res: http.ServerResponse, status: number, type: string, body: stri
 /** Start the dashboard and resolve once it is listening. Binds loopback unless a host is given. */
 export function startDashboard(artifactsDir: string, port: number, opts: DashboardOptions = {}): Promise<http.Server> {
   const host = opts.host ?? DASHBOARD_DEFAULT_HOST;
+  const root = opts.root ?? process.cwd();
+  const jobStore = opts.jobStore ?? new JobStore();
+  const setup = opts.setup ?? (() => realSetupData(opts.helperRunning ?? false));
   const token = opts.token ?? crypto.randomBytes(24).toString('hex');
   const server = http.createServer((req, res) => {
     try {
@@ -75,6 +93,24 @@ export function startDashboard(artifactsDir: string, port: number, opts: Dashboa
       }
       if (url.pathname === '/') {
         send(res, 200, 'text/html; charset=utf-8', layout('Home', renderRunsTable(listRunSummaries(artifactsDir), artifactsDir), { token, active: 'home' }));
+        return;
+      }
+      const page = (title: string, active: 'tests' | 'site' | 'schedules' | 'setup', body: string): void =>
+        send(res, 200, 'text/html; charset=utf-8', layout(title, body, { token, active }));
+      if (url.pathname === '/tests') {
+        page('Tests', 'tests', renderTestsPage({ tests: listSavedTests(root, artifactsDir), candidates: listHealCandidates(root, artifactsDir) }, false));
+        return;
+      }
+      if (url.pathname === '/site') {
+        page('Site', 'site', renderSitePage(loadAppModel(root)));
+        return;
+      }
+      if (url.pathname === '/schedules') {
+        page('Schedules', 'schedules', renderSchedulesPage(jobStore.list(), Date.now(), opts.defaultBudgetUsd, false));
+        return;
+      }
+      if (url.pathname === '/setup') {
+        page('Setup', 'setup', renderSetupPage(setup()));
         return;
       }
       const m = url.pathname.match(/^\/run\/([^/]+)$/);
