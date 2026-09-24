@@ -21,7 +21,13 @@
  * exactly one fan-out loop and one aggregation rule in the codebase.
  */
 
+import fs from 'node:fs';
 import type { RunCoverage, RunVerdict, StepRecord } from '../report/report.js';
+import { SpendBudget, formatUsd, type SpendLike, type SpendTotals } from './budget.js';
+
+/** A11: a flow whose task mentions logging in is the one whose passing run
+ * leaves a usable session behind. */
+export const LOGIN_PATTERN = /\b(log ?in|sign ?in)\b/i;
 
 /** Hard cap on units in one fan-out. More than this is a suite, not a run —
  * the extra units are dropped rather than silently multiplying the cost of a
@@ -198,6 +204,8 @@ export interface FanOutOutcome {
   /** The whole fan-out's coverage: flows got through, pages reached across all
    * of them, controls operated. */
   coverage: RunCoverage;
+  /** A8: what the batch spent, when any run reported spend or a cap was set. */
+  spend?: SpendTotals;
 }
 
 /** Back-compat alias — A7's name for the same shape. */
@@ -222,6 +230,8 @@ export interface FlowRunResult {
   steps?: StepRecord[];
   url?: string;
   coverage?: RunCoverage;
+  /** A8: the run's spend (a full Report carries this). */
+  spendSummary?: SpendLike;
 }
 
 /** What each run is told about its place in the fan-out. `storageStatePath` is
@@ -232,6 +242,26 @@ export interface FanOutContext {
   total: number;
   storageStatePath?: string;
   maxSteps?: number;
+  /** A8: what is left of the batch budget — hand it to the run as its own cap
+   * so one runaway flow also stops. Undefined = no cap. */
+  spendCapUsd?: number;
+  /** A11: when set, ask the run to save its session here if it passes (the
+   * first login of the batch); later flows get it as `storageStatePath`. */
+  saveStorageStatePath?: string;
+}
+
+/** The run options a `runFlow` callback should merge in from its context —
+ * kept here so every caller wires storage state and the per-run cap the same way. */
+export function runOptionsFromContext(ctx: FanOutContext): {
+  storageStatePath?: string;
+  saveStorageStatePath?: string;
+  config?: { spendCapUsd: number };
+} {
+  return {
+    ...(ctx.storageStatePath && { storageStatePath: ctx.storageStatePath }),
+    ...(ctx.saveStorageStatePath && { saveStorageStatePath: ctx.saveStorageStatePath }),
+    ...(ctx.spendCapUsd !== undefined && { config: { spendCapUsd: Math.max(ctx.spendCapUsd, 0.01) } }),
+  };
 }
 
 export interface FanOutOptions {
@@ -249,6 +279,13 @@ export interface FanOutOptions {
   /** Cooperative cancellation: an aborted fan-out stops between flows and
    * reports the coverage it reached. */
   signal?: AbortSignal;
+  /** A8: stop the batch once this much has been spent; remaining flows are
+   * skipped (uncertain, with the reason). */
+  budgetUsd?: number;
+  /** A11: log in once per batch. Used only when no `storageStatePath` was
+   * supplied. `path` is where the first passing login's session is saved
+   * (0600); it is deleted at the end unless `keep` (the user asked to keep it). */
+  loginOnce?: { path: string; keep?: boolean; pattern?: RegExp };
 }
 
 /** Run every unit in order, one budgeted run each, and aggregate. A unit that
@@ -265,17 +302,41 @@ export async function runFanOut(flows: FlowUnit[], opts: FanOutOptions): Promise
   let controls = 0;
   let attempted = 0;
 
+  const budget = new SpendBudget(opts.budgetUsd);
+  let sawSpend = false;
+  const login = opts.storageStatePath ? undefined : opts.loginOnce;
+  let sessionCaptured = false;
+
+  try {
   for (const [i, flow] of flows.entries()) {
     if (opts.signal?.aborted) break;
+    if (budget.exhausted()) {
+      const reason = budget.stopReason();
+      opts.onProgress?.(reason);
+      for (const rest of flows.slice(i)) {
+        outcomes.push({ name: rest.name, task: rest.task, verdict: 'uncertain', reason, evidence_paths: [] });
+      }
+      break;
+    }
     opts.onProgress?.(`Flow ${i + 1} of ${flows.length}: ${flow.name}`);
     attempted++;
     try {
+      const wantSave = Boolean(login && !sessionCaptured && (login.pattern ?? LOGIN_PATTERN).test(flow.task));
       const r = await opts.runFlow(flow, i, {
         index: i,
         total: flows.length,
-        storageStatePath: opts.storageStatePath,
+        storageStatePath: sessionCaptured && login ? login.path : opts.storageStatePath,
         maxSteps: opts.maxStepsPerFlow,
+        ...(budget.remaining() !== undefined && { spendCapUsd: budget.remaining() }),
+        ...(wantSave && login && { saveStorageStatePath: login.path }),
       });
+      if (r.spendSummary) sawSpend = true;
+      budget.add(r.spendSummary);
+      if (wantSave && login && r.verdict === 'pass' && fs.existsSync(login.path)) {
+        sessionCaptured = true;
+        try { fs.chmodSync(login.path, 0o600); } catch { /* best effort (Windows) */ }
+        opts.onProgress?.('Signed in once — the remaining flows reuse this session.');
+      }
       const hasSteps = Boolean(r.steps?.length);
       const counted = coverageFromSteps(r.steps, r.url);
       let flowCoverage: RunCoverage;
@@ -313,6 +374,11 @@ export async function runFanOut(flows: FlowUnit[], opts: FanOutOptions): Promise
     opts.onProgress?.(`  → ${outcomes[outcomes.length - 1].verdict}`);
     if (opts.stopOnFirstFailure && outcomes[outcomes.length - 1].verdict === 'fail') break;
   }
+  } finally {
+    if (login && !login.keep) {
+      try { fs.rmSync(login.path, { force: true }); } catch { /* best effort */ }
+    }
+  }
 
   return {
     verdict: aggregateVerdict(outcomes.map((o) => o.verdict)),
@@ -323,6 +389,7 @@ export async function runFanOut(flows: FlowUnit[], opts: FanOutOptions): Promise
       pagesVisited: pages.size + uncountedPages,
       controlsExercised: controls,
     },
+    ...((sawSpend || opts.budgetUsd !== undefined) && { spend: budget.totals() }),
   };
 }
 
@@ -346,6 +413,14 @@ export function renderCoverageLine(c: RunCoverage): string {
   return `I got through ${c.flowsAttempted} of ${plural(c.flowsTotal, 'flow')}, visited ${plural(c.pagesVisited, 'page')} and tried ${plural(c.controlsExercised, 'control')}.`;
 }
 
+/** One plain sentence on what the batch cost. Empty when nothing was measured. */
+export function renderSpendLine(spend: SpendTotals | undefined): string {
+  if (!spend) return '';
+  const paid = `${spend.paidCalls} paid model call${spend.paidCalls === 1 ? '' : 's'}`;
+  const limit = spend.budgetUsd !== undefined ? ` of your ${formatUsd(spend.budgetUsd)} limit` : '';
+  return `\nSpent about ${formatUsd(spend.estimatedUsd)}${limit} (${paid}).`;
+}
+
 /** The per-flow verdict table, the one-line overall verdict, and (when it did
  * not all pass) the coverage line. Plain words only — this is what a
  * non-engineer reads in the terminal. */
@@ -365,5 +440,5 @@ export function renderFlowTable(outcome: FanOutOutcome): string {
         ? `${failed} of ${total} flow${total === 1 ? '' : 's'} failed.`
         : `${unsure} of ${total} flow${total === 1 ? '' : 's'} could not be checked.`;
   const coverage = outcome.verdict === 'pass' ? '' : `\n${renderCoverageLine(outcome.coverage)}`;
-  return `${rows.join('\n')}\n\nOverall: ${outcome.verdict} — ${summary}${coverage}`;
+  return `${rows.join('\n')}\n\nOverall: ${outcome.verdict} — ${summary}${coverage}${renderSpendLine(outcome.spend)}`;
 }
