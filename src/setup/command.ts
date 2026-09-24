@@ -13,6 +13,8 @@ export interface SetupFlags {
   only?: string;
   force?: boolean;
   uninstall?: boolean;
+  /** Also install the optional "did you check?" reminder for Claude Code. */
+  strict?: boolean;
   /** commander turns --no-verify into verify:false */
   verify?: boolean;
 }
@@ -82,7 +84,7 @@ export async function runSetup(flags: SetupFlags, deps: SetupDeps): Promise<numb
   }
 
   const uninstall = !!flags.uninstall;
-  const ops = planSetup({ env, agents, project: flags.project, force: flags.force, uninstall });
+  const ops = planSetup({ env, agents, project: flags.project, force: flags.force, uninstall, strict: flags.strict });
   const scope = flags.project ? `this project (${env.cwd})` : 'your user account';
   out(`${uninstall ? 'Removing Spike from' : 'Connecting Spike to'} ${agents.map((a) => AGENT_NAME[a]).join(', ')} for ${scope}:`);
   out('');

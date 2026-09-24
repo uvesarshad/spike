@@ -79,7 +79,7 @@ Work the list **top to bottom** (severity order). For every task:
 - [x] **Claude Code plugin** — package the skill + MCP registration as a plugin for plugin marketplaces. (E2)
 - [ ] **MCP registry listings** — `server.json` for the official MCP registry and common directories; ⛔ OWNER to submit after A3. (E3)
 <!-- note: server.json + package.json mcpName are done and tested; the submission (mcp-publisher login/publish after the npm release, plus directory listings) is OWNER-only and still open. -->
-- [ ] **"Did the agent actually check?" hook** — `spike setup --strict` installs an optional Claude Code Stop hook that nudges the agent to run Spike when it edited UI files and is about to finish without a verdict. (E4)
+- [x] **"Did the agent actually check?" hook** — `spike setup --strict` installs an optional Claude Code Stop hook that nudges the agent to run Spike when it edited UI files and is about to finish without a verdict. (E4)
 - [x] **Slack/Discord notifications** — formatted webhook payloads for schedule/CI status changes on top of A7's generic webhook. (E5)
 - [x] **Session capture helper** — `spike login <url>` opens a headed window, the human signs in any way (SSO, SMS, CAPTCHA), Spike saves the session for reuse. (E6)
 - [x] **Change-scoped runs** — map a git diff to affected routes and run only those, for `watch` and `ci`. (E7)

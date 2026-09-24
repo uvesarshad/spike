@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AgentId } from './detect.js';
+import { STOP_HOOK_COMMAND } from './strict-hook.js';
 import { BLOCK_BEGIN, BLOCK_END, renderAgentsBlock, renderCursorRule, renderSkillMd } from './skill-content.js';
 
 export interface RunResult { ok: boolean; stdout: string }
@@ -39,6 +40,8 @@ export interface SetupOptions {
   project?: boolean;
   force?: boolean;
   uninstall?: boolean;
+  /** Also install the optional Claude Code Stop hook (E4). */
+  strict?: boolean;
 }
 
 export const OUR_ENTRY = { command: 'spike', args: ['mcp'] } as const;
@@ -204,6 +207,52 @@ function claudeCli(env: SetupEnv, uninstall: boolean): Op {
   });
 }
 
+// ---------- optional Claude Code Stop hook (E4) ----------
+
+const isOurHook = (h: any): boolean => h?.type === 'command' && h?.command === STOP_HOOK_COMMAND;
+
+function stopHookAdd(file: string, env: SetupEnv): Op {
+  const mk = (action: PlanAction, reason: string, apply: () => void = () => {}): Op => ({ agent: 'claude', file, action, reason, apply });
+  const text = readText(file);
+  const fresh = () => ({ hooks: { Stop: [{ hooks: [{ type: 'command', command: STOP_HOOK_COMMAND }] }] } });
+  if (text === null) return mk('create', 'adds a reminder that runs Spike when UI changes are about to be called done', () => write(file, JSON.stringify(fresh(), null, 2) + '\n'));
+  let obj: any;
+  try { obj = text.trim() === '' ? {} : JSON.parse(text); } catch { return mk('skip', "the file isn't valid JSON, so it was left alone"); }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return mk('skip', "the file isn't a JSON object, so it was left alone");
+  if (obj.hooks !== undefined && (typeof obj.hooks !== 'object' || obj.hooks === null || Array.isArray(obj.hooks))) return mk('skip', "its hooks section isn't an object, so it was left alone");
+  if (obj.hooks?.Stop !== undefined && !Array.isArray(obj.hooks.Stop)) return mk('skip', "its Stop hooks aren't a list, so they were left alone");
+  const stops: any[] = obj.hooks?.Stop ?? [];
+  if (stops.some((g) => Array.isArray(g?.hooks) && g.hooks.some(isOurHook))) return mk('skip', 'already set up');
+  const indent = detectIndent(text);
+  const nl = text.endsWith('\n') || text.trim() === '' ? '\n' : '';
+  return mk('merge', 'adds a reminder alongside your other hooks', () => {
+    backup(env, file);
+    obj.hooks = { ...(obj.hooks ?? {}), Stop: [...stops, fresh().hooks.Stop[0]] };
+    write(file, JSON.stringify(obj, null, indent) + nl);
+  });
+}
+
+function stopHookRemove(file: string): Op {
+  const mk = (action: PlanAction, reason: string, apply: () => void = () => {}): Op => ({ agent: 'claude', file, action, reason, apply });
+  const text = readText(file);
+  if (text === null) return mk('skip', 'nothing to remove');
+  let obj: any;
+  try { obj = JSON.parse(text); } catch { return mk('skip', "the file isn't valid JSON, so it was left alone"); }
+  const stops = obj?.hooks?.Stop;
+  if (!Array.isArray(stops) || !stops.some((g) => Array.isArray(g?.hooks) && g.hooks.some(isOurHook))) return mk('skip', 'the Spike reminder is not in this file');
+  const indent = detectIndent(text);
+  const nl = text.endsWith('\n') ? '\n' : '';
+  return mk('remove', 'removes only the Spike reminder', () => {
+    const kept = stops
+      .map((g: any) => ({ ...g, hooks: g.hooks.filter((h: any) => !isOurHook(h)) }))
+      .filter((g: any) => g.hooks.length > 0);
+    if (kept.length) obj.hooks.Stop = kept; else delete obj.hooks.Stop;
+    if (Object.keys(obj.hooks).length === 0) delete obj.hooks;
+    if (Object.keys(obj).length === 0) fs.rmSync(file);
+    else write(file, JSON.stringify(obj, null, indent) + nl);
+  });
+}
+
 // ---------- planning ----------
 
 export function planSetup(o: SetupOptions): Op[] {
@@ -213,12 +262,18 @@ export function planSetup(o: SetupOptions): Op[] {
   const ops: Op[] = [];
   const h = env.home, c = env.cwd;
   const add = (json: Op | null, rm: Op | null) => ops.push((o.uninstall ? rm : json) as Op);
+  // The Stop hook is opt-in (--strict). Uninstall only plans its removal when it is actually there.
+  const pushHook = (file: string) => {
+    if (o.uninstall) { const rm = stopHookRemove(file); if (o.strict || rm.action === 'remove') ops.push(rm); }
+    else if (o.strict) ops.push(stopHookAdd(file, env));
+  };
 
   if (o.project) {
     if (has('claude')) {
       add(jsonAdd('claude', path.join(c, '.mcp.json'), env, force), jsonRemove('claude', path.join(c, '.mcp.json'), env));
       add(fileAdd('claude', path.join(c, '.claude', 'skills', 'spike', 'SKILL.md'), env, renderSkillMd()),
           fileRemove('claude', path.join(c, '.claude', 'skills', 'spike', 'SKILL.md'), true));
+      pushHook(path.join(c, '.claude', 'settings.json'));
     }
     if (has('cursor')) {
       add(jsonAdd('cursor', path.join(c, '.cursor', 'mcp.json'), env, force), jsonRemove('cursor', path.join(c, '.cursor', 'mcp.json'), env));
@@ -238,6 +293,7 @@ export function planSetup(o: SetupOptions): Op[] {
     ops.push(claudeCli(env, !!o.uninstall));
     const f = path.join(h, '.claude', 'skills', 'spike', 'SKILL.md');
     add(fileAdd('claude', f, env, renderSkillMd()), fileRemove('claude', f, true));
+    pushHook(path.join(h, '.claude', 'settings.json'));
   }
   if (has('cursor')) {
     const f = path.join(h, '.cursor', 'mcp.json');

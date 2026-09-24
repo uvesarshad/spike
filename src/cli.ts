@@ -1723,8 +1723,9 @@ program
   .option('--only <agents>', 'comma-separated: claude,cursor,codex,windsurf,gemini')
   .option('--force', 'replace a different existing "spike" entry', false)
   .option('--uninstall', 'remove exactly what setup added (backups are kept)', false)
+  .option('--strict', 'also add a reminder for Claude Code: if it changed page files and is about to finish without running a Spike check, it is asked to run one first', false)
   .option('--no-verify', 'skip the quick health check at the end')
-  .action(async (opts: { yes: boolean; dryRun: boolean; project: boolean; only?: string; force: boolean; uninstall: boolean; verify: boolean }) => {
+  .action(async (opts: { yes: boolean; dryRun: boolean; project: boolean; only?: string; force: boolean; uninstall: boolean; strict: boolean; verify: boolean }) => {
     const { runSetup, defaultSetupEnv, probeMcpTools } = await import('./setup/command.js');
     const code = await runSetup(opts, {
       env: defaultSetupEnv(),
@@ -1756,6 +1757,23 @@ program
       },
     });
     process.exit(code);
+  });
+
+// Called by Claude Code's Stop hook (installed by `spike setup --strict`): reads the hook JSON on stdin,
+// prints a block decision only when UI files changed this turn with no Spike check. Never fails the agent.
+program
+  .command('hook-stop', { hidden: true })
+  .description('Claude Code Stop hook (used by spike setup --strict)')
+  .action(async () => {
+    const { evaluateStop, hookStopOutput } = await import('./setup/strict-hook.js');
+    try {
+      const input = JSON.parse(fs.readFileSync(0, 'utf8') || '{}');
+      let text: string | null = null;
+      try { text = input.transcript_path ? fs.readFileSync(input.transcript_path, 'utf8') : null; } catch { /* no transcript */ }
+      const out = hookStopOutput(evaluateStop(input, text));
+      if (out) console.log(out);
+    } catch { /* malformed input: allow the stop */ }
+    process.exit(0);
   });
 
 program
