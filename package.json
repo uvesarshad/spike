@@ -1,7 +1,8 @@
 {
   "name": "spike-agent",
   "version": "0.0.1",
-  "description": "Spike \u2014 browser QA/debug agent: a cheap-model ladder drives a real Chrome and returns a ~2K-token verdict to your coding agent.",
+  "description": "Spike — browser QA/debug agent: a cheap-model ladder drives a real Chrome and returns a ~2K-token verdict to your coding agent.",
+  "mcpName": "io.github.uvesarshad/spike",
   "type": "module",
   "license": "Apache-2.0",
   "private": false,
@@ -41,7 +42,8 @@
     "plugin",
     ".claude-plugin",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "server.json"
   ],
   "scripts": {
     "build": "tsup && tsup --config tsup.lite.config.ts",

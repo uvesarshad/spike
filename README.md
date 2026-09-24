@@ -372,6 +372,8 @@ Either way the agent gets one tool, `qa_run`.
 
 The plugin files live in `plugin/` and `.claude-plugin/`; `npm run build:plugin` regenerates them from the same text `spike setup` uses.
 
+The repo also carries `server.json`, the manifest for the official MCP registry (the package's `mcpName` is `io.github.uvesarshad/spike`).
+
 ## Testing pull requests
 
 `spike ci` and the `uvesarshad/spike` GitHub Action test each preview and keep one updating comment on the pull request. Copy-paste workflows for Vercel, Netlify and a local server: [docs/ci.md](docs/ci.md).
