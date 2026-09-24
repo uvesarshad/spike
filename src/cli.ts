@@ -15,7 +15,8 @@ import { allocateIsolatedSession, createPlanningRouter, injectStorageState, isQu
 import { decomposeSpec, flowsFromRoutes, renderFlowTable, runFanOut, runFlows } from './driver/spec-decompose.js';
 import { batchLoginOnce, renderSpendLine, runOptionsFromContext, type FanOutContext } from './orchestrator/fan-out.js';
 import { SpendBudget, formatUsd, guardRuns, parseBudgetFlag, resolveCiBudget, resolveUnattendedBudget, withSpendCap } from './orchestrator/budget.js';
-import { startDashboard, isLoopbackHost } from './dashboard/server.js';
+import { startDashboard, isLoopbackHost, DASHBOARD_DEFAULT_PORT } from './dashboard/server.js';
+import { openInBrowser } from './dashboard/open.js';
 import { headlineScreenshot, slimReport, type Report } from './report/report.js';
 import { findChrome } from './chrome/launch.js';
 import { buildDoctorReport, doctorExitCode, renderDoctorReport, type DoctorRoleProbe } from './doctor.js';
@@ -1424,6 +1425,12 @@ program
     // A7: the daemon also owns the job list — tick every 60 s, one job at a time.
     startScheduler({ store: new JobStore(), run: childRunner(process.argv[1]), defaultBudgetUsd: loadConfig().unattendedBudgetUsd });
     console.log(`vibe daemon listening on ws://localhost:${port} — open the extension side panel`);
+    // A12: the daemon also serves Spike home (loopback only). A busy port just means one is already up.
+    const homePort = Number(process.env.SPIKE_DASHBOARD_PORT ?? DASHBOARD_DEFAULT_PORT);
+    startDashboard(cfg.artifactsDir, homePort).then(
+      () => console.log(`Spike home: http://127.0.0.1:${homePort}/`),
+      (e: unknown) => console.warn(`Spike home is not available (${e instanceof Error ? e.message : String(e)}).`),
+    );
     // stay alive; the bridge owns the WS server from here
     return new Promise<void>(() => {});
   });
@@ -1740,12 +1747,13 @@ program
 
 program
   .command('dashboard')
-  .description('serve a local read-only dashboard over artifacts/<runId> reports — model_trace, token accounting, cache/replay stats; $0, no backend, no external calls')
+  .description('open Spike home: your past runs, saved tests, site map and schedules, on this computer only ($0, no outside requests); Spike Core serves the same page')
   .option('--port <n>', 'HTTP port (default 9420, or SPIKE_DASHBOARD_PORT)', (v) => parseInt(v, 10))
+  .option('--no-open', 'do not open the browser')
   .option('--host <addr>', 'interface to listen on (default 127.0.0.1 — this machine only)')
   .action(async (opts: { port?: number; host?: string }) => {
     const cfg = loadConfig();
-    const port = opts.port ?? Number(process.env.SPIKE_DASHBOARD_PORT ?? 9420);
+    const port = opts.port ?? Number(process.env.SPIKE_DASHBOARD_PORT ?? DASHBOARD_DEFAULT_PORT);
     if (opts.host && !isLoopbackHost(opts.host)) {
       console.warn(`warning: --host ${opts.host} lets other machines on your network read your past reports, including screenshots of pages you were logged in to.`);
     }
@@ -1753,6 +1761,7 @@ program
     const addr = server.address();
     const bound = addr && typeof addr === 'object' ? `${addr.address.includes(':') ? `[${addr.address}]` : addr.address}:${addr.port}` : `${opts.host ?? '127.0.0.1'}:${port}`;
     console.log(`dashboard on http://${bound} — reading ${cfg.artifactsDir}`);
+    if (opts.open) openInBrowser(`http://${bound}/`);
     // stay alive; the http.Server owns the process from here
     return new Promise<void>(() => {});
   });

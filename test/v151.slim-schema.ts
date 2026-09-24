@@ -1,11 +1,12 @@
 /* V151 — the published slim-result JSON schema (E9): a real slimReport() validates, bad shapes do not,
  * and the schema's version const tracks REPORT_SCHEMA_VERSION. */
 import fs from 'node:fs';
-import Ajv from 'ajv';
+import AjvModule from 'ajv';
 import { REPORT_SCHEMA_VERSION, slimReport, type Report } from '../src/report/report.js';
 
 const check = (l: string, ok: boolean) => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${l}`); if (!ok) process.exitCode = 1; };
 const schema = JSON.parse(fs.readFileSync(new URL('../schema/slim-result.schema.json', import.meta.url), 'utf8'));
+const Ajv: any = (AjvModule as any).default ?? AjvModule;
 const validate = new Ajv({ strict: false }).compile(schema);
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
