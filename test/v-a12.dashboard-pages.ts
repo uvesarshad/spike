@@ -85,7 +85,7 @@ async function pages(root: string, home: string, keys: string[]): Promise<Record
   check('site: shows the broken page from the last check', r['/site'].text.includes('/cart') && r['/site'].text.includes('it threw an error'));
   check('schedules: shows the job with spend vs limit', r['/schedules'].text.includes('hourly') && r['/schedules'].text.includes('of $1'));
   check('setup: found agent, key name, no key value', r['/setup'].text.includes('Claude Code') && r['/setup'].text.includes('Gemini') && !r['/setup'].text.includes('sk-'));
-  check('vocabulary: setup page avoids dev words', !/navigator|brain|daemon|BYOK|CDP/i.test(r['/setup'].text.replace(/spike daemon/g, '')));
+  check('vocabulary: setup page avoids dev words', !/navigator|brain|daemon|BYOK|CDP/i.test(r['/setup'].text.replace(/<script>[\s\S]*<\/script>/, '').replace(/spike daemon/g, '')));
   fs.rmSync(root, { recursive: true, force: true });
   fs.rmSync(home, { recursive: true, force: true });
 }

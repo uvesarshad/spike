@@ -71,8 +71,13 @@ export function renderRunsTable(runs: RunSummary[], artifactsDir: string): strin
     </table>`;
 }
 
-/** One run's detail (body only — `layout()` wraps it). */
-export function renderRunDetail(report: Report & { replayMatch?: { name: string; score: number }; healed?: boolean }): string {
+/** One run's detail (body only — `layout()` wraps it). `fixPrompt` is embedded for the client-side Copy button. */
+export function renderRunDetail(report: Report & { replayMatch?: { name: string; score: number }; healed?: boolean }, fixPrompt = ''): string {
+  const id = escapeHtml(report.runId);
+  const actions = `<div class="box">
+      ${fixPrompt ? `<button id="copy-fix">Copy fix prompt</button>` : ''}<button data-act="rerun" data-run-id="${id}">Re-run</button>${report.verdict === 'pass' ? `<button data-act="save-test" data-run-id="${id}">Save as test</button>` : ''}
+      ${fixPrompt ? `<textarea id="fix-prompt" readonly style="position:absolute;left:-9999px">${escapeHtml(fixPrompt)}</textarea>` : ''}
+    </div>`;
   const t = report.tokens;
   const stats = [
     ['verdict', report.verdict],
@@ -117,6 +122,7 @@ export function renderRunDetail(report: Report & { replayMatch?: { name: string;
   return `    <a class="back" href="/">&larr; all runs</a>
     <h1 class="${verdictClass(report.verdict)}">${escapeHtml(report.runId)} — ${escapeHtml(report.verdict)}</h1>
     <div class="sub">${escapeHtml(report.task)}<br>${escapeHtml(report.url)}<br>${source}</div>
+    ${actions}
     <div class="grid">${statHtml}</div>
     ${cache}
     <h2>Which models were asked</h2>
@@ -179,13 +185,68 @@ async function spikePost(path, body) {
   if (!r.ok) throw new Error(j.error || ('request failed (' + r.status + ')'));
   return j;
 }
+const box = document.getElementById('activity');
+let timer = null;
+function paint(list) {
+  const running = list.some(function (e) { return e.state === 'running'; });
+  if (box) {
+    box.innerHTML = list.slice().reverse().map(function (e) {
+      const link = e.runId ? ' <a href="/run/' + encodeURIComponent(e.runId) + '">details</a>' : '';
+      const v = e.state === 'running' ? 'working\\u2026' : (e.verdict || 'done');
+      return '<div>' + esc(e.label) + ' \\u2014 <b>' + esc(v) + '</b>' + esc(e.summary ? ' (' + e.summary + ')' : '') + link + '</div>';
+    }).join('');
+  }
+  if (running && !timer) timer = setInterval(poll, 2000);
+  if (!running && timer) { clearInterval(timer); timer = null; }
+}
+function esc(t) { return String(t).replace(/[&<>"']/g, function (c) { return '&#' + c.charCodeAt(0) + ';'; }); }
+async function poll() { try { paint((await (await fetch('/api/activity')).json()).activity); } catch (e) {} }
+poll();
+function say(el, msg) { const n = el.parentElement.querySelector('.msg') || el.parentElement.appendChild(Object.assign(document.createElement('span'), { className: 'msg note' })); n.textContent = ' ' + msg; }
+document.addEventListener('click', async function (ev) {
+  const el = ev.target.closest('button');
+  if (!el) return;
+  if (el.id === 'copy-fix') {
+    try { await navigator.clipboard.writeText(document.getElementById('fix-prompt').value); say(el, 'Copied.'); } catch (e) { document.getElementById('fix-prompt').select(); say(el, 'Press Ctrl/Cmd+C to copy.'); }
+    return;
+  }
+  const act = el.id === 'run-all' ? 'run-all' : el.dataset.act;
+  if (!act) return;
+  try {
+    const res = await spikePost('/api/' + act, Object.assign({}, el.dataset));
+    if (res.started) { poll(); say(el, 'Started.'); } else { say(el, 'Done.'); setTimeout(function () { location.reload(); }, 400); }
+  } catch (e) { say(el, e.message); }
+});
+const form = document.getElementById('test-form');
+if (form) form.addEventListener('submit', async function (ev) {
+  ev.preventDefault();
+  const f = new FormData(form); const file = form.querySelector('input[type=file]').files[0];
+  const body = { url: f.get('url'), task: f.get('task') };
+  if (file) body.spec = await file.text();
+  const btn = form.querySelector('button');
+  try { await spikePost('/api/test-something', body); poll(); say(btn, 'Started.'); } catch (e) { say(btn, e.message); }
+});
 `;
 
 export function layout(title: string, body: string, ctx: LayoutCtx): string {
   const nav = NAV.map(([k, href, label]) => `<a href="${href}"${ctx.active === k ? ' class="on"' : ''}>${label}</a>`).join('');
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="spike-token" content="${escapeHtml(ctx.token)}"><title>${escapeHtml(title)} — Spike</title><style>${DASHBOARD_STYLE}</style></head><body>
     <nav>${nav}</nav>
+    <div id="activity" class="note" style="margin:8px 0"></div>
     ${body}
     <script>${DASHBOARD_SCRIPT}</script>
   </body></html>`;
+}
+
+/** The "Test something" box on the home page: a site address plus a sentence, or a dropped spec file. */
+export function renderTestSomething(): string {
+  return `<div class="box"><b>Test something</b>
+    <form id="test-form" style="margin-top:8px">
+      <input type="url" name="url" placeholder="https://your-site.example" required>
+      <input type="text" name="task" placeholder="what to check, in a sentence" style="min-width:320px">
+      <input type="file" accept=".md,.txt,.markdown" title="or choose a spec file instead of a sentence">
+      <button type="submit">Test it</button>
+    </form>
+    <div class="note">Spike opens the site in its own window and looks and clicks like a person. Only test sites you own.</div>
+  </div>`;
 }

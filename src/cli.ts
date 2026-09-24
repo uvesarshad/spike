@@ -1456,7 +1456,7 @@ program
     console.log(`vibe daemon listening on ws://localhost:${port} — open the extension side panel`);
     // A12: the daemon also serves Spike home (loopback only). A busy port just means one is already up.
     const homePort = Number(process.env.SPIKE_DASHBOARD_PORT ?? DASHBOARD_DEFAULT_PORT);
-    startDashboard(cfg.artifactsDir, homePort, { helperRunning: true, defaultBudgetUsd: cfg.unattendedBudgetUsd }).then(
+    startDashboard(cfg.artifactsDir, homePort, { helperRunning: true, defaultBudgetUsd: cfg.unattendedBudgetUsd, cliPath: process.argv[1] }).then(
       () => console.log(`Spike home: http://127.0.0.1:${homePort}/`),
       (e: unknown) => console.warn(`Spike home is not available (${e instanceof Error ? e.message : String(e)}).`),
     );
@@ -1813,7 +1813,7 @@ program
     if (opts.host && !isLoopbackHost(opts.host)) {
       console.warn(`warning: --host ${opts.host} lets other machines on your network read your past reports, including screenshots of pages you were logged in to.`);
     }
-    const server = await startDashboard(cfg.artifactsDir, port, { host: opts.host, defaultBudgetUsd: cfg.unattendedBudgetUsd });
+    const server = await startDashboard(cfg.artifactsDir, port, { host: opts.host, defaultBudgetUsd: cfg.unattendedBudgetUsd, cliPath: process.argv[1] });
     const addr = server.address();
     const bound = addr && typeof addr === 'object' ? `${addr.address.includes(':') ? `[${addr.address}]` : addr.address}:${addr.port}` : `${opts.host ?? '127.0.0.1'}:${port}`;
     console.log(`dashboard on http://${bound} — reading ${cfg.artifactsDir}`);

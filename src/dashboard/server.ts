@@ -8,7 +8,9 @@ import { isSafeRunId, listRunSummaries } from '../report/run-store.js';
 import { loadAppModel } from '../discovery/app-model.js';
 import { listHealCandidates, listSavedTests } from '../recorder/tests-admin.js';
 import { JobStore } from '../schedule/store.js';
-import { layout, renderRunDetail, renderRunsTable } from './pages.js';
+import { buildFixPrompt } from '../vibe/fix-prompt.js';
+import { Activity, ActionError, defaultActions, realCliRunner, type CliRunner, type DashboardActions } from './actions.js';
+import { layout, renderRunDetail, renderRunsTable, renderTestSomething } from './pages.js';
 import { renderSchedulesPage, renderSetupPage, renderSitePage, renderTestsPage, type SetupData } from './read-pages.js';
 import { realSetupData } from './setup-info.js';
 
@@ -41,6 +43,12 @@ export interface DashboardOptions {
   defaultBudgetUsd?: number;
   /** Setup page data (default: detect agents / read config / list key names). */
   setup?: () => SetupData;
+  /** Override any action (tests inject stubs; the defaults do the real work). */
+  actions?: Partial<DashboardActions>;
+  /** Path of the `spike` CLI entry — lets the page start runs as child processes. Without it, run buttons say "use the command line". */
+  cliPath?: string;
+  /** Test seam: replaces the child-process runner. */
+  cli?: CliRunner;
   /** True when Spike Core is the one serving this page (default false). */
   helperRunning?: boolean;
 }
@@ -67,13 +75,43 @@ function send(res: http.ServerResponse, status: number, type: string, body: stri
   res.end(body);
 }
 
+/** The paste-ready fix prompt, or '' when an old/hand-made report can't produce one — never a 500. */
+function safeFixPrompt(report: Report): string {
+  try { return buildFixPrompt(report); } catch { return ''; }
+}
+
 /** Start the dashboard and resolve once it is listening. Binds loopback unless a host is given. */
 export function startDashboard(artifactsDir: string, port: number, opts: DashboardOptions = {}): Promise<http.Server> {
   const host = opts.host ?? DASHBOARD_DEFAULT_HOST;
   const root = opts.root ?? process.cwd();
   const jobStore = opts.jobStore ?? new JobStore();
   const setup = opts.setup ?? (() => realSetupData(opts.helperRunning ?? false));
+  const activity = new Activity();
+  const cli = opts.cli ?? (opts.cliPath ? realCliRunner(opts.cliPath, root) : undefined);
+  const actions: DashboardActions = { ...defaultActions({ root, artifactsDir, jobStore: jobStore as JobStore, defaultBudgetUsd: opts.defaultBudgetUsd, activity, cli, cliPath: opts.cliPath }), ...opts.actions };
   const token = opts.token ?? crypto.randomBytes(24).toString('hex');
+  const json = (res: http.ServerResponse, status: number, body: unknown): void => send(res, status, 'application/json', JSON.stringify(body));
+  async function handlePost(req: http.IncomingMessage, res: http.ServerResponse, pathname: string): Promise<void> {
+    try {
+      const sent = String(req.headers['x-spike-token'] ?? '');
+      const a = Buffer.from(sent), b = Buffer.from(token);
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return json(res, 403, { error: 'forbidden: missing or wrong token' });
+      if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) return json(res, 415, { error: 'expected JSON' });
+      const m = pathname.match(/^\/api\/([a-z-]+)$/);
+      const handler = m && Object.hasOwn(actions, m[1]) ? actions[m[1] as keyof DashboardActions] : undefined;
+      if (!handler) return json(res, 404, { error: 'unknown action' });
+      let raw = '';
+      for await (const chunk of req) {
+        raw += chunk;
+        if (raw.length > 1_000_000) return json(res, 413, { error: 'too large' });
+      }
+      let body: Record<string, unknown> = {};
+      try { body = raw ? (JSON.parse(raw) as Record<string, unknown>) : {}; } catch { return json(res, 400, { error: 'invalid JSON' }); }
+      json(res, 200, await (handler as (b: Record<string, unknown>) => unknown)(body));
+    } catch (e) {
+      json(res, e instanceof ActionError ? e.status : 400, { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
   const server = http.createServer((req, res) => {
     try {
       const bound = server.address() as AddressInfo | null;
@@ -83,8 +121,16 @@ export function startDashboard(artifactsDir: string, port: number, opts: Dashboa
         return;
       }
       const url = new URL(req.url ?? '/', 'http://localhost');
+      if (req.method === 'POST') {
+        void handlePost(req, res, url.pathname);
+        return;
+      }
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         send(res, 405, 'text/plain', 'method not allowed');
+        return;
+      }
+      if (url.pathname === '/api/activity') {
+        send(res, 200, 'application/json', JSON.stringify({ activity: activity.list() }));
         return;
       }
       if (url.pathname === '/api/ping') {
@@ -92,13 +138,13 @@ export function startDashboard(artifactsDir: string, port: number, opts: Dashboa
         return;
       }
       if (url.pathname === '/') {
-        send(res, 200, 'text/html; charset=utf-8', layout('Home', renderRunsTable(listRunSummaries(artifactsDir), artifactsDir), { token, active: 'home' }));
+        send(res, 200, 'text/html; charset=utf-8', layout('Home', renderTestSomething() + renderRunsTable(listRunSummaries(artifactsDir), artifactsDir), { token, active: 'home' }));
         return;
       }
       const page = (title: string, active: 'tests' | 'site' | 'schedules' | 'setup', body: string): void =>
         send(res, 200, 'text/html; charset=utf-8', layout(title, body, { token, active }));
       if (url.pathname === '/tests') {
-        page('Tests', 'tests', renderTestsPage({ tests: listSavedTests(root, artifactsDir), candidates: listHealCandidates(root, artifactsDir) }, false));
+        page('Tests', 'tests', renderTestsPage({ tests: listSavedTests(root, artifactsDir), candidates: listHealCandidates(root, artifactsDir) }, true));
         return;
       }
       if (url.pathname === '/site') {
@@ -106,7 +152,7 @@ export function startDashboard(artifactsDir: string, port: number, opts: Dashboa
         return;
       }
       if (url.pathname === '/schedules') {
-        page('Schedules', 'schedules', renderSchedulesPage(jobStore.list(), Date.now(), opts.defaultBudgetUsd, false));
+        page('Schedules', 'schedules', renderSchedulesPage(jobStore.list(), Date.now(), opts.defaultBudgetUsd, true));
         return;
       }
       if (url.pathname === '/setup') {
@@ -126,7 +172,7 @@ export function startDashboard(artifactsDir: string, port: number, opts: Dashboa
           return;
         }
         const report = JSON.parse(fs.readFileSync(reportPath, 'utf8')) as Report;
-        send(res, 200, 'text/html; charset=utf-8', layout(report.runId, renderRunDetail(report), { token, active: 'home' }));
+        send(res, 200, 'text/html; charset=utf-8', layout(report.runId, renderRunDetail(report, safeFixPrompt(report)), { token, active: 'home' }));
         return;
       }
       send(res, 404, 'text/plain', 'not found');
