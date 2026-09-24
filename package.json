@@ -78,6 +78,7 @@
     "@types/chrome-remote-interface": "^0.31.14",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "ajv": "^8.17.1",
     "tsup": "^8.4.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0"

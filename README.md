@@ -100,42 +100,33 @@ No test framework, no lint stack yet — runnable TS scripts with explicit PASS/
 ## Getting started
 
 ```bash
-npm install
-npm run build
-
-# one-time: set up the $0 on-device model (~2GB download; needs 22GB free
-# on the drive holding the Chrome profile — the tool tells you if not)
-node dist/cli.js nano --check
-node dist/cli.js nano --download
-
-# try it against the built-in fixture app
-node dist/cli.js fixture --bug on        # terminal 1: intentionally broken shop
-node dist/cli.js run "log in as test@test.com with password pw and complete checkout" \
-  --url http://localhost:9401/login      # terminal 2: watch the verdict
-
-# test a whole document instead of one sentence: the flows it describes are
-# worked out once, then each one is tested as its own run and rolled up into
-# a single verdict (exit code follows the overall verdict)
-node dist/cli.js run --spec ./docs/release-2.3.md --url http://localhost:9401/
-
-# CI replay-first workflow after committing or restoring generated-tests/
-node dist/cli.js replay --all --json
+npm i -g spike-agent
+spike setup          # connects Spike to the coding agents on this machine (shows what changes, asks once)
 ```
 
-Register it as an MCP tool — see [Registering as an MCP tool](#registering-as-an-mcp-tool)
-below for every editor. From a source checkout like this one:
+Then ask your coding agent to check a change in a real browser — or run it yourself:
 
 ```bash
-claude mcp add spike -- node /path/to/repo/dist/mcp-server.js
+spike check http://localhost:3000                       # look at every page, no instructions needed
+spike run "log in and check out" --url http://localhost:3000   # one plain-English test
+spike dashboard                                         # past runs, saved tests, site map, schedules
 ```
 
-…then any agent in that session can call `qa_run(task, url)` — or, for several
+No install? `npx spike-agent check http://localhost:3000` works too. To try it on the built-in broken shop, run `spike fixture --bug on` in one terminal and `spike run "log in as test@test.com with password pw and complete checkout" --url http://localhost:9401/login` in another.
+
+To test a whole document instead of one sentence, `spike run --spec ./docs/release-2.3.md --url <url>` works the flows out once, tests each as its own run and rolls them up into one verdict (exit code follows it). For CI, `spike replay --all --json` re-runs saved tests at $0.
+
+**Optional $0 on-device model:** `spike nano --check` then `spike nano --download` (about 2GB; needs 22GB free on the drive holding the Chrome profile — the tool tells you if not).
+
+Running from a source checkout instead? See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+Once `spike setup` has run, any agent can call `qa_run(task, url)` — or, for several
 things at once, `qa_run({ url, flows: [...] })` with instructions it split
 itself, or `qa_run({ url, spec: "<document text>" })` to have them worked out
 from a spec/PRD/story list. Give it `storageState` (a saved signed-in session)
 and `allowHosts` (extra hosts it may click/type on) when a flow needs them.
 Store passwords with `spike secret set` and write `{{secret:NAME}}` in the task,
-never the password itself.
+never the password itself. See [Registering as an MCP tool](#registering-as-an-mcp-tool).
 
 The server exposes exactly five tools (each schema costs the agent context, so
 the set stays small):
@@ -148,40 +139,9 @@ the set stays small):
 | `runs_list` | Recent runs (`limit` 1–20, default 10), newest first |
 | `run_get` | The slim result of one past run by `runId` |
 
-<details>
-<summary>Windows (PowerShell)</summary>
-
-```powershell
-npm install
-npm run build
-
-# one-time: set up the $0 on-device model (~2GB download; needs 22GB free
-# on the drive holding the Chrome profile — the tool tells you if not)
-node dist/cli.js nano --check
-node dist/cli.js nano --download
-
-# try it against the built-in fixture app
-node dist/cli.js fixture --bug on        # terminal 1: intentionally broken shop
-node dist/cli.js run "log in as test@test.com with password pw and complete checkout" `
-  --url http://localhost:9401/login      # terminal 2: watch the verdict
-
-# CI replay-first workflow after committing or restoring generated-tests/
-node dist/cli.js replay --all --json
-```
-
-Register it as an MCP tool (see [Registering as an MCP tool](#registering-as-an-mcp-tool)):
-
-```powershell
-claude mcp add spike -- node C:\path\to\repo\dist\mcp-server.js
-```
-
-…then any agent in that session can call `qa_run(task, url)`.
-
-</details>
-
 ## Installing
 
-**CLI / daemon (npm).** Once published you can run it without a clone:
+**CLI / daemon (npm).** Run it without installing:
 
 ```powershell
 npx spike-agent run "<task>" --url http://localhost:3000
@@ -190,7 +150,7 @@ npm i -g spike-agent
 spike run "<task>" --url http://localhost:3000
 ```
 
-Until then, use the local checkout (`npm install && npm run build`, then `node dist/cli.js …` as shown above).
+To run from a source checkout, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 **Chrome extension (vibe mode).** The MV3 extension — side-panel chat, ghost-cursor overlay, native Nano access in your real logged-in Chrome — is **coming soon to the Chrome Web Store**. To run it today as an unpacked dev extension:
 
@@ -249,23 +209,23 @@ What each add-on unlocks:
 | `spike run --spec …` (several flows) | Signs in once: the first flow that logs in and passes leaves its session for the rest, so a 12-flow document does one login, not twelve. The session file is deleted when the batch ends unless you pass `--save-storage-state <file>` (or `--storage-state` with your own) |
 | `spike run|suite|replay … --baseline [--fail-on-regression]` | Compare the finished page against the flow's stored baseline (first run stores it). Differences are evidence only; with `--fail-on-regression` (or config `failOnRegression` / `SPIKE_FAIL_ON_REGRESSION`) a difference turns a pass into a fail. Config key `differential` / `SPIKE_DIFFERENTIAL` also turns it on |
 | `spike bless [flow]` | Accept the current stored baseline for a flow as intentional (differential oracle) |
-| `spike map <url>` | Discover the app — routes, states, interactive elements — into `.spike/app-model.json` ($0, no browser) |
+| `spike map <url>` | Walks the site in a real Chrome and reports what is there and what is broken, into `.spike/app-model.json`; exits 1 if any page is broken. `--no-browser` fetches pages over the network instead (faster, cannot sign in or see script-drawn pages); also `--max-depth`, `--max-pages`, `--storage-state`, `--via`, `--headless`, `--no-explore` |
 | `spike coverage` | Report what has and hasn't been tested yet, from `.spike/app-model.json` |
 | `spike fixture --bug on\|off` | Start the dogfood fixture app (login → products → cart → checkout) |
-| `spike config` | View or change the browsing-control AI + debugging settings (shared with the extension panel) |; also `--email-provider none|imap|fake-local --imap-host <h> --imap-user <u>` to let tests read sign-in emails (password via `spike secret set SPIKE_IMAP_PASS`, never a flag; `spike doctor` shows inbox status)
+| `spike config` | View or change the browsing-control AI + debugging settings (shared with the extension panel); also `--email-provider none|imap|fake-local --imap-host <h> --imap-user <u>` to let tests read sign-in emails (password via `spike secret set SPIKE_IMAP_PASS`, never a flag; `spike doctor` shows inbox status) |
 | `spike replay [name\|--all]` | Replay recorded scripts deterministically — no planner, $0 |
 | `spike suite` | Run the whole suite from `spike.suite.json` — plain-English cases plus recorded scripts, one exit code, optional `--reporter json\|junit --out <path>` |
 | `spike doctor` | Preflight: is Chrome there, are the configured models reachable, and what would a run actually be allowed to do |
 | `spike daemon` | Start the vibe-mode daemon: the bridge the extension side panel connects to |
 | `spike map <url> --diff [--run-changed]` | Compare against the last map; on a terminal it asks "Check the N changed pages now?", `--run-changed` does it without asking |
 | `spike schedule add "<when>" <suite\|tag:<t>\|check\|spec:<file>> --url <url> [--budget <$>] [--webhook <url>]` | Save a test to run on a timer (`every 30m`, `hourly`, `daily 09:00`, `weekdays 09:00`, local time). Also `schedule list`, `remove <id>`, `run-now <id>`. Runs while Spike Core (`spike daemon`) is running; a laptop that slept runs a missed test once, not a backlog. You are told only when a test starts or stops failing. A Slack or Discord webhook address gets a readable message (coloured green or red) instead of raw data |
-| `spike ci --url <preview url> [--suite] [--check] [--budget <$>] [--summary <file>] [--junit <file>] [--wait-for-url <url>] [--webhook <url>] [--changed-since <ref>]` | For pull requests: waits (up to 3 min) for the preview address to answer, runs your saved tests and/or a site check headless with a spend cap (default $2), writes a summary (also to the GitHub run page) and exits 0 pass / 1 fail / 2 not sure / 3 could not run. `--changed-since main` looks at what git says changed: a docs-or-tests-only change skips the run, a change to specific pages narrows the site check to them, a change to shared code runs everything |
+| `spike ci --url <preview url> [--suite] [--check] [--budget <$>] [--max-pages <n>] [--storage-state <file>] [--summary <file>] [--junit <file>] [--comment <file>] [--wait-for-url <url>] [--wait <seconds>] [--webhook <url>] [--changed-since <ref>]` | For pull requests: waits (up to 3 min) for the preview address to answer, runs your saved tests and/or a site check headless with a spend cap (default $2), writes a summary (also to the GitHub run page) and exits 0 pass / 1 fail / 2 not sure / 3 could not run. `--changed-since main` looks at what git says changed: a docs-or-tests-only change skips the run, a change to specific pages narrows the site check to them, a change to shared code runs everything |
 | `spike api-check <spec.json> [runId]` | Compares the API calls a run made (the latest by default) with your OpenAPI or Swagger description (JSON): calls to paths it does not describe, methods it does not allow, and answers it does not list. Exits 1 when something does not match. It reads the recorded calls, not response bodies |
 | `spike login <url> [--out <file>]` | Opens a visible browser window on your site. Sign in any way you like (single sign-on, text-message code, CAPTCHA), press Enter in the terminal, and the sign-in is saved (owner-only) for later runs with `--storage-state`. Nothing is typed for you |
 | `spike watch --url <dev url> [--tag <t>] [--suite <file>] [--on save\|commit] [--paths <glob>] [--changed]` | Stay in the foreground and re-run your saved tests when your code changes (3 s debounce; one run at a time). `--changed` skips a run when only docs or tests changed |
 | `spike fix <runId>` | Print the fix prompt for a finished run — or with `--apply`, hand it to your coding agent headlessly |
 | `spike secret` | Manage the local encrypted vault — secrets are typed via `{{secret:NAME}}`, never reach any model. For an authenticator app, save its key with `spike secret set TOTP_<NAME> <base32-key>` and write `{{totp:NAME}}` in the task: the current 6-digit code is worked out on your machine and typed at that moment (command line and desktop helper only; the in-browser mode says it needs the desktop helper) |
-| `spike check <url> [--max-pages <n>] [--try-controls]` | Page health scan: walks the site and looks at each page without clicking anything ("Looked at N pages without clicking anything — add --try-controls to press buttons too"). `--try-controls` also presses ordinary buttons so ones that do nothing show up — never anything that buys, pays, deletes, cancels, sends or signs out, and never a form with a password or payment field; passing pages are saved as tests tagged `check`. A run cut short says "Stopped after N pages — raise it with --max-pages" |
+| `spike check <url> [--max-pages <n>] [--try-controls] [--explore] [--no-browser] [--storage-state <file>] [--budget <$>] [--stop-on-fail]` | Page health scan: walks the site and looks at each page without clicking anything ("Looked at N pages without clicking anything — add --try-controls to press buttons too"). `--try-controls` also presses ordinary buttons so ones that do nothing show up — never anything that buys, pays, deletes, cancels, sends or signs out, and never a form with a password or payment field; passing pages are saved as tests tagged `check`. A run cut short says "Stopped after N pages — raise it with --max-pages" |
 | `spike setup [--dry-run] [--project] [--only <agents>] [--yes] [--force] [--strict] [--no-verify] [--uninstall]` | Connect Spike to the coding agents on this machine (Claude Code, Cursor, Windsurf, Codex, Gemini): shows exactly which files change, asks once, backs up anything it edits, adds a short skill/rule so the agent knows when to call Spike, then checks the connection. Never overwrites your other entries; `--uninstall` removes only what it added. Without a terminal it prints the plan and writes nothing unless you pass `--yes`; `--strict` also adds an optional reminder for Claude Code: if it changed page files this turn and is about to finish without running a Spike check, it is asked to run one first (removed again by `--uninstall`) |
 | `spike bench navigator <provider:model> [--baseline <provider:model>] [--repeats <n>] --yes` | Qualify a new cheap model for clicking through pages: runs a fixed set of flows (the demo shop plus a few public pages) with that model and with your current one, then prints pass rate, steps, how often the planner had to step in and cost, with a GO / NO-GO. Spends real money, so it refuses to start without `--yes` |
 | `spike mcp` | Start the MCP stdio server — register it as command `spike`, args `["mcp"]` (see [Registering as an MCP tool](#registering-as-an-mcp-tool)) |
@@ -324,45 +284,19 @@ name of the test it belongs to).
 
 ## Registering as an MCP tool
 
-There are exactly two forms, and which one you use depends only on whether the
-`spike` binary is on your PATH.
+`spike setup` is the way: it finds Claude Code, Cursor, Windsurf, Codex and Gemini on this machine, shows exactly which files it would change, asks once, backs everything up, and adds a short skill/rule telling the agent when to call Spike. Preview with `spike setup --dry-run`; undo with `spike setup --uninstall`.
 
-**Installed globally** (`npm i -g spike-agent`) — command `spike`, args `["mcp"]`:
-
-```bash
-claude mcp add spike -- spike mcp
-```
-
-**From a source checkout** — no `spike` on PATH, so point Node at the built
-server (run `npm run build` first):
-
-```bash
-claude mcp add spike -- node /path/to/repo/dist/mcp-server.js
-```
-
-**Cursor** — `.cursor/mcp.json` in the project (or `~/.cursor/mcp.json` for every
-project):
+**Manual fallback** — if you would rather wire it yourself, any agent that takes an MCP server accepts command `spike`, args `["mcp"]` (needs `npm i -g spike-agent` so `spike` is on your PATH):
 
 ```json
 {
   "mcpServers": {
-    "spike": {
-      "command": "spike",
-      "args": ["mcp"]
-    }
+    "spike": { "command": "spike", "args": ["mcp"] }
   }
 }
 ```
 
-From a checkout, swap those two lines for `"command": "node"` and
-`"args": ["/path/to/repo/dist/mcp-server.js"]`.
-
-**Codex and Windsurf** take the same `{command, args}` pair in their own MCP
-config (`~/.codex/config.toml` under `[mcp_servers.spike]`, Windsurf's
-`mcp_config.json` under `mcpServers`) — the command and args never change, only
-the file they go in.
-
-Either way the agent gets one tool, `qa_run`.
+For Claude Code: `claude mcp add --scope user spike -- spike mcp`. Either way the agent gets the tools listed above.
 
 **As a Claude Code plugin** — one install adds the tool and the skill that tells the agent when to use it (you still need `npm i -g spike-agent` so the `spike` command exists):
 
@@ -437,20 +371,32 @@ Reading mail needs one extra package: `npm install imapflow`. It is optional, so
 
 ```
 src/
-├─ ports/        BrowserPort (CdpBrowser + ExtensionBrowser real) · NanoPort (localhost runner page)
-├─ chrome/       Chrome process management (launch/attach/reuse)
-├─ capture/      a11y tree extraction · console+network capture · CDP logpoints
-├─ router/       model ladder: adapters (nano, google-cli, byok-gemini, ollama) + escalation
-├─ driver/       the loop: planner prompt, action schema, execute/retry policies
-├─ report/       report.json contract + artifacts (screenshots) on disk
-├─ engine.ts     qaRun() — the single core
-├─ mcp-server.ts MCP stdio transport (tool: qa_run)
-└─ cli.ts        spike run | mcp | nano | fixture | config
+├─ cli.ts         the `spike` command (run, check, map, tests, suite, schedule, watch, ci, setup, dashboard, …)
+├─ engine.ts      qaRun() — the single core
+├─ mcp-server.ts  MCP stdio transport (qa_run, site_check, tests_run, runs_list, run_get)
+├─ ports/         BrowserPort (CDP, extension, Playwright) · NanoPort (localhost runner page)
+├─ chrome/        Chrome process management (launch/attach/reuse)
+├─ capture/       a11y tree extraction · console+network capture · CDP logpoints
+├─ router/        model ladder: adapters (nano, CLI, BYOK, ollama) + escalation
+├─ driver/        the loop: navigator/brain prompts, action schema, spec decomposition
+├─ assertions/    deterministic oracles (invariants, metamorphic, differential)
+├─ discovery/     site map, page-health check, coverage
+├─ recorder/      saved tests, replay, self-heal, tests admin
+├─ report/        report.json contract + artifacts (screenshots) on disk
+├─ orchestrator/  batch fan-out and spending limits
+├─ schedule/      schedules, watch mode, notifications
+├─ ci/            pull-request runs and comments
+├─ setup/         `spike setup`: agent detection, skill text, per-agent writers
+├─ dashboard/     Spike home (local web page)
+├─ login/ auth/ vault/ email/ openapi/ bench/   sign-in capture, TOTP, secrets, inbox, API check, model bench
+├─ bridge/ extension/ vibe/   extension bridge, lite engine, side-panel service
+└─ service/       autostart install for Spike Core
+extension/       MV3 Chrome extension (side panel)
+plugin/          Claude Code plugin files (generated)
 fixture/         dogfood shop app with a toggleable checkout bug
-test/            60+ suites (fast + browser buckets) + e2e.run-fixture.ts (the oracle) —
-                 run `node scripts/run-tests.mjs --list` for the current breakdown
+test/            fast + browser suites — `node scripts/run-tests.mjs --list` for the breakdown
 spikes/          frozen de-risking spikes (never imported by src/)
-docs/            product doc · architecture explainer · research
+docs/            product doc · architecture explainer · plans · research
 ```
 
 ## Workflow

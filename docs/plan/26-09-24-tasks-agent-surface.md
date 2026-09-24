@@ -1,5 +1,5 @@
 > Source audit: [26-09-24-audit-agent-surface](./26-09-24-audit-agent-surface.md)
-> Updated: 26-09-24 · 0/56 done
+> Updated: 26-09-25 · 54/56 done
 
 ## Execution protocol (for the agent working this list)
 
@@ -70,7 +70,7 @@ Work the list **top to bottom** (severity order). For every task:
 - [x] **(A13, P2)** `spike check --try-controls` (trusted named target only): clicks controls that aren't destructive — skip labels matching `/buy|pay|checkout|place order|delete|remove|cancel|unsubscribe|log ?out|sign ?out|transfer|send/i` and never submit forms containing password or payment fields — so `dead-interaction`/`inert-submit` can fire; passing discovered flows are saved as tests tagged `check`. **Test:** fast suite — the deny list filters a fixture control set.
 - [x] **(A13, P2)** Until `--try-controls` is the default, `check`'s help text, README and result line call it a "page health scan" ("Looked at N pages without clicking anything — add --try-controls to press buttons too").
 - [x] **(A14, P2)** Authenticator codes: `src/auth/totp.ts` (RFC 6238: HMAC-SHA1, 30 s, 6 digits, base32 secret) verified against the RFC test vectors; `{{totp:NAME}}` resolves at type-time from vault secret `TOTP_<NAME>` (stored via `spike secret set TOTP_<NAME> <base32>`), redacted everywhere a typed secret is; one navigator-prompt line explains it (default: command-line and desktop-helper paths only; in-browser mode says "authenticator codes need the desktop helper"). **Test:** fast suite — RFC vectors; typed step record shows `•••`.
-- [ ] **(A15, P2)** README for the CLI vertical: Getting Started leads with `npm i -g spike-agent && spike setup`, from-source moves to CONTRIBUTING; commands table adds `check`, `dashboard`, `setup`, `tests`, `schedule`, `watch`, `ci`; fix `map` ("walks the site in a real Chrome"); refresh the project-structure section; replace the manual MCP snippets with `spike setup` (keep one manual fallback snippet using `spike mcp`, not a repo path).
+- [x] **(A15, P2)** README for the CLI vertical: Getting Started leads with `npm i -g spike-agent && spike setup`, from-source moves to CONTRIBUTING; commands table adds `check`, `dashboard`, `setup`, `tests`, `schedule`, `watch`, `ci`; fix `map` ("walks the site in a real Chrome"); refresh the project-structure section; replace the manual MCP snippets with `spike setup` (keep one manual fallback snippet using `spike mcp`, not a repo path).
 - [x] **(A16, P2)** `spike check` cap note is transport-aware (`src/discovery/site-check.ts:27,130`): the terminal says "Stopped after 20 pages — raise it with --max-pages"; the lite note stays for in-browser checks only. **Test:** fast suite — each transport's summary line.
 
 ## Suggested enhancements

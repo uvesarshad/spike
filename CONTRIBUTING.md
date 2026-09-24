@@ -16,9 +16,32 @@ and `dist/mcp-server.js` — most suites (and the CLI itself) expect a fresh
 build before you run them.
 
 Requires Node 20+ and, for anything that drives a real browser, desktop
-Chrome 138+ (148+ for multimodal Nano). See `README.md` → "Getting started"
-for the fixture-app walkthrough and `docs/overview.md` for the full
-architecture tour — read that before making any non-trivial change.
+Chrome 138+ (148+ for multimodal Nano). `docs/overview.md` has the full
+architecture tour — read it before making any non-trivial change.
+
+### Running from a source checkout
+
+There is no `spike` on your PATH until you link it, so either run
+`node dist/cli.js <command>` (every command in the README works this way), or
+`npm link` once to get a `spike` command that follows your build.
+
+Try it against the built-in fixture app (an intentionally broken shop):
+
+```
+node dist/cli.js fixture --bug on        # terminal 1
+node dist/cli.js run "log in as test@test.com with password pw and complete checkout" \
+  --url http://localhost:9401/login      # terminal 2
+```
+
+To register your checkout with a coding agent, use the built server directly
+(no global install needed):
+
+```
+claude mcp add spike -- node /path/to/repo/dist/mcp-server.js
+```
+
+Optional $0 on-device model: `node dist/cli.js nano --check`, then `nano --download`.
+On Windows use PowerShell with the same commands (line continuation is a backtick).
 
 ## Before you open a PR — the gate sequence
 
