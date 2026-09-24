@@ -372,7 +372,7 @@ export function listScripts(root = process.cwd()): string[] {
   if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
-    .filter((f) => f.endsWith('.json'))
+    .filter((f) => f.endsWith('.json') && !f.endsWith('.candidate.json'))
     .map((f) => path.join(dir, f));
 }
 

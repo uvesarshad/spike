@@ -24,6 +24,7 @@ import { runSuite, filterByTags, filterByString, parseShard, shardEntries, type 
 import { isSuiteReporter, writeSuiteReport, SUITE_REPORTERS } from './suite/reporters.js';
 import { DEFAULT_BASELINE_DIR, blessBaseline } from './assertions/differential.js';
 import { runChangedPages } from './discovery/run-changed.js';
+import { acceptHeal, listHealCandidates, listSavedTests, quarantineTest, rejectHeal, releaseTest } from './recorder/tests-admin.js';
 import { JobStore } from './schedule/store.js';
 import { isDue, nextDue } from './schedule/when.js';
 import { runJob, startScheduler } from './schedule/scheduler.js';
@@ -405,6 +406,109 @@ program
     process.exit(0);
   });
 
+/* A10: saved tests — list them, park a flaky one, review self-healed changes.
+ * All file logic lives in recorder/tests-admin.ts (tested against a temp dir). */
+const testsCmd = program.command('tests').description('saved tests: list them, park a flaky one, and review changes a self-heal proposed');
+testsCmd
+  .command('list')
+  .description('every saved test with its last result and whether it is parked (a parked test still runs but cannot fail the suite)')
+  .option('--json', 'print JSON', false)
+  .action((opts: { json: boolean }) => {
+    const rows = listSavedTests();
+    // Fold in the old `bless --list` view: which stored baselines are accepted.
+    const baselines: { flow: string; blessed: boolean }[] = [];
+    if (fs.existsSync(DEFAULT_BASELINE_DIR)) {
+      for (const f of fs.readdirSync(DEFAULT_BASELINE_DIR).filter((x) => x.endsWith('.json'))) {
+        try {
+          const b = JSON.parse(fs.readFileSync(path.join(DEFAULT_BASELINE_DIR, f), 'utf8')) as { flow: string; blessedAt?: string };
+          baselines.push({ flow: b.flow, blessed: Boolean(b.blessedAt) });
+        } catch { /* skip */ }
+      }
+    }
+    if (opts.json) {
+      console.log(JSON.stringify({ tests: rows, baselines }, null, 2));
+      return;
+    }
+    if (!rows.length) console.log('No saved tests yet. A passing `spike run` saves one.');
+    for (const r of rows) {
+      const flags = [r.quarantined ? `parked${r.quarantineReason ? ` (${r.quarantineReason})` : ''}` : '', r.hasHealCandidate ? 'change waiting for review' : ''].filter(Boolean);
+      console.log(`${(r.lastResult ?? 'not run yet').padEnd(12)} ${r.name}  ${r.url}${flags.length ? `  [${flags.join('; ')}]` : ''}`);
+    }
+    if (baselines.length) {
+      console.log('\nBaselines:');
+      for (const b of baselines) console.log(`  ${b.blessed ? 'accepted' : 'not yet accepted'}  ${b.flow}`);
+    }
+  });
+testsCmd
+  .command('quarantine')
+  .description('park a flaky test: it still runs and reports, but no longer decides the suite exit code')
+  .argument('<name>', 'saved test name')
+  .option('--reason <text>', 'why (shown in `tests list`)')
+  .action((name: string, opts: { reason?: string }) => {
+    try {
+      quarantineTest(name, opts.reason);
+      console.log(`Parked "${name}". It still runs, but it can no longer fail the suite. Undo with: spike tests release ${name}`);
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
+  });
+testsCmd
+  .command('release')
+  .description('un-park a test so it decides the suite exit code again')
+  .argument('<name>', 'saved test name')
+  .action((name: string) => {
+    try {
+      console.log(releaseTest(name) ? `"${name}" counts again.` : `"${name}" was not parked.`);
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
+  });
+testsCmd
+  .command('review')
+  .description('list changes a self-heal proposed but held back for your review (the old test stays active until you accept)')
+  .action(() => {
+    const items = listHealCandidates();
+    if (!items.length) {
+      console.log('Nothing waiting for review.');
+      return;
+    }
+    for (const c of items) {
+      console.log(`${c.name}  (${c.tier})`);
+      for (const r of c.reasons) console.log(`  why held: ${r}`);
+      console.log(c.changes.split('\n').map((l) => `  ${l}`).join('\n'));
+      for (const e of c.evidencePaths) console.log(`  evidence: ${e}`);
+      console.log(`  accept: spike tests accept ${c.name}    discard: spike tests reject ${c.name}`);
+    }
+  });
+testsCmd
+  .command('accept')
+  .description('apply a held-back heal: the saved test (and its Playwright copy) is rewritten')
+  .argument('<name>', 'saved test name')
+  .action((name: string) => {
+    try {
+      const p = acceptHeal(name);
+      console.log(`Applied. Updated ${p.jsonPath}`);
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
+  });
+testsCmd
+  .command('reject')
+  .description('discard a held-back heal; the saved test stays exactly as it was')
+  .argument('<name>', 'saved test name')
+  .action((name: string) => {
+    try {
+      rejectHeal(name);
+      console.log(`Discarded. "${name}" is unchanged.`);
+    } catch (e) {
+      console.error(e instanceof Error ? e.message : String(e));
+      process.exit(INFRA_ERROR_EXIT_CODE);
+    }
+  });
+
 /** The findings block a person reads after a map. Problems first, then
  * warnings, capped so one broken page does not bury the summary. */
 function renderFindings(findings: AppModelFinding[]): string[] {
@@ -573,6 +677,49 @@ program
       for (const line of renderFindings(findings)) console.log(line);
     }
     process.exit(hasBlockingFindings(findings) ? 1 : exitCodeForVerdict(outcome.verdict));
+  });
+
+/* A9 — `spike ci`: the pull-request front door. Headless, waits for the preview
+ * address, runs the saved tests and/or a site check, writes a Markdown summary
+ * (also to $GITHUB_STEP_SUMMARY) and exits 0 pass / 1 fail / 2 not sure / 3 could
+ * not run. Logic lives in src/ci/ so a test can import it. */
+program
+  .command('ci')
+  .description('run your saved tests and/or a site check against a preview address, for a pull request: waits for it to come up, writes a summary, and exits with the result')
+  .requiredOption('--url <url>', 'the preview address to test')
+  .option('--suite', 'run every saved test', false)
+  .option('--check', 'also walk the site and look at each page', false)
+  .option('--max-pages <n>', 'how many pages the site check looks at', (v) => parseInt(v, 10))
+  .option('--budget <usd>', 'stop once about this much has been spent (default 2)', (v) => parseFloat(v))
+  .option('--storage-state <path>', 'load a saved sign-in first')
+  .option('--wait-for-url <url>', 'wait for this address to answer before starting (default: the preview address)')
+  .option('--wait <seconds>', 'how long to wait for the address (default 180)', (v) => parseInt(v, 10))
+  .option('--summary <file>', 'write the Markdown summary here')
+  .option('--junit <file>', 'write a JUnit XML report here')
+  .option('--comment <file>', 'write the pull-request comment body here')
+  .option('--json', 'machine-readable output', false)
+  .action(async (opts: { url: string; suite: boolean; check: boolean; maxPages?: number; budget?: number; storageState?: string; waitForUrl?: string; wait?: number; summary?: string; junit?: string; comment?: string; json: boolean }) => {
+    const { runCi, writeCiOutputs, renderCiSummary } = await import('./ci/ci.js');
+    const { buildPrComment } = await import('./ci/pr-comment.js');
+    const result = await runCi({
+      url: opts.url,
+      suite: opts.suite,
+      check: opts.check,
+      maxPages: opts.maxPages,
+      budgetUsd: opts.budget && opts.budget > 0 ? opts.budget : 2,
+      storageState: opts.storageState,
+      waitForUrl: opts.waitForUrl,
+      ...(opts.wait && { waitMs: opts.wait * 1000 }),
+      headless: true,
+      progress: opts.json ? undefined : (l: string) => console.error(l),
+    });
+    writeCiOutputs(result, { summary: opts.summary, junit: opts.junit });
+    if (opts.comment) {
+      fs.mkdirSync(path.dirname(path.resolve(opts.comment)), { recursive: true });
+      fs.writeFileSync(opts.comment, buildPrComment(renderCiSummary(result), { runUrl: process.env.SPIKE_CI_RUN_URL }));
+    }
+    console.log(opts.json ? JSON.stringify(result, null, 2) : renderCiSummary(result));
+    process.exit(result.exitCode);
   });
 
 program
