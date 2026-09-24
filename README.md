@@ -259,9 +259,9 @@ What each add-on unlocks:
 | `spike daemon` | Start the vibe-mode daemon: the bridge the extension side panel connects to |
 | `spike map <url> --diff [--run-changed]` | Compare against the last map; on a terminal it asks "Check the N changed pages now?", `--run-changed` does it without asking |
 | `spike schedule add "<when>" <suite\|tag:<t>\|check\|spec:<file>> --url <url> [--budget <$>] [--webhook <url>]` | Save a test to run on a timer (`every 30m`, `hourly`, `daily 09:00`, `weekdays 09:00`, local time). Also `schedule list`, `remove <id>`, `run-now <id>`. Runs while Spike Core (`spike daemon`) is running; a laptop that slept runs a missed test once, not a backlog. You are told only when a test starts or stops failing. A Slack or Discord webhook address gets a readable message (coloured green or red) instead of raw data |
-| `spike ci --url <preview url> [--suite] [--check] [--budget <$>] [--summary <file>] [--junit <file>] [--wait-for-url <url>] [--webhook <url>]` | For pull requests: waits (up to 3 min) for the preview address to answer, runs your saved tests and/or a site check headless with a spend cap (default $2), writes a summary (also to the GitHub run page) and exits 0 pass / 1 fail / 2 not sure / 3 could not run |
+| `spike ci --url <preview url> [--suite] [--check] [--budget <$>] [--summary <file>] [--junit <file>] [--wait-for-url <url>] [--webhook <url>] [--changed-since <ref>]` | For pull requests: waits (up to 3 min) for the preview address to answer, runs your saved tests and/or a site check headless with a spend cap (default $2), writes a summary (also to the GitHub run page) and exits 0 pass / 1 fail / 2 not sure / 3 could not run. `--changed-since main` looks at what git says changed: a docs-or-tests-only change skips the run, a change to specific pages narrows the site check to them, a change to shared code runs everything |
 | `spike login <url> [--out <file>]` | Opens a visible browser window on your site. Sign in any way you like (single sign-on, text-message code, CAPTCHA), press Enter in the terminal, and the sign-in is saved (owner-only) for later runs with `--storage-state`. Nothing is typed for you |
-| `spike watch --url <dev url> [--tag <t>] [--suite <file>] [--on save\|commit] [--paths <glob>]` | Stay in the foreground and re-run your saved tests when your code changes (3 s debounce; one run at a time) |
+| `spike watch --url <dev url> [--tag <t>] [--suite <file>] [--on save\|commit] [--paths <glob>] [--changed]` | Stay in the foreground and re-run your saved tests when your code changes (3 s debounce; one run at a time). `--changed` skips a run when only docs or tests changed |
 | `spike fix <runId>` | Print the fix prompt for a finished run — or with `--apply`, hand it to your coding agent headlessly |
 | `spike secret` | Manage the local encrypted vault — secrets are typed via `{{secret:NAME}}`, never reach any model. For an authenticator app, save its key with `spike secret set TOTP_<NAME> <base32-key>` and write `{{totp:NAME}}` in the task: the current 6-digit code is worked out on your machine and typed at that moment (command line and desktop helper only; the in-browser mode says it needs the desktop helper) |
 | `spike check <url> [--max-pages <n>] [--try-controls]` | Page health scan: walks the site and looks at each page without clicking anything ("Looked at N pages without clicking anything — add --try-controls to press buttons too"). `--try-controls` also presses ordinary buttons so ones that do nothing show up — never anything that buys, pays, deletes, cancels, sends or signs out, and never a form with a password or payment field; passing pages are saved as tests tagged `check`. A run cut short says "Stopped after N pages — raise it with --max-pages" |
@@ -362,6 +362,15 @@ config (`~/.codex/config.toml` under `[mcp_servers.spike]`, Windsurf's
 the file they go in.
 
 Either way the agent gets one tool, `qa_run`.
+
+**As a Claude Code plugin** — one install adds the tool and the skill that tells the agent when to use it (you still need `npm i -g spike-agent` so the `spike` command exists):
+
+```
+/plugin marketplace add uvesarshad/spike
+/plugin install spike@spike
+```
+
+The plugin files live in `plugin/` and `.claude-plugin/`; `npm run build:plugin` regenerates them from the same text `spike setup` uses.
 
 ## Testing pull requests
 

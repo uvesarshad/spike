@@ -1,0 +1,17 @@
+{
+  "name": "spike",
+  "version": "0.0.1",
+  "description": "Browser QA for your coding agent: checks in a real browser that a web change works and returns a short pass/fail verdict.",
+  "author": {
+    "name": "Uves Arshad"
+  },
+  "homepage": "https://github.com/uvesarshad/spike#readme",
+  "repository": "https://github.com/uvesarshad/spike",
+  "license": "Apache-2.0",
+  "keywords": [
+    "browser",
+    "qa",
+    "testing",
+    "mcp"
+  ]
+}

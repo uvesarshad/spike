@@ -748,9 +748,10 @@ program
   .option('--summary <file>', 'write the Markdown summary here')
   .option('--junit <file>', 'write a JUnit XML report here')
   .option('--comment <file>', 'write the pull-request comment body here')
+  .option('--changed-since <ref>', 'only test what changed since this branch or commit (skips the run when only docs or tests changed)')
   .option('--webhook <url>', 'also post the result to this Slack, Discord or other web address')
   .option('--json', 'machine-readable output', false)
-  .action(async (opts: { url: string; suite: boolean; check: boolean; maxPages?: number; budget?: number; storageState?: string; waitForUrl?: string; wait?: number; summary?: string; junit?: string; comment?: string; webhook?: string; json: boolean }) => {
+  .action(async (opts: { url: string; suite: boolean; check: boolean; maxPages?: number; budget?: number; storageState?: string; waitForUrl?: string; wait?: number; summary?: string; junit?: string; comment?: string; webhook?: string; changedSince?: string; json: boolean }) => {
     const { runCi, writeCiOutputs, renderCiSummary } = await import('./ci/ci.js');
     const { buildPrComment } = await import('./ci/pr-comment.js');
     const result = await runCi({
@@ -762,6 +763,7 @@ program
       storageState: opts.storageState,
       waitForUrl: opts.waitForUrl,
       ...(opts.wait && { waitMs: opts.wait * 1000 }),
+      ...(opts.changedSince && { changedSince: opts.changedSince }),
       headless: true,
       progress: opts.json ? undefined : (l: string) => console.error(l),
     });
@@ -1499,7 +1501,8 @@ program
   .option('--paths <glob>', 'only react to changes to files matching this pattern')
   .option('--webhook <url>', 'also POST here when a test starts or stops failing')
   .option('--budget <usd>', 'most the watched runs may spend in 24 hours (default: the unattended limit, $1 unless you changed it)')
-  .action((opts: { url: string; tag?: string; suite?: string; on: string; paths?: string; webhook?: string; budget?: string }) => {
+  .option('--changed', 'skip a run when only docs or tests changed, and say which pages the change touches', false)
+  .action((opts: { url: string; tag?: string; suite?: string; on: string; paths?: string; webhook?: string; budget?: string; changed: boolean }) => {
     let watchCap: number;
     try { watchCap = resolveUnattendedBudget(parseBudgetFlag(opts.budget), loadConfig()) ?? Infinity; } catch (e) { console.error(e instanceof Error ? e.message : String(e)); process.exit(2); }
     const spendLog: Array<{ at: number; usd: number }> = [];
@@ -1510,6 +1513,14 @@ program
     let last: 'pass' | 'fail' | 'uncertain' | null = null;
     const controller = new WatchController({
       run: async () => {
+        if (opts.changed) {
+          try {
+            const { computeChangeScope, realGit } = await import('./change-scope/change-scope.js');
+            const scope = computeChangeScope(realGit(), opts.on === 'commit' ? 'HEAD~1' : undefined);
+            if (scope.skip) { console.log(`Skipped: ${scope.reason}`); return; }
+            console.log(scope.reason);
+          } catch (e) { console.log(e instanceof Error ? e.message : String(e)); }
+        }
         console.log('Change noticed — running your tests…');
         const job = { id: 'watch', kind: opts.tag ? 'tag' : 'suite', target: opts.tag ?? '', url: opts.url, when: 'watch', createdAt: 0, lastRunAt: null, lastVerdict: null, spentTodayUsd: 0 } as const;
         const nowMs = Date.now();

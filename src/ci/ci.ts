@@ -9,6 +9,7 @@ import path from 'node:path';
 import { runSiteCheck, slimSiteCheck, SiteCheckError, type SiteCheckOptions, type SiteCheckResult } from '../discovery/run-check.js';
 import { runTests, type TestsRunDeps, type TestsRunResult } from '../suite/run-tests.js';
 import { worstVerdict, type Verdict } from '../suite/runner.js';
+import { computeChangeScope, type ChangeScope, type GitRunner } from '../change-scope/change-scope.js';
 import { exitCodeForVerdict, INFRA_ERROR_EXIT_CODE } from '../cli-exit-codes.js';
 
 export const DEFAULT_WAIT_MS = 180_000;
@@ -28,6 +29,8 @@ export interface CiOptions {
   waitForUrl?: string;
   waitMs?: number;
   headless?: boolean;
+  /** E7: only test what changed since this branch/commit (per git). */
+  changedSince?: string;
   progress?: (line: string) => void;
 }
 
@@ -38,6 +41,8 @@ export interface CiDeps {
   testsDeps?: TestsRunDeps;
   runSuite?: (o: CiOptions, budgetUsd?: number) => Promise<TestsRunResult>;
   runCheck?: (o: CiOptions, budgetUsd?: number) => Promise<SiteCheckResult>;
+  /** E7: runs `git` for the change scope (tests stub it). */
+  git?: GitRunner;
 }
 
 export interface CiResult {
@@ -50,6 +55,8 @@ export interface CiResult {
   suite?: TestsRunResult;
   check?: { verdict: Verdict; pagesChecked: number; problems: { page: string; what: string }[]; summary: string };
   budgetUsd?: number;
+  /** E7: set when `changedSince` was used. */
+  scope?: Pick<ChangeScope, 'routes' | 'all' | 'skip' | 'reason'>;
 }
 
 export class UrlWaitError extends Error {}
@@ -97,6 +104,19 @@ export async function runCi(opts: CiOptions, deps: CiDeps = {}): Promise<CiResul
   const base: CiResult = { url: opts.url, verdict: 'uncertain', exitCode: INFRA_ERROR_EXIT_CODE, ...(opts.budgetUsd !== undefined && { budgetUsd: opts.budgetUsd }) };
   if (!opts.suite && !opts.check) return { ...base, error: 'Nothing to run — pass --suite and/or --check.' };
 
+  let scope: ChangeScope | undefined;
+  if (opts.changedSince) {
+    try {
+      const git = deps.git ?? (await import('../change-scope/change-scope.js')).realGit();
+      scope = computeChangeScope(git, opts.changedSince);
+    } catch (e) {
+      return { ...base, error: e instanceof Error ? e.message : String(e) };
+    }
+    base.scope = { routes: scope.routes, all: scope.all, skip: scope.skip, reason: scope.reason };
+    opts.progress?.(scope.reason);
+    if (scope.skip) return { ...base, verdict: 'pass', exitCode: exitCodeForVerdict('pass') };
+  }
+
   const wait = opts.waitForUrl ?? opts.url;
   opts.progress?.(`Waiting for ${wait} to answer…`);
   try {
@@ -129,6 +149,7 @@ export async function runCi(opts: CiOptions, deps: CiDeps = {}): Promise<CiResul
         ? deps.runCheck(opts, share)
         : runSiteCheck(opts.url, {
             ...(opts.maxPages && { maxPages: opts.maxPages }),
+            ...(scope && !scope.all && scope.routes.length && { onlyPaths: scope.routes }),
             ...(opts.storageState && { storageState: opts.storageState }),
             ...(opts.headless !== undefined && { headless: opts.headless }),
             ...(share !== undefined && { budgetUsd: share }),
@@ -160,6 +181,7 @@ export function renderCiSummary(r: CiResult): string {
     return `${out.join('\n')}\n`;
   }
   out.push(`**${ICON[r.verdict]}** on ${r.url}`, '');
+  if (r.scope) out.push(r.scope.skip ? `Nothing was tested: ${r.scope.reason}` : `Scoped to what changed. ${r.scope.reason}`, '');
   if (r.suite) {
     out.push(`### Saved tests — ${r.suite.summary}`, '');
     if (r.suite.tests.length) {

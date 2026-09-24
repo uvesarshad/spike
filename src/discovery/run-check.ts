@@ -3,6 +3,7 @@
  * — not in cli.ts — so both front doors run the SAME code. Browser/model work
  * is injected (`buildMap`, `runPage`) so it is testable without Chrome. */
 
+import { anyRouteMatches } from '../change-scope/change-scope.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -149,6 +150,8 @@ export interface SiteCheckOptions {
   stopOnFail?: boolean;
   /** A10: how many steps one page's look may take. */
   stepsPerPage?: number;
+  /** E7: only look at pages whose path matches one of these route patterns (`/a/:id`, `/a/**`). No match at all → look at everything. */
+  onlyPaths?: string[];
   progress?: (line: string) => void;
 }
 
@@ -211,7 +214,12 @@ export async function runSiteCheck(url: string, opts: SiteCheckOptions = {}, dep
   }
   (deps.saveModel ?? ((m: AppModel) => saveAppModel(m, process.cwd())))(model);
 
-  const targets = checkTargets(model, url, maxPages);
+  let targets = checkTargets(model, url, maxPages);
+  if (opts.onlyPaths?.length) {
+    const scoped = checkTargets(model, url, Number.MAX_SAFE_INTEGER).filter((t) => anyRouteMatches(opts.onlyPaths as string[], new URL(t.url).pathname)).slice(0, maxPages);
+    if (scoped.length) targets = scoped;
+    else progress?.('None of the changed pages were found on the site, so looking at everything.');
+  }
   if (!targets.length) throw new SiteCheckError('I could not find any pages to look at on that site.');
   const capped = targets.length < checkTargets(model, url, Number.MAX_SAFE_INTEGER).length;
   progress?.(`Found ${targets.length} page${targets.length === 1 ? '' : 's'}. Looking at each one…`);

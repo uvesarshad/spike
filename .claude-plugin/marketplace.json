@@ -1,0 +1,13 @@
+{
+  "name": "spike",
+  "owner": {
+    "name": "Uves Arshad"
+  },
+  "plugins": [
+    {
+      "name": "spike",
+      "source": "./plugin",
+      "description": "Browser QA for your coding agent: checks in a real browser that a web change works and returns a short pass/fail verdict."
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "spike": {
+      "command": "spike",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}

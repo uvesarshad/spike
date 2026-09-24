@@ -38,11 +38,14 @@
     "extension",
     "install",
     "schema",
+    "plugin",
+    ".claude-plugin",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsup && tsup --config tsup.lite.config.ts",
+    "build:plugin": "tsx scripts/build-plugin.ts",
     "build:lite": "tsup --config tsup.lite.config.ts",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
