@@ -16,6 +16,58 @@ export function isSafeRunId(id: unknown): id is string {
   return typeof id === 'string' && id.length > 0 && id.length <= 200 && SAFE_RUN_ID.test(id);
 }
 
+/** Everything the dashboard's run table shows, read from one report.json. */
+export interface RunSummary {
+  runId: string;
+  task: string;
+  url: string;
+  verdict: string;
+  durationMs: number;
+  steps: number;
+  tokenEstimate: number;
+  navigatorCalls?: number;
+  brainCalls?: number;
+  visualCalls?: number;
+  actionCache?: Report['action_cache'];
+  replayMatch?: { name: string; score: number };
+  healed?: boolean;
+  mtimeMs: number;
+}
+
+/** Every readable run with the dashboard's fields (task text NOT redacted — the
+ * saved-test matcher compares it verbatim), newest first. Corrupt reports skipped. */
+export function listRunSummaries(artifactsDir: string): RunSummary[] {
+  if (!fs.existsSync(artifactsDir)) return [];
+  const runs: RunSummary[] = [];
+  for (const entry of fs.readdirSync(artifactsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !SAFE_RUN_ID.test(entry.name)) continue;
+    const reportPath = path.join(artifactsDir, entry.name, 'report.json');
+    try {
+      const stat = fs.statSync(reportPath);
+      const r = JSON.parse(fs.readFileSync(reportPath, 'utf8')) as Report & { replayMatch?: { name: string; score: number }; healed?: boolean };
+      runs.push({
+        runId: r.runId ?? entry.name,
+        task: r.task ?? '',
+        url: r.url ?? '',
+        verdict: r.verdict ?? 'uncertain',
+        durationMs: r.durationMs ?? 0,
+        steps: Array.isArray(r.steps) ? r.steps.length : 0,
+        tokenEstimate: r.tokenEstimate ?? 0,
+        navigatorCalls: r.tokens?.navigatorCalls,
+        brainCalls: r.tokens?.brainCalls,
+        visualCalls: r.tokens?.visualCalls,
+        actionCache: r.action_cache,
+        replayMatch: r.replayMatch,
+        healed: r.healed,
+        mtimeMs: stat.mtimeMs,
+      });
+    } catch {
+      /* missing/corrupt report.json — skip, never break the whole listing */
+    }
+  }
+  return runs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+}
+
 export interface RunListEntry {
   runId: string;
   /** ISO timestamp of the report file. */
@@ -29,28 +81,16 @@ export interface RunListEntry {
 
 /** Every readable run, newest first. A missing/corrupt report is skipped. */
 export function listRuns(artifactsDir: string, limit = Number.MAX_SAFE_INTEGER): RunListEntry[] {
-  if (!fs.existsSync(artifactsDir)) return [];
-  const out: RunListEntry[] = [];
-  for (const entry of fs.readdirSync(artifactsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory() || !SAFE_RUN_ID.test(entry.name)) continue;
-    const reportPath = path.join(artifactsDir, entry.name, 'report.json');
-    try {
-      const stat = fs.statSync(reportPath);
-      const r = JSON.parse(fs.readFileSync(reportPath, 'utf8')) as Partial<Report>;
-      out.push({
-        runId: r.runId ?? entry.name,
-        when: new Date(stat.mtimeMs).toISOString(),
-        url: r.url ?? '',
-        task: redactTaskText(r.task ?? ''),
-        verdict: r.verdict ?? 'uncertain',
-        mtimeMs: stat.mtimeMs,
-      });
-    } catch {
-      /* skip */
-    }
-  }
-  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  return out.slice(0, limit);
+  return listRunSummaries(artifactsDir)
+    .slice(0, limit)
+    .map((r) => ({
+      runId: r.runId,
+      when: new Date(r.mtimeMs).toISOString(),
+      url: r.url,
+      task: redactTaskText(r.task),
+      verdict: (r.verdict || 'uncertain') as Report['verdict'],
+      mtimeMs: r.mtimeMs,
+    }));
 }
 
 /** The full report for one run, or undefined when the id is unsafe/unknown. */

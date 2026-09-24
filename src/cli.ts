@@ -1751,7 +1751,7 @@ program
   .option('--port <n>', 'HTTP port (default 9420, or SPIKE_DASHBOARD_PORT)', (v) => parseInt(v, 10))
   .option('--no-open', 'do not open the browser')
   .option('--host <addr>', 'interface to listen on (default 127.0.0.1 — this machine only)')
-  .action(async (opts: { port?: number; host?: string }) => {
+  .action(async (opts: { port?: number; host?: string; open: boolean }) => {
     const cfg = loadConfig();
     const port = opts.port ?? Number(process.env.SPIKE_DASHBOARD_PORT ?? DASHBOARD_DEFAULT_PORT);
     if (opts.host && !isLoopbackHost(opts.host)) {

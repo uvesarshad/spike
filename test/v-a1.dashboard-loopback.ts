@@ -3,8 +3,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { startDashboard, isLoopbackHost, listDashboardRuns } from '../src/dashboard/server.js';
+import { startDashboard, isLoopbackHost, listDashboardRuns, dashboardReachable } from '../src/dashboard/server.js';
 
 let failed = 0;
 function check(name: string, ok: boolean): void {
@@ -28,4 +29,26 @@ try {
 check('listDashboardRuns finds the run', listDashboardRuns(dir).length === 1);
 check('loopback detection', isLoopbackHost('127.0.0.1') && isLoopbackHost('::1') && !isLoopbackHost('0.0.0.0') && !isLoopbackHost('192.168.1.5'));
 fs.rmSync(dir, { recursive: true, force: true });
+
+// A12: Host guard (DNS rebinding) — a foreign Host header is refused.
+const server2 = await startDashboard(dir, 0);
+try {
+  const port = (server2.address() as AddressInfo).port;
+  const status = (hostHeader: string) =>
+    new Promise<number>((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, path: '/', headers: { Host: hostHeader } }, (res) => {
+        res.resume();
+        resolve(res.statusCode ?? 0);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  check('bad Host header -> 403', (await status('evil.example.com')) === 403);
+  check('bad Host with right name, wrong port -> 403', (await status('localhost:1')) === 403);
+  check('localhost:<port> -> 200', (await status(`localhost:${port}`)) === 200);
+  check('dashboardReachable finds it', await dashboardReachable(port));
+} finally {
+  server2.close();
+}
+check('dashboardReachable false on a dead port', !(await dashboardReachable(1, 200)));
 process.exit(failed ? 1 : 0);

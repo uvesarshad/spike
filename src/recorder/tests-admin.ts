@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { addToQuarantine, isQuarantined, loadQuarantineList, removeFromQuarantine } from '../engine.js';
-import { listDashboardRuns } from '../dashboard/server.js';
+import { listRunSummaries } from '../report/run-store.js';
 import { classifyHeal, type HealTier } from './heal-policy.js';
 import { diffScripts, listScripts, loadScript, saveScript, scriptsDir, type QaScript } from './script.js';
 
@@ -25,7 +25,7 @@ export interface SavedTestRow {
 }
 
 function newestRunFor(script: QaScript, artifactsDir: string): { verdict: string; runId: string } | undefined {
-  const runs = listDashboardRuns(artifactsDir)
+  const runs = listRunSummaries(artifactsDir)
     .filter((r) => r.runId === script.sourceRunId || (r.task === script.task && r.url === script.url))
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
   return runs[0] && { verdict: runs[0].verdict, runId: runs[0].runId };
